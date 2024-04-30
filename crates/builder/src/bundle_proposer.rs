@@ -168,6 +168,9 @@ where
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+	if ops_with_simulations.len() > 0 {
+	    println!("HC bundle_proposer before assemble_context {:?}", ops_with_simulations);
+	}
         let mut context = self
             .assemble_context(ops_with_simulations, balances_by_paymaster)
             .await;
@@ -256,6 +259,8 @@ where
         if op.uo.max_fee_per_gas < required_op_fees.max_fee_per_gas
             || op.uo.max_priority_fee_per_gas < required_op_fees.max_priority_fee_per_gas
         {
+	    println!("HC bundle_proposer skipping skip");
+	    /*
             self.emit(BuilderEvent::skipped_op(
                 self.builder_index,
                 self.op_hash(&op.uo),
@@ -268,6 +273,7 @@ where
                 },
             ));
             return None;
+	    */
         }
 
         // Check if the pvg is enough
@@ -518,6 +524,7 @@ where
         );
 
         // call handle ops with the bundle to filter any rejected ops before sending
+	println!("HC bundle_proposer gas1 {:?} {:?}", gas, context.to_ops_per_aggregator());
         let handle_ops_out = self
             .entry_point
             .call_handle_ops(
@@ -527,6 +534,7 @@ where
             )
             .await
             .context("should call handle ops with candidate bundle")?;
+        println!("HC bundle_proposer gas2 {:?}", handle_ops_out);
         match handle_ops_out {
             HandleOpsOut::Success => Ok(Some(gas)),
             HandleOpsOut::FailedOp(index, message) => {

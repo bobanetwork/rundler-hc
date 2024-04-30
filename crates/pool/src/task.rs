@@ -35,6 +35,7 @@ use crate::{
     mempool::UoPool,
     server::{spawn_remote_mempool_server, LocalPoolBuilder},
 };
+use ethers::types::Address; // FIXME temp
 
 /// Arguments for the pool task.
 #[derive(Debug)]
@@ -54,6 +55,8 @@ pub struct Args {
     pub remote_address: Option<SocketAddr>,
     /// Channel capacity for the chain update channel.
     pub chain_update_channel_capacity: usize,
+    /// FIXME
+    pub from_addr: Address,
 }
 
 /// Mempool task.
@@ -91,7 +94,7 @@ impl Task for PoolTask {
         let mut mempools = HashMap::new();
         for pool_config in &self.args.pool_configs {
             let pool =
-                PoolTask::create_mempool(pool_config, self.event_sender.clone(), provider.clone())
+                PoolTask::create_mempool(pool_config, self.event_sender.clone(), provider.clone(), self.args.from_addr)
                     .await
                     .context("should have created mempool")?;
 
@@ -153,6 +156,7 @@ impl PoolTask {
         pool_config: &PoolConfig,
         event_sender: broadcast::Sender<WithEntryPoint<OpPoolEvent>>,
         provider: Arc<P>,
+	from_addr: Address,
     ) -> anyhow::Result<
         UoPool<
             HourlyMovingAverageReputation,
@@ -189,6 +193,7 @@ impl PoolTask {
             simulate_validation_tracer,
             pool_config.sim_settings,
             pool_config.mempool_channel_configs.clone(),
+	    from_addr,
         );
 
         Ok(UoPool::new(

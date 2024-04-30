@@ -16,3 +16,7 @@
 *.profraw
 .DS_Store
 .helix
+
+hybrid-compute/__pycache__/
+hybrid-compute/addresses.txt
+hybrid-compute/contracts.json

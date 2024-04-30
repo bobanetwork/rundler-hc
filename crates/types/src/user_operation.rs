@@ -49,6 +49,14 @@ impl UserOperation {
         .into()
     }
 
+    /// Hash only the fields needed for HybridCompute key, excluding gas limits and fees
+    pub fn op_hc_hash(&self) -> H256 {
+        keccak256(encode(&[
+            Token::FixedBytes(keccak256(self.pack_for_hc_hash()).to_vec()),
+        ]))
+        .into()
+    }
+
     /// Get the unique identifier for this user operation from its sender
     pub fn id(&self) -> UserOperationId {
         UserOperationId {
@@ -119,6 +127,22 @@ impl UserOperation {
             Token::Uint(self.max_fee_per_gas),
             Token::Uint(self.max_priority_fee_per_gas),
             Token::FixedBytes(hash_paymaster_and_data.to_vec()),
+        ])
+        .into()
+    }
+
+    /// Gets the byte array representation of the user operation to be used as HC key
+    pub fn pack_for_hc_hash(&self) -> Bytes {
+        let hash_init_code = keccak256(self.init_code.clone());
+        let hash_call_data = keccak256(self.call_data.clone());
+        let hash_paymaster_and_data = keccak256(self.paymaster_and_data.clone());
+
+        encode(&[
+            Token::Address(self.sender),
+            Token::Uint(self.nonce),
+            Token::FixedBytes(hash_init_code.to_vec()),
+            Token::FixedBytes(hash_call_data.to_vec()),
+            Token::FixedBytes(hash_paymaster_and_data.to_vec()), // ???
         ])
         .into()
     }

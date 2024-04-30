@@ -173,7 +173,7 @@ where
                         entry_points.clone(),
                         self.args.chain_id,
                         self.pool.clone(),
-                        self.args.eth_api_settings,
+                        self.args.eth_api_settings.clone(),
                         self.args.estimation_settings,
                         self.args.precheck_settings,
                     )

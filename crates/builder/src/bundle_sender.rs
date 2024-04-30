@@ -482,7 +482,8 @@ where
             bundle.entity_updates.len()
         );
         let op_hashes: Vec<_> = bundle.iter_ops().map(|op| self.op_hash(op)).collect();
-        let mut tx = self.entry_point.get_send_bundle_transaction(
+        println!("HC bundle_sender bundle {:?} OH {:?}", bundle, op_hashes);
+	let mut tx = self.entry_point.get_send_bundle_transaction(
             bundle.ops_per_aggregator,
             self.beneficiary,
             bundle.gas_estimate,

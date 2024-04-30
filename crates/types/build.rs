@@ -40,6 +40,8 @@ fn generate_contract_bindings() -> Result<(), Box<dyn error::Error>> {
         abigen_of("VerifyingPaymaster")?,
         abigen_of("NodeInterface")?,
         abigen_of("GasPriceOracle")?,
+        abigen_of("INonceManager")?,
+        abigen_of("HCHelper")?,
     ])
     .build()?
     .write_to_module("src/contracts", false)?;

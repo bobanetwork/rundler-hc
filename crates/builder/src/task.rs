@@ -270,12 +270,13 @@ where
         let entry_point = IEntryPoint::new(self.args.entry_point_address, Arc::clone(&provider));
         let simulate_validation_tracer =
             SimulateValidationTracerImpl::new(Arc::clone(&provider), entry_point.clone());
-        let simulator = SimulatorImpl::new(
+	let simulator = SimulatorImpl::new(
             Arc::clone(&provider),
             entry_point.address(),
             simulate_validation_tracer,
             self.args.sim_settings,
             self.args.mempool_configs.clone(),
+	    signer.address(),
         );
 
         let submit_provider =

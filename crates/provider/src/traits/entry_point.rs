@@ -59,6 +59,7 @@ pub trait EntryPoint: Send + Sync + 'static {
     /// Call the entry point contract's `simulateValidation` function
     async fn simulate_validation(
         &self,
+	from_addr: Address,
         user_op: UserOperation,
         max_validation_gas: u64,
     ) -> anyhow::Result<TypedTransaction>;
@@ -89,4 +90,7 @@ pub trait EntryPoint: Send + Sync + 'static {
         &self,
         revert_data: Bytes,
     ) -> Result<ExecutionResult, String>;
+
+    /// Get the AA nonce for an account. Used for Hybrid Compute
+    async fn get_nonce(&self, address: Address, key: ::ethers::core::types::U256) -> Result<::ethers::core::types::U256, String>;
 }

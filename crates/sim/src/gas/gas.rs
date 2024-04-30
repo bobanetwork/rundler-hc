@@ -77,6 +77,7 @@ pub async fn estimate_pre_verification_gas<P: Provider>(
     chain_id: u64,
     gas_price: U256,
 ) -> anyhow::Result<U256> {
+    println!("HC entering estimate_pre_verification_gas");
     let static_gas = calc_static_pre_verification_gas(full_op, true);
     let dynamic_gas = match chain_id {
         _ if ARBITRUM_CHAIN_IDS.contains(&chain_id) => {
@@ -93,6 +94,8 @@ pub async fn estimate_pre_verification_gas<P: Provider>(
         }
         _ => U256::zero(),
     };
+
+    println!("HC pre_verification_gas {} static {} dynamic", static_gas, dynamic_gas);
 
     Ok(static_gas + dynamic_gas)
 }
@@ -125,6 +128,7 @@ pub async fn calc_required_pre_verification_gas<P: Provider>(
         }
         _ => U256::zero(),
     };
+    //println!("HC gas2 {} {}", static_gas, dynamic_gas);
 
     Ok(static_gas + dynamic_gas)
 }

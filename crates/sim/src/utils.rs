@@ -78,17 +78,20 @@ async fn call_constructor<P: Provider, Args: AbiEncode, Ret: AbiDecode>(
     block_id: Option<BlockId>,
     state_overrides: &spoof::State,
 ) -> anyhow::Result<Ret> {
+    //println!("HC utils.rs call_constructor start");
     let mut data = bytecode.to_vec();
     data.extend(AbiEncode::encode(args));
     let tx = Eip1559TransactionRequest {
         data: Some(data.into()),
         ..Default::default()
     };
+    //println!("HC utils.rs call_constructor before providerCall");
     let error = provider
         .call(&tx.into(), block_id, state_overrides)
         .await
         .err()
         .context("called constructor should revert")?;
+    //println!("HC utils.rs call_constructor after providerCall, error {:?}", error);
     get_revert_data(error).context("should decode revert data from called constructor")
 }
 

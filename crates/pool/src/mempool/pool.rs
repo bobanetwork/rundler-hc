@@ -143,6 +143,7 @@ impl PoolInner {
         op: PoolOperation,
         paymaster_meta: Option<PaymasterMetadata>,
     ) -> MempoolResult<H256> {
+        println!("HC pool add_operation {:?}", op);
         let ret = self.add_operation_internal(Arc::new(op), None, paymaster_meta);
         self.update_metrics();
         ret

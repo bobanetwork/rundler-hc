@@ -23,6 +23,10 @@ use ethers::{
         H256, U256,
     },
 };
+
+use rundler_types::hybrid_compute;
+
+
 use rundler_types::{
     contracts::{
         i_entry_point::{ExecutionResult, FailedOp, IEntryPoint, SignatureValidationFailed},
@@ -45,28 +49,51 @@ where
 
     async fn simulate_validation(
         &self,
+	from_addr: Address,
         user_op: UserOperation,
         max_validation_gas: u64,
     ) -> anyhow::Result<TypedTransaction> {
         let pvg = user_op.pre_verification_gas;
 
-        let tx = self
+        let mut tx = self
             .simulate_validation(user_op)
             .gas(U256::from(max_validation_gas) + pvg)
             .tx;
+	tx.set_from(from_addr); // FIXME - need a cleaner way to get this here.
+	tx.set_gas_price(2000000); // FIXME - shouldn't be hard-coded.
+	println!("HC entry_point.rs s_v {:?} {:?} {:?}", max_validation_gas, pvg, tx);
 
         Ok(tx)
     }
 
+
     async fn call_handle_ops(
         &self,
-        ops_per_aggregator: Vec<UserOpsPerAggregator>,
+        mut ops_per_aggregator: Vec<UserOpsPerAggregator>,
         beneficiary: Address,
         gas: U256,
     ) -> anyhow::Result<HandleOpsOut> {
-        let result = get_handle_ops_call(self, ops_per_aggregator, beneficiary, gas)
+
+        println!("HC entry_point call_handle_ops 1, len {:?}", ops_per_aggregator[0].user_ops.len());
+
+	for (i, uo) in ops_per_aggregator[0].user_ops.clone().iter().enumerate() {
+	  let hc_hash = uo.op_hc_hash();
+          println!("HC call_handle_ops checking idx {} hc_hash {:?}", i, hc_hash);
+
+	  let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
+	  if hc_ent.is_some() {
+	    if hc_ent.clone().unwrap().total_pvg != U256::zero() {
+	      ops_per_aggregator[0].user_ops.insert(i, hc_ent.unwrap().user_op); // FIXME - does the index update correctly?
+            } else {
+	      println!("HC call_handle_ops zeroPVG {:?}", hc_hash);
+	      hybrid_compute::del_hc_ent(hc_hash);
+	    }
+	  }
+        }
+	let result = get_handle_ops_call(self, ops_per_aggregator, beneficiary, gas)
             .call()
             .await;
+        println!("HC entry_point call_handle_ops 2 result{:?}", result);
         let error = match result {
             Ok(()) => return Ok(HandleOpsOut::Success),
             Err(error) => error,
@@ -74,7 +101,7 @@ where
         if let ContractError::Revert(revert_data) = &error {
             if let Ok(FailedOp { op_index, reason }) = FailedOp::decode(revert_data) {
                 match &reason[..4] {
-                    "AA95" => anyhow::bail!("Handle ops called with insufficient gas"),
+                    "AA95" => anyhow::bail!("Handle ops called with insufficient gas; {:?}", gas),
                     _ => return Ok(HandleOpsOut::FailedOp(op_index.as_usize(), reason)),
                 }
             }
@@ -115,7 +142,9 @@ where
         gas: U256,
         spoofed_state: &spoof::State,
     ) -> anyhow::Result<Result<ExecutionResult, String>> {
-        let contract_error = self
+        println!("HC entry_point call_spoofed_simOp op {:?} {:?}", op.sender, op.nonce);
+
+	let contract_error = self
             .simulate_handle_op(op, target, target_call_data)
             .block(block_hash)
             .gas(gas)
@@ -126,16 +155,49 @@ where
             .context("simulateHandleOp succeeded, but should always revert")?;
         let revert_data = eth::get_revert_bytes(contract_error)
             .context("simulateHandleOps should return revert data")?;
+//        println!("HC entry_point call_spoofed_simOp revertData {:?}", revert_data);
         return Ok(self.decode_simulate_handle_ops_revert(revert_data));
     }
 
     fn get_send_bundle_transaction(
         &self,
-        ops_per_aggregator: Vec<UserOpsPerAggregator>,
+        mut ops_per_aggregator: Vec<UserOpsPerAggregator>,
         beneficiary: Address,
         gas: U256,
         gas_fees: GasFees,
     ) -> TypedTransaction {
+
+        println!("HC starting get_send_bundle_transaction, len {}", ops_per_aggregator[0].user_ops.len());
+
+	let mut cleanup_keys:Vec<H256> = Vec::new();
+
+	for (i, uo) in ops_per_aggregator[0].user_ops.clone().iter().enumerate() {
+	  let hc_hash = uo.op_hc_hash();
+          println!("HC send_bundle checking idx {:?} hc_hash {:?}", i, hc_hash);
+	  let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
+	  if hc_ent.is_some() {
+	    if hc_ent.clone().unwrap().total_pvg != U256::zero() {
+
+	      cleanup_keys.push(hc_ent.clone().unwrap().map_key);
+	      ops_per_aggregator[0].user_ops.insert(i, hc_ent.unwrap().user_op); // FIXME - does the index update correctly?
+            } else {
+	      println!("HC get_send_bundle_transaction zeroPVG {:?}", hc_hash);
+              hybrid_compute::del_hc_ent(hc_hash);
+	    }
+	  }
+	}
+
+	if cleanup_keys.len() > 0 {
+	  println!("HC cleanup_keys {:?}", cleanup_keys);
+	  //todo!("insert a deletion operation");
+	}
+
+        println!("HC get_send_bundle_transaction continuing, len {} bundle {:?}",
+	    ops_per_aggregator[0].user_ops.len(),
+	    ops_per_aggregator[0].user_ops,
+	);
+	println!("HC get_send_bundle_transaction beneficiary {:?} gas {:?} maxfees {:?}", beneficiary, gas, gas_fees);
+
         let tx: Eip1559TransactionRequest =
             get_handle_ops_call(self, ops_per_aggregator, beneficiary, gas)
                 .tx
@@ -150,14 +212,23 @@ where
         revert_data: Bytes,
     ) -> Result<ExecutionResult, String> {
         if let Ok(result) = ExecutionResult::decode(&revert_data) {
+            println!("HC decodeSHO OK_result {:?}", result);
             Ok(result)
         } else if let Ok(failed_op) = FailedOp::decode(&revert_data) {
-            Err(failed_op.reason)
+            println!("HC decodeSHO failedOp {:?}", failed_op.reason);
+	    Err(failed_op.reason)
         } else if let Ok(err) = ContractRevertError::decode(&revert_data) {
+            println!("HC decodeSHO errReason {:?}", err.reason);
             Err(err.reason)
         } else {
+            println!("HC decodeSHO errGeneric");
             Err(String::new())
         }
+    }
+
+    async fn get_nonce(&self, address: Address, key: ::ethers::core::types::U256) -> Result<::ethers::core::types::U256, String> {
+        let ret = IEntryPoint::get_nonce(self, address, key).await;
+        Ok(ret.unwrap())
     }
 }
 
@@ -169,8 +240,10 @@ fn get_handle_ops_call<M: Middleware>(
 ) -> FunctionCall<Arc<M>, M, ()> {
     let call =
         if ops_per_aggregator.len() == 1 && ops_per_aggregator[0].aggregator == Address::zero() {
-            entry_point.handle_ops(ops_per_aggregator.swap_remove(0).user_ops, beneficiary)
+            println!("HC get_handle_ops_call will use entry_point.handle_ops");
+	    entry_point.handle_ops(ops_per_aggregator.swap_remove(0).user_ops, beneficiary)
         } else {
+            println!("HC get_handle_ops_call will use entry_point.handle_aggregated_ops");
             entry_point.handle_aggregated_ops(ops_per_aggregator, beneficiary)
         };
     call.gas(gas)

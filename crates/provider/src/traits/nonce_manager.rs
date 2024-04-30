@@ -11,27 +11,17 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use dotenv::dotenv;
-use rundler_dev::{self, DevClients};
+use ethers::types::Address;
+#[cfg(feature = "test-utils")]
+use mockall::automock;
+//use rundler_types::contracts::i_stake_manager::DepositInfo;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    dotenv()?;
-    let clients = DevClients::new_from_env()?;
-    let DevClients {
-        wallet,
-        entry_point,
-        bundler_client,
-        ..
-    } = &clients;
-
-    // simply call the nonce method multiple times
-    for i in 0..10 {
-        println!("Sending op {i}");
-        let op = clients.new_wallet_op(wallet.get_nonce(), 0.into()).await?;
-        let call = entry_point.handle_ops(vec![op], bundler_client.address());
-        rundler_dev::await_mined_tx(call.send(), "send user operation").await?;
-    }
-
-    Ok(())
+/// Trait for interacting with an stake manager contract.
+/// Implemented for the v0.6 version of the stake manager contract.
+/// [Contracts can be found here](https://github.com/eth-infinitism/account-abstraction/tree/v0.6.0).
+#[cfg_attr(feature = "test-utils", automock)]
+#[async_trait::async_trait]
+pub trait NonceManager: Send + Sync + 'static {
+    /// Get the deposit info from address
+    async fn get_nonce(&self, address: Address, key: ::ethers::core::types::U256) -> anyhow::Result<::ethers::core::types::U256>;
 }

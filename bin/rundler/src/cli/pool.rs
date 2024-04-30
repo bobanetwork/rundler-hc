@@ -25,6 +25,8 @@ use tokio::sync::broadcast;
 use super::CommonArgs;
 use crate::cli::json::get_json_config;
 
+use ethers::types::Address;
+
 const REQUEST_CHANNEL_CAPACITY: usize = 1024;
 const BLOCK_CHANNEL_CAPACITY: usize = 1024;
 
@@ -117,6 +119,13 @@ pub struct PoolArgs {
         default_value = "10"
     )]
     pub throttled_entity_live_blocks: u64,
+
+    #[arg(
+        long = "pool.from_addr",
+        name = "pool.from_addr",
+        env = "POOL_FROM_ADDR"
+    )]
+    pub from_addr_str: Option<String>,
 }
 
 impl PoolArgs {
@@ -171,6 +180,7 @@ impl PoolArgs {
             })
             .collect::<anyhow::Result<Vec<PoolConfig>>>()?;
 
+        let from_addr = self.from_addr_str.as_ref().expect("Must supply from_addr").parse::<Address>().unwrap();
         Ok(PoolTaskArgs {
             chain_id: common.chain_id,
             chain_history_size: self
@@ -184,6 +194,7 @@ impl PoolArgs {
             pool_configs,
             remote_address,
             chain_update_channel_capacity: self.chain_update_channel_capacity.unwrap_or(1024),
+	    from_addr,
         })
     }
 }

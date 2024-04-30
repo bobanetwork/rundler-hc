@@ -94,8 +94,10 @@ pub trait GasEstimator: Send + Sync + 'static {
 #[derive(Debug)]
 pub struct GasEstimatorImpl<P, E> {
     chain_id: u64,
-    provider: Arc<P>,
-    entry_point: E,
+    /// FIXME - Used by HybridCompute
+    pub provider: Arc<P>,
+    /// FIXME - Used by HybridCompute
+    pub entry_point: E,
     settings: Settings,
     fee_estimator: FeeEstimator<P>,
 }
@@ -107,6 +109,7 @@ impl<P: Provider, E: EntryPoint> GasEstimator for GasEstimatorImpl<P, E> {
         op: UserOperationOptionalGas,
         state_override: spoof::State,
     ) -> Result<GasEstimate, GasEstimationError> {
+	//println!("HC entering estimate_op_gas, op {:?}", op);
         let Self {
             provider, settings, ..
         } = self;
@@ -132,19 +135,34 @@ impl<P: Provider, E: EntryPoint> GasEstimator for GasEstimatorImpl<P, E> {
             pre_verification_gas,
             ..op.into_user_operation(settings)
         };
+	//println!("HC est3a new_op {:?}", op);
 
         let verification_future =
             self.binary_search_verification_gas(&op, block_hash, &state_override);
+
         let call_future = self.estimate_call_gas(&op, block_hash, state_override.clone());
 
         // Not try_join! because then the output is nondeterministic if both
         // verification and call estimation fail.
         let timer = std::time::Instant::now();
         let (verification_gas_limit, call_gas_limit) = join!(verification_future, call_future);
+/*
+	//println!("HC before verification_gas_limit");
+	let verification_gas_limit = verification_future.await;
+	println!("HC verification_gas_limit {:?}", verification_gas_limit);
+
+	std::thread::sleep(std::time::Duration::from_secs(1));
+	println!("HC before call_gas_limit");
+	let call_gas_limit = call_future.await;
+*/
         tracing::debug!("gas estimation took {}ms", timer.elapsed().as_millis());
 
         let verification_gas_limit = verification_gas_limit?;
+	println!("HC verification_gas_limit {:?}", verification_gas_limit);
         let call_gas_limit = call_gas_limit?;
+
+	println!("HC call_gas_limit {:?}", call_gas_limit);
+	std::thread::sleep(std::time::Duration::from_millis(250));
 
         if let Some(err) = settings.validate() {
             return Err(GasEstimationError::RevertInValidation(err));
@@ -201,6 +219,9 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
             call_gas_limit: 0.into(),
             ..op.clone()
         };
+
+	println!("HC estimation.rs initial_op {:?}", initial_op.clone());
+
         let gas_used = utils::get_gas_used(
             self.provider.deref(),
             self.entry_point.address(),
@@ -213,6 +234,8 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
         )
         .await
         .context("failed to run initial guess")?;
+	println!("HC estimation.rs SimulateHandleOp initial guess gas_used {}", gas_used);
+
         if gas_used.success {
             Err(anyhow!(
                 "simulateHandleOp succeeded but should always revert, make sure the entry point contract is deployed and the address is correct"
@@ -223,7 +246,8 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
             .decode_simulate_handle_ops_revert(gas_used.result)
             .err()
         {
-            return Err(GasEstimationError::RevertInValidation(message));
+           println!("HC GasEstimationError {}", message);
+           return Err(GasEstimationError::RevertInValidation(message));
         }
 
         let run_attempt_returning_error = |gas: u64| async move {
@@ -239,7 +263,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
             let error_message = self
                 .entry_point
                 .call_spoofed_simulate_op(
-                    op,
+                    op.clone(),
                     Address::zero(),
                     Bytes::new(),
                     block_hash,
@@ -248,6 +272,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                 )
                 .await?
                 .err();
+	println!("HC binary search call_spoofed_simulate_op {:?} err={:?}", op.verification_gas_limit, error_message);
 
             if let Some(error_message) = error_message {
                 if error_message.contains("AA13")
@@ -258,7 +283,10 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                 {
                     // This error occurs when out of gas, return false.
                     Ok(false)
-                } else {
+                } else if error_message.contains("AA51") {
+		  println!("HC AA51 at {:?}", op.verification_gas_limit);
+		  Ok(false)
+		} else {
                     // This is a different error, return it
                     Err(GasEstimationError::RevertInValidation(error_message))
                 }
@@ -278,6 +306,8 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
         }
         let mut guess = gas_used.gas_used.as_u64() * 2;
         let mut num_rounds = 0;
+
+	//println!("HC ----- before gas estimation loop");
         while (min_success_gas as f64) / (max_failure_gas as f64)
             > (1.0 + GAS_ESTIMATION_ERROR_MARGIN)
         {
@@ -289,6 +319,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
             }
             guess = (max_failure_gas + min_success_gas) / 2;
         }
+	//println!("HC ----- after gas estimation loop");
 
         tracing::debug!(
             "binary search for verification gas took {num_rounds} rounds, {}ms",
@@ -304,6 +335,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
         block_hash: H256,
         mut state_override: spoof::State,
     ) -> Result<U256, GasEstimationError> {
+	std::thread::sleep(std::time::Duration::from_secs(1));
         let timer = std::time::Instant::now();
         // For an explanation of what's going on here, see the comment at the
         // top of `CallGasEstimationProxy.sol`.
@@ -318,6 +350,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
         let moved_entry_point_address: Address = rand::thread_rng().gen();
         let estimation_proxy_bytecode =
             estimation_proxy_bytecode_with_target(moved_entry_point_address);
+        //println!("HC ecg 2a rand_addr {:?} state_override was {:?}", moved_entry_point_address, state_override);
         state_override
             .account(moved_entry_point_address)
             .code(entry_point_code);
@@ -325,12 +358,15 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
             .account(self.entry_point.address())
             .code(estimation_proxy_bytecode);
 
+        //println!("HC ecg 2b state_override now ...");
+
         let callless_op = UserOperation {
             call_gas_limit: 0.into(),
             max_fee_per_gas: 0.into(),
             verification_gas_limit: self.settings.max_verification_gas.into(),
             ..op.clone()
         };
+        println!("HC ecg 3 {:?}", self.settings.max_verification_gas);
 
         let mut min_gas = U256::zero();
         let mut max_gas = U256::from(self.settings.max_call_gas);
@@ -348,6 +384,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                     is_continuation,
                 },),
             );
+	    println!("HC pre ecg 4 {:?}...", callless_op.clone());
             let target_revert_data = self
                 .entry_point
                 .call_spoofed_simulate_op(
@@ -361,7 +398,9 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                 .await?
                 .map_err(GasEstimationError::RevertInCallWithMessage)?
                 .target_result;
+            println!("HC estimate_call_gas revert data {:?}", target_revert_data);
             if let Ok(result) = EstimateCallGasResult::decode(&target_revert_data) {
+	        println!("HC estimation.rs Ok result");
                 num_rounds += result.num_rounds;
                 tracing::debug!(
                     "binary search for call gas took {num_rounds} rounds, {}ms",
@@ -369,7 +408,8 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                 );
                 return Ok(result.gas_estimate);
             } else if let Ok(revert) = EstimateCallGasRevertAtMax::decode(&target_revert_data) {
-                let error = if let Some(message) = eth::parse_revert_message(&revert.revert_data) {
+               println!("HC estimation.rs RevertAtMax");
+               let error = if let Some(message) = eth::parse_revert_message(&revert.revert_data) {
                     GasEstimationError::RevertInCallWithMessage(message)
                 } else {
                     GasEstimationError::RevertInCallWithBytes(revert.revert_data)
@@ -378,6 +418,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
             } else if let Ok(continuation) =
                 EstimateCallGasContinuation::decode(&target_revert_data)
             {
+	        println!("HC estimation.rs Ok continuation");
                 if is_continuation
                     && continuation.min_gas <= min_gas
                     && continuation.max_gas >= max_gas
@@ -393,7 +434,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                 max_gas = max_gas.min(continuation.max_gas);
                 num_rounds += continuation.num_rounds;
             } else {
-                Err(anyhow!(
+               Err(anyhow!(
                     "estimateCallGas revert should be a Result or a Continuation"
                 ))?;
             }
@@ -405,6 +446,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
         op: &UserOperationOptionalGas,
         gas_price: U256,
     ) -> Result<U256, GasEstimationError> {
+        println!("HC in estimate_pre_verification_gas gas_price {:?}", gas_price);
         Ok(gas::estimate_pre_verification_gas(
             &op.max_fill(&self.settings),
             &op.random_fill(&self.settings),

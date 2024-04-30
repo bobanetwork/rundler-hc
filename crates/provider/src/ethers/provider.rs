@@ -67,6 +67,7 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         block: Option<BlockId>,
         state_overrides: &spoof::State,
     ) -> ProviderResult<Bytes> {
+        println!("HC state_override {:?}", state_overrides);
         let mut call = self.call_raw(tx).state(state_overrides);
         if let Some(block) = block {
             call = call.block(block);
@@ -116,6 +117,7 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         tx_hash: TxHash,
         trace_options: GethDebugTracingOptions,
     ) -> ProviderResult<GethTrace> {
+        println!("HC debug_trace_transaction");
         Ok(Middleware::debug_trace_transaction(self, tx_hash, trace_options).await?)
     }
 
@@ -125,6 +127,7 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         block_id: Option<BlockId>,
         trace_options: GethDebugTracingCallOptions,
     ) -> ProviderResult<GethTrace> {
+        println!("HC debug_trace_call {:?}", tx);
         Ok(Middleware::debug_trace_call(self, tx, block_id, trace_options).await?)
     }
 

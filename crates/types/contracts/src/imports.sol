@@ -9,3 +9,4 @@ import "account-abstraction/samples/VerifyingPaymaster.sol";
 import "account-abstraction/core/EntryPoint.sol";
 import "account-abstraction/interfaces/IAggregator.sol";
 import "account-abstraction/interfaces/IStakeManager.sol";
+import "account-abstraction/core/HCHelper.sol";

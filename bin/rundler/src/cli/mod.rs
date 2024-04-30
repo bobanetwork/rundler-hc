@@ -31,6 +31,8 @@ use rundler_sim::{
     EstimationSettings, PrecheckSettings, PriorityFeeMode, SimulationSettings, MIN_CALL_GAS_LIMIT,
 };
 
+use ethers::types::{Address, H256};
+
 /// Main entry point for the CLI
 ///
 /// Parses the CLI arguments and runs the appropriate subcommand.
@@ -258,6 +260,35 @@ pub struct CommonArgs {
         default_value = "1"
     )]
     pub num_builders: u64,
+
+    #[arg(
+        long = "hc_helper_addr",
+        name = "hc_helper_addr",
+        env = "HC_HELPER_ADDR",
+    )]
+    hc_helper_addr: Address,
+
+    #[arg(
+        long = "hc_sys_account",
+        name = "hc_sys_account",
+        env = "HC_SYS_ACCOUNT",
+    )]
+    hc_sys_account: Address,
+
+    #[arg(
+        long = "hc_sys_owner",
+        name = "hc_sys_owner",
+        env = "HC_SYS_OWNER",
+    )]
+    hc_sys_owner: Address,
+
+    #[arg(
+        long = "hc_sys_privkey",
+        name = "hc_sys_privkey",
+        env = "HC_SYS_PRIVKEY",
+    )]
+    hc_sys_privkey: H256,
+
 }
 
 const SIMULATION_GAS_OVERHEAD: u64 = 100_000;
@@ -325,7 +356,14 @@ impl From<&CommonArgs> for SimulationSettings {
 
 impl From<&CommonArgs> for EthApiSettings {
     fn from(value: &CommonArgs) -> Self {
-        Self::new(value.user_operation_event_block_distance)
+	Self::new(
+	    value.user_operation_event_block_distance,
+	    value.hc_helper_addr,
+	    value.hc_sys_account,
+	    value.hc_sys_owner,
+	    value.hc_sys_privkey,
+	    value.node_http.clone().expect("node_http must be supplied for HC"),
+	)
     }
 }
 

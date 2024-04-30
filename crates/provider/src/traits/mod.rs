@@ -31,6 +31,11 @@ mod stake_manager;
 pub use stake_manager::MockStakeManager;
 pub use stake_manager::StakeManager;
 
+mod nonce_manager;
+#[cfg(feature = "test-utils")]
+pub use nonce_manager::MockNonceManager;
+pub use nonce_manager::NonceManager;
+
 mod paymaster_helper;
 #[cfg(feature = "test-utils")]
 pub use paymaster_helper::MockPaymasterHelper;

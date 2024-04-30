@@ -106,6 +106,7 @@ pub trait SimulateValidationTracer: Send + Sync + 'static {
     /// Traces the simulation of a user operation.
     async fn trace_simulate_validation(
         &self,
+	from_addr: Address,
         op: UserOperation,
         block_id: BlockId,
         max_validation_gas: u64,
@@ -134,15 +135,17 @@ where
 {
     async fn trace_simulate_validation(
         &self,
+	from_addr: Address,
         op: UserOperation,
         block_id: BlockId,
         max_validation_gas: u64,
     ) -> anyhow::Result<SimulationTracerOutput> {
         let tx = self
             .entry_point
-            .simulate_validation(op, max_validation_gas)
+            .simulate_validation(from_addr, op.clone(), max_validation_gas)
             .await?;
 
+	println!("HC trace2 pre {:?} {:?} {:?}", op, self.entry_point.address(), tx);
         SimulationTracerOutput::try_from(
             self.provider
                 .debug_trace_call(

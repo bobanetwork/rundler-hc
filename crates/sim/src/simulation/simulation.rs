@@ -143,6 +143,7 @@ pub struct SimulatorImpl<P: Provider, T: SimulateValidationTracer> {
     sim_settings: Settings,
     mempool_configs: HashMap<H256, MempoolConfig>,
     allow_unstaked_addresses: HashSet<Address>,
+    from_addr: Address,
 }
 
 impl<P, T> SimulatorImpl<P, T>
@@ -161,6 +162,7 @@ where
         simulate_validation_tracer: T,
         sim_settings: Settings,
         mempool_configs: HashMap<H256, MempoolConfig>,
+	from_addr: Address,
     ) -> Self {
         // Get a list of entities that are allowed to act as staked entities despite being unstaked
         let mut allow_unstaked_addresses = HashSet::new();
@@ -181,6 +183,7 @@ where
             sim_settings,
             mempool_configs,
             allow_unstaked_addresses,
+	    from_addr,
         }
     }
 
@@ -199,9 +202,10 @@ where
         let factory_address = op.factory();
         let sender_address = op.sender;
         let paymaster_address = op.paymaster();
+	println!("HC simulation.rs create_context {:?}", op.clone());
         let tracer_out = self
             .simulate_validation_tracer
-            .trace_simulate_validation(op.clone(), block_id, self.sim_settings.max_verification_gas)
+            .trace_simulate_validation(self.from_addr, op.clone(), block_id, self.sim_settings.max_verification_gas)
             .await?;
         let num_phases = tracer_out.phases.len() as u32;
         // Check if there are too many phases here, then check too few at the
@@ -323,7 +327,7 @@ where
             initcode_length,
             ..
         } = context;
-
+	println!("HC trace {:?}", tracer_out);
         let mut violations = vec![];
 
         if entry_point_out.return_info.sig_failed {

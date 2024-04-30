@@ -44,3 +44,5 @@ pub use user_operation::UserOperationId;
 
 mod storage;
 pub use storage::StorageSlot;
+
+pub mod hybrid_compute;

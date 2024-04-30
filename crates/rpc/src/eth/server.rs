@@ -42,6 +42,8 @@ where
         entry_point: Address,
         state_override: Option<spoof::State>,
     ) -> RpcResult<GasEstimate> {
+        //println!("HC server.rs est_userOp_gas state {:?}", state_override);
+
         Ok(EthApi::estimate_user_operation_gas(self, op, entry_point, state_override).await?)
     }
 

@@ -11,10 +11,18 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-//! Provider implementations using [ethers-rs](https://github.com/gakonst/ethers-rs)
+use anyhow::Result;
+use ethers::{providers::Middleware, types::Address};
+use rundler_types::{contracts::i_nonce_manager::INonceManager};
 
-mod entry_point;
-mod paymaster_helper;
-mod provider;
-mod stake_manager;
-mod nonce_manager;
+use crate::NonceManager;
+
+#[async_trait::async_trait]
+impl<M> NonceManager for INonceManager<M>
+where
+    M: Middleware + 'static,
+{
+    async fn get_nonce(&self, address: Address, key: ::ethers::core::types::U256) -> Result<::ethers::core::types::U256> {
+        Ok(INonceManager::get_nonce(self, address, key).await?)
+    }
+}
