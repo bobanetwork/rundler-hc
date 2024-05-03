@@ -32,6 +32,7 @@ use rundler_sim::{
 };
 
 use ethers::types::{Address, H256};
+use rundler_types::hybrid_compute;
 
 /// Main entry point for the CLI
 ///
@@ -49,6 +50,16 @@ pub async fn run() -> anyhow::Result<()> {
         &opt.metrics.tags,
     )
     .context("metrics server should start")?;
+
+    hybrid_compute::init(
+        opt.common.hc_helper_addr,
+        opt.common.hc_sys_account,
+        opt.common.hc_sys_owner,
+        opt.common.hc_sys_privkey,
+        opt.common.entry_points[0].parse::<Address>().expect("Must provide an entry_point"),
+        opt.common.chain_id,
+        opt.common.node_http.clone().expect("Must provide node_http"),
+    );
 
     match opt.command {
         Command::Node(args) => node::run(*args, opt.common).await?,
@@ -356,14 +367,7 @@ impl From<&CommonArgs> for SimulationSettings {
 
 impl From<&CommonArgs> for EthApiSettings {
     fn from(value: &CommonArgs) -> Self {
-	Self::new(
-	    value.user_operation_event_block_distance,
-	    value.hc_helper_addr,
-	    value.hc_sys_account,
-	    value.hc_sys_owner,
-	    value.hc_sys_privkey,
-	    value.node_http.clone().expect("node_http must be supplied for HC"),
-	)
+	Self::new(value.user_operation_event_block_distance)
     }
 }
 

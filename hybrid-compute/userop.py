@@ -291,6 +291,7 @@ def TestAddSub2 (a, b):
 
   opHash = {}
   opHash['hash'] = response.json()['result']
+  timeout = True
   for i in range(10):
     print("Waiting for receipt...")
     time.sleep(1)
@@ -300,9 +301,12 @@ def TestAddSub2 (a, b):
       #print("opReceipt", opReceipt)
       assert(opReceipt['receipt']['status'] == "0x1")
       print("operation success", opReceipt['success'])
+      timeout = False
       break
   print("TestCount(end)=", TC.functions.counters(SA.address).call())
-
+  if timeout:
+    print("*** Previous operation timed out")
+    exit(1)
 TestAddSub2(2, 1)   # Success
 TestAddSub2(2, 10) # Underflow error, asserted
 TestAddSub2(2, 3)   # Underflow error, handled internally

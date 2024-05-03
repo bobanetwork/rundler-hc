@@ -56,40 +56,22 @@ use jsonrpsee::{
 use rundler_utils::eth;
 //use std::backtrace::Backtrace;
 /// Settings for the `eth_` API
-#[derive(Clone, Debug)] // FIXME - can't Copy because of hc_node_http string
+#[derive(Clone, Debug)] // FIXME - can't Copy because of hc.node_http string
 pub struct Settings {
     /// The number of blocks to look back for user operation events
     pub user_operation_event_block_distance: Option<u64>,
-
-    /// Address of the HybridCompute Helper contract
-    pub hc_helper_addr: Address,
-    /// Address of the HybridCompute System Account (used to insert system error responses)
-    pub hc_sys_account: Address,
-    /// Owner (signer) for hc_sys_account
-    pub hc_sys_owner: Address,
-    /// Private key for hc_sys_owner
-    pub hc_sys_key: H256,
-    /// FIXME - currently used to create a local eth::new_provider as it's difficult to access the one associated with the default Provider.
-    pub hc_node_http: String,
+    /// HybridCompute info
+    pub hc: hybrid_compute::HcCfg,
 }
 
 impl Settings {
     /// Create new settings for the `eth_` API
     pub fn new(
         block_distance: Option<u64>,
-	hc_helper_addr: Address,
-	hc_sys_account: Address,
-	hc_sys_owner: Address,
-	hc_sys_key: H256,
-	hc_node_http: String, // FIXME - temporary workaround.
     ) -> Self {
         Self {
             user_operation_event_block_distance: block_distance,
-	    hc_helper_addr: hc_helper_addr,
-	    hc_sys_account: hc_sys_account,
-	    hc_sys_owner: hc_sys_owner,
-	    hc_sys_key: hc_sys_key,
-	    hc_node_http: hc_node_http.clone(),
+	    hc: hybrid_compute::HC_CONFIG.lock().unwrap().clone(),
         }
     }
 }
@@ -206,7 +188,7 @@ where
         state_override: Option<spoof::State>,
     ) -> bool {
 	let mut s2 = state_override.clone().unwrap_or_default();
-	let hc_addr = self.settings.hc_helper_addr;
+	let hc_addr = self.settings.hc.helper_addr;
 
 	// Set a 1-byte value which will trigger a special revert code
 	let val_vrfy = "0xff00000000000000000000000000000000000000000000000000000000000002".parse::<Bytes>().unwrap();
@@ -238,9 +220,8 @@ where
 	state_override: Option<spoof::State>,
 	revert_data: &Bytes,
     ) -> Result<GasEstimate, GasEstimationError> {
+
 	let mut s2 = state_override.unwrap_or_default();
-	let hc_addr = self.settings.hc_helper_addr;
-	let err_addr = self.settings.hc_sys_account;
 
 	let es = EstimationSettings {
               max_verification_gas: 0,
@@ -256,10 +237,10 @@ where
 	let n_key:U256 = op.nonce >> 64;
 
 	let hc_nonce = context.gas_estimator.entry_point.get_nonce(op.sender, n_key).await.unwrap();
-	let err_nonce = context.gas_estimator.entry_point.get_nonce(err_addr, n_key).await.unwrap();
+	let err_nonce = context.gas_estimator.entry_point.get_nonce(self.settings.hc.sys_account, n_key).await.unwrap();
 	println!("HC hc_nonce {:?} op_nonce {:?} n_key {:?}", hc_nonce, op.nonce, n_key);
-	let p2 = eth::new_provider(&*self.settings.hc_node_http, None)?;
-	let hx = HH2::new(hc_addr, p2);
+	let p2 = eth::new_provider(&self.settings.hc.node_http, None)?;
+	let hx = HH2::new(self.settings.hc.helper_addr, p2);
 
 	let url = hx.registered_callers(ep_addr).await.expect("url_decode").1;
 	println!("HC registered_caller url {:?}", url);
@@ -301,14 +282,14 @@ where
 	        let hc_res:Bytes = hex::decode(resp_hex).unwrap().into();
 	        println!("HC api.rs do_op result sk {:?} success {:?} res {:?}", sub_key, op_success, hc_res);
 
-                hybrid_compute::external_op(hh, op.sender, hc_nonce, op_success, &hc_res, sub_key, ep_addr, sig_hex, oo_nonce, map_key, self.settings.hc_helper_addr).await;
+                hybrid_compute::external_op(hh, op.sender, hc_nonce, op_success, &hc_res, sub_key, ep_addr, sig_hex, oo_nonce, map_key, &self.settings.hc).await;
             } else {
-	        hybrid_compute::err_op(hh, context.gas_estimator.entry_point.address(), 2, "HC01: Decode Error".to_string(), sub_key, op.sender, hc_nonce, err_nonce, map_key, self.chain_id, self.settings.hc_helper_addr, self.settings.hc_sys_account, self.settings.hc_sys_key).await;
+	        hybrid_compute::err_op(hh, context.gas_estimator.entry_point.address(), 2, "HC01: Decode Error".to_string(), sub_key, op.sender, hc_nonce, err_nonce, map_key, &self.settings.hc).await;
 	    }
 	} else {
 	    println!("HC api.rs calling err_op");
 	    // FIXME - return specific error codes for different failure scenarios
-	    hybrid_compute::err_op(hh, context.gas_estimator.entry_point.address(), 2, "HC01: Unknown Error".to_string(), sub_key, op.sender, hc_nonce, err_nonce, map_key, self.chain_id, self.settings.hc_helper_addr, self.settings.hc_sys_account, self.settings.hc_sys_key).await;
+	    hybrid_compute::err_op(hh, context.gas_estimator.entry_point.address(), 2, "HC01: Unknown Error".to_string(), sub_key, op.sender, hc_nonce, err_nonce, map_key, &self.settings.hc).await;
         }
 
 	let resp_bytes = hybrid_compute::get_hc_op_payload(hh);
@@ -316,14 +297,14 @@ where
         let val = H256::from_low_u64_be((resp_bytes.len() * 2 + 1).try_into().unwrap());
 	println!("HC Store1 {:?} {:?}", key, val);
 
-	s2.account(hc_addr).store(key, val);
+	s2.account(self.settings.hc.helper_addr).store(key, val);
 	key = keccak256(key).into();
 
 	let mut i = 0;
 	while i <resp_bytes.len() {
 	    let next_chunk:H256 = H256::from_slice(&resp_bytes[i..32+i]);
 	    println!("HC Store_next {:?} {:?}", key , next_chunk);
-	    s2.account(hc_addr).store(key, next_chunk);
+	    s2.account(self.settings.hc.helper_addr).store(key, next_chunk);
 	    let u_key:U256 = key.into_uint()+1;
 	    key = H256::from_uint(&u_key);
 	    i += 32;

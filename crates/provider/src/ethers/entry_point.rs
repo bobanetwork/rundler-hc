@@ -55,13 +55,14 @@ where
     ) -> anyhow::Result<TypedTransaction> {
         let pvg = user_op.pre_verification_gas;
 
+        let gas_price = user_op.max_fee_per_gas;
         let mut tx = self
             .simulate_validation(user_op)
             .gas(U256::from(max_validation_gas) + pvg)
             .tx;
 	tx.set_from(from_addr); // FIXME - need a cleaner way to get this here.
-	tx.set_gas_price(2000000); // FIXME - shouldn't be hard-coded.
-	println!("HC entry_point.rs s_v {:?} {:?} {:?}", max_validation_gas, pvg, tx);
+	tx.set_gas_price(gas_price);
+	println!("HC entry_point.rs s_v {:?} {:?} {:?} {:?} gas_price", max_validation_gas, pvg, tx, gas_price);
 
         Ok(tx)
     }
@@ -161,7 +162,7 @@ where
 
     fn get_send_bundle_transaction(
         &self,
-        mut ops_per_aggregator: Vec<UserOpsPerAggregator>,
+        ops_per_aggregator: Vec<UserOpsPerAggregator>,
         beneficiary: Address,
         gas: U256,
         gas_fees: GasFees,
@@ -169,33 +170,6 @@ where
 
         println!("HC starting get_send_bundle_transaction, len {}", ops_per_aggregator[0].user_ops.len());
 
-	let mut cleanup_keys:Vec<H256> = Vec::new();
-
-	for (i, uo) in ops_per_aggregator[0].user_ops.clone().iter().enumerate() {
-	  let hc_hash = uo.op_hc_hash();
-          println!("HC send_bundle checking idx {:?} hc_hash {:?}", i, hc_hash);
-	  let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
-	  if hc_ent.is_some() {
-	    if hc_ent.clone().unwrap().total_pvg != U256::zero() {
-
-	      cleanup_keys.push(hc_ent.clone().unwrap().map_key);
-	      ops_per_aggregator[0].user_ops.insert(i, hc_ent.unwrap().user_op); // FIXME - does the index update correctly?
-            } else {
-	      println!("HC get_send_bundle_transaction zeroPVG {:?}", hc_hash);
-              hybrid_compute::del_hc_ent(hc_hash);
-	    }
-	  }
-	}
-
-	if cleanup_keys.len() > 0 {
-	  println!("HC cleanup_keys {:?}", cleanup_keys);
-	  //todo!("insert a deletion operation");
-	}
-
-        println!("HC get_send_bundle_transaction continuing, len {} bundle {:?}",
-	    ops_per_aggregator[0].user_ops.len(),
-	    ops_per_aggregator[0].user_ops,
-	);
 	println!("HC get_send_bundle_transaction beneficiary {:?} gas {:?} maxfees {:?}", beneficiary, gas, gas_fees);
 
         let tx: Eip1559TransactionRequest =

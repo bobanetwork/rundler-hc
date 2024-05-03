@@ -66,6 +66,46 @@ static HC_MAP: Lazy<Mutex<HashMap<ethers::types::H256, HcEntry>>> = Lazy::new(||
     Mutex::new(m)
 });
 
+#[derive(Clone, Debug)]
+/// Parameters needed for Hybrid Compute, accessed from various modules.
+pub struct HcCfg {
+    /// Helper contract address
+    pub helper_addr: Address,
+    /// HybridAccount used to insert error msgs
+    pub sys_account: Address,
+    /// Owner/signer for sys_account
+    pub sys_owner: Address,
+    /// Private key for sys_account
+    pub sys_privkey: H256,
+    /// EntryPoint contract address (currently only 1 EP is supported)
+    pub entry_point: Address,
+    /// Chain ID
+    pub chain_id: u64,
+    /// Temporary workaround; would be better to use an existing Provider.
+    pub node_http: String,
+}
+
+//pub static mut HC_CONFIG: HcCfg = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:H256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new()};
+
+/// Parameters needed for Hybrid Compute, accessed from various modules.
+pub static HC_CONFIG: Lazy<Mutex<HcCfg>> = Lazy::new(|| {
+   let c = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:H256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new()};
+   Mutex::new(c)
+});
+
+/// Set the HC parameters based on CLI args
+pub fn init(helper_addr: Address, sys_account: Address, sys_owner:Address, sys_privkey:H256, entry_point: Address, chain_id:u64, node_http: String) {
+  let mut cfg = HC_CONFIG.lock().unwrap();
+
+  cfg.helper_addr = helper_addr;
+  cfg.sys_account = sys_account;
+  cfg.sys_owner = sys_owner;
+  cfg.sys_privkey = sys_privkey;
+  cfg.entry_point = entry_point;
+  cfg.chain_id = chain_id;
+  cfg.node_http = node_http.clone();
+
+}
 /// Wrap the response payload into calldata for the HybridAccount + HCHelper contracts
 pub fn make_op_calldata(
     sender: Address,
@@ -89,6 +129,22 @@ pub fn make_err_calldata(
 ) -> Bytes {
     let mut put_data = [0xfdu8, 0xe8, 0x9b, 0x64].to_vec(); // helper "PutSysResponse(bytes32,bytes)" selector
     put_data.extend(AbiEncode::encode((map_key, payload)));
+    let put_bytes : Bytes = put_data.into();
+
+    let mut tmp_data = [0xb6u8, 0x1d, 0x27, 0xf6].to_vec(); // account "execute" selector
+    tmp_data.extend(AbiEncode::encode((sender, U256::zero(), put_bytes)));
+    tmp_data.into()
+}
+
+/// Cleanup to remove any leaked responses at the end of a bundle
+pub fn make_rr_calldata(
+    sender: Address,
+    keys : Vec<H256>,
+) -> Bytes {
+    let mut put_data = [0xcbu8, 0x74, 0x30, 0xae].to_vec(); // helper RemoveResponse(bytes32[])
+//    let mut put_data = [0x10u8, 0x40, 0x4d, 0x34].to_vec(); // helper RemoveResponses(bytes32[])
+
+    put_data.extend(AbiEncode::encode(keys));
     let put_bytes : Bytes = put_data.into();
 
     let mut tmp_data = [0xb6u8, 0x1d, 0x27, 0xf6].to_vec(); // account "execute" selector
@@ -152,7 +208,7 @@ pub async fn external_op(
     sig_hex: String,
     oo_nonce: U256,
     map_key: H256,
-    helper_addr: Address,
+    cfg: &HcCfg,
 ) {
     println!("HC hybrid_compute external_op op_key {:?} response_payload {:?}", op_key, response_payload);
 
@@ -164,7 +220,7 @@ pub async fn external_op(
     let gas_tmp = U256::from(262144);
 
     //let helper_addr = HELPER_ADDR_STR.parse::<Address>().unwrap();
-    let call_data = make_op_calldata(helper_addr, sub_key, Bytes::from(merged_response.to_vec()));
+    let call_data = make_op_calldata(cfg.helper_addr, sub_key, Bytes::from(merged_response.to_vec()));
     println!("HC external_op call_data {:?}", call_data);
 
     let mut new_op:UserOperation = UserOperation{
@@ -199,10 +255,7 @@ pub async fn err_op(
     nn: U256,
     oo_nonce: U256,
     map_key: H256,
-    chain_id: u64,
-    helper_addr: Address,
-    sys_account: Address,
-    sys_privkey: H256,
+    cfg: &HcCfg,
 ) {
     println!("HC hybrid_compute err_op op_key {:?} err_str {:?}", op_key, err_str);
 
@@ -212,11 +265,11 @@ pub async fn err_op(
     let response_payload:Bytes = AbiEncode::encode((src_addr, nn, err_code, err_str)).into();
 
     //let helper_addr = HELPER_ADDR_STR.parse::<Address>().unwrap();
-    let call_data = make_err_calldata(helper_addr, sub_key, Bytes::from(response_payload.to_vec()));
+    let call_data = make_err_calldata(cfg.helper_addr, sub_key, Bytes::from(response_payload.to_vec()));
     println!("HC external_op call_data {:?}", call_data);
 
     let mut new_op:UserOperation = UserOperation{
-        sender: sys_account,
+        sender: cfg.sys_account,
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
 	call_data: call_data.clone(),
@@ -229,10 +282,10 @@ pub async fn err_op(
 	signature: Bytes::new(),
     };
 
-    let key_bytes: Bytes  = sys_privkey.as_fixed_bytes().into();
+    let key_bytes: Bytes  = cfg.sys_privkey.as_fixed_bytes().into();
     let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
-    let hh = new_op.op_hash(entry_point, chain_id);
+    let hh = new_op.op_hash(entry_point, cfg.chain_id);
     println!("HC pre_sign hash {:?}", hh);
 
     let signature = wallet.sign_message(hh).await;
@@ -241,6 +294,53 @@ pub async fn err_op(
 
     let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), total_pvg:U256::zero()};
     HC_MAP.lock().unwrap().insert(op_key, ent);
+}
+
+/// Encapsulate a RemoveResposnes into a UserOperation
+pub async fn rr_op(
+    cfg: &HcCfg,
+//    op_key:H256,
+//    entry_point:Address,
+//    err_code: u32,
+//    err_str: String,
+//    sub_key: H256,
+//    src_addr: Address,
+//    nn: U256,
+      oo_nonce: U256,
+//    map_key: H256,
+    keys: Vec<H256>,
+) -> UserOperation {
+   let gas_tmp = U256::from(262144);
+
+    //let helper_addr = HELPER_ADDR_STR.parse::<Address>().unwrap();
+    let call_data = make_rr_calldata(cfg.sys_account, keys);
+    println!("HC external_op call_data {:?}", call_data);
+
+    let mut new_op:UserOperation = UserOperation{
+        sender: cfg.sys_account,
+	nonce: oo_nonce.into(),
+	init_code: Bytes::new(),
+	call_data: call_data.clone(),
+	call_gas_limit:gas_tmp,
+	verification_gas_limit: gas_tmp,
+	pre_verification_gas: gas_tmp,
+	max_fee_per_gas: U256::zero(),
+	max_priority_fee_per_gas: U256::zero(),
+	paymaster_and_data: Bytes::new(),
+	signature: Bytes::new(),
+    };
+
+    let key_bytes: Bytes  = cfg.sys_privkey.as_fixed_bytes().into();
+    let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
+
+    let hh = new_op.op_hash(cfg.entry_point, cfg.chain_id);
+    println!("HC pre_sign hash {:?}", hh);
+
+    let signature = wallet.sign_message(hh).await;
+    new_op.signature = signature.as_ref().unwrap().to_vec().into();
+    println!("HC signed {:?} {:?}", signature, new_op.signature);
+
+    new_op
 }
 
 /// Retrieve a cached HC operation
