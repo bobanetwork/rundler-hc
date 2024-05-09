@@ -59,7 +59,6 @@ pub trait EntryPoint: Send + Sync + 'static {
     /// Call the entry point contract's `simulateValidation` function
     async fn simulate_validation(
         &self,
-	from_addr: Address,
         user_op: UserOperation,
         max_validation_gas: u64,
     ) -> anyhow::Result<TypedTransaction>;

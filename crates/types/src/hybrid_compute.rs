@@ -83,29 +83,38 @@ pub struct HcCfg {
     pub chain_id: u64,
     /// Temporary workaround; would be better to use an existing Provider.
     pub node_http: String,
+    /// Temporary workaround
+    pub from_addr: Address,
 }
 
-//pub static mut HC_CONFIG: HcCfg = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:H256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new()};
+//pub static mut HC_CONFIG: HcCfg = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:H256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new(), from_addr: Address::zero()};
 
 /// Parameters needed for Hybrid Compute, accessed from various modules.
 pub static HC_CONFIG: Lazy<Mutex<HcCfg>> = Lazy::new(|| {
-   let c = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:H256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new()};
+   let c = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:H256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new(), from_addr: Address::zero()};
    Mutex::new(c)
 });
 
 /// Set the HC parameters based on CLI args
 pub fn init(helper_addr: Address, sys_account: Address, sys_owner:Address, sys_privkey:H256, entry_point: Address, chain_id:u64, node_http: String) {
-  let mut cfg = HC_CONFIG.lock().unwrap();
+    let mut cfg = HC_CONFIG.lock().unwrap();
 
-  cfg.helper_addr = helper_addr;
-  cfg.sys_account = sys_account;
-  cfg.sys_owner = sys_owner;
-  cfg.sys_privkey = sys_privkey;
-  cfg.entry_point = entry_point;
-  cfg.chain_id = chain_id;
-  cfg.node_http = node_http.clone();
+    cfg.helper_addr = helper_addr;
+    cfg.sys_account = sys_account;
+    cfg.sys_owner = sys_owner;
+    cfg.sys_privkey = sys_privkey;
+    cfg.entry_point = entry_point;
+    cfg.chain_id = chain_id;
+    cfg.node_http = node_http.clone();
 
 }
+
+/// Set the EOA address which the bundler is using. Erigon, but not geth, needs this for tx simulation
+pub fn set_signer(from_addr: Address) {
+    let mut cfg = HC_CONFIG.lock().unwrap();
+    cfg.from_addr = from_addr;
+}
+
 /// Wrap the response payload into calldata for the HybridAccount + HCHelper contracts
 pub fn make_op_calldata(
     sender: Address,

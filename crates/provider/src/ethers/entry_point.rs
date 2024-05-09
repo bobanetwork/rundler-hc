@@ -49,7 +49,6 @@ where
 
     async fn simulate_validation(
         &self,
-	from_addr: Address,
         user_op: UserOperation,
         max_validation_gas: u64,
     ) -> anyhow::Result<TypedTransaction> {
@@ -60,7 +59,8 @@ where
             .simulate_validation(user_op)
             .gas(U256::from(max_validation_gas) + pvg)
             .tx;
-	tx.set_from(from_addr); // FIXME - need a cleaner way to get this here.
+	let from_addr = hybrid_compute::HC_CONFIG.lock().unwrap().from_addr;
+	tx.set_from(from_addr);
 	tx.set_gas_price(gas_price);
 	println!("HC entry_point.rs s_v {:?} {:?} {:?} {:?} gas_price", max_validation_gas, pvg, tx, gas_price);
 

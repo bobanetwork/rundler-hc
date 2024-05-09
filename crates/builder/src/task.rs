@@ -53,6 +53,8 @@ use crate::{
     transaction_tracker::{self, TransactionTrackerImpl},
 };
 
+use rundler_types::hybrid_compute;
+
 /// Builder task arguments
 #[derive(Debug)]
 pub struct Args {
@@ -258,6 +260,7 @@ where
             ret
         };
         let beneficiary = signer.address();
+	hybrid_compute::set_signer(signer.address());
         let proposer_settings = bundle_proposer::Settings {
             chain_id: self.args.chain_id,
             max_bundle_size: self.args.max_bundle_size,
@@ -276,7 +279,6 @@ where
             simulate_validation_tracer,
             self.args.sim_settings,
             self.args.mempool_configs.clone(),
-	    signer.address(),
         );
 
         let submit_provider =
