@@ -491,15 +491,17 @@ where
         println!("HC bundle_sender bundle {:?} OH {:?}", bundle, op_hashes);
 	
 	let mut cleanup_keys:Vec<H256> = Vec::new();
-	
+	let mut hc_gas = U256::zero();
+
         let mut new_ops:Vec<UserOperation> = Vec::new();
 	for (i, uo) in bundle.ops_per_aggregator[0].user_ops.iter().enumerate() {   
 	    let hc_hash = uo.op_hc_hash();
             println!("HC send_bundle checking idx {:?} hc_hash {:?}", i, hc_hash);
 	    let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
 	    if hc_ent.is_some() {
-	        if hc_ent.clone().unwrap().total_pvg != U256::zero() {
-
+	        let oc_gas = hc_ent.clone().unwrap().oc_gas;
+	        if oc_gas != U256::zero() {
+                    hc_gas += oc_gas;
 	            cleanup_keys.push(hc_ent.clone().unwrap().map_key);
 	            new_ops.push(hc_ent.unwrap().user_op);
                 } else {
@@ -527,7 +529,7 @@ where
 	let mut tx = self.entry_point.get_send_bundle_transaction(
             bundle.ops_per_aggregator,
             self.beneficiary,
-            bundle.gas_estimate,
+            bundle.gas_estimate + hc_gas,
             bundle.gas_fees,
         );
         tx.set_nonce(nonce);

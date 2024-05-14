@@ -30,6 +30,7 @@ use rundler_types::UserOperation;
 use serde::{Deserialize, Serialize};
 
 use crate::ExpectedStorage;
+use rundler_types::hybrid_compute;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,6 +144,10 @@ where
             .simulate_validation(op.clone(), max_validation_gas)
             .await?;
 
+        let hh = op.clone().op_hc_hash();
+	println!("HC tracer.rs debug_trace_call hh {:?}", hh);
+        let s2 = hybrid_compute::get_hc_op_statediff(hh, ethers::types::spoof::State::default());
+
 	println!("HC trace2 pre {:?} {:?} {:?}", op, self.entry_point.address(), tx);
         SimulationTracerOutput::try_from(
             self.provider
@@ -156,6 +161,7 @@ where
                             )),
                             ..Default::default()
                         },
+			state_overrides: Some(s2),
                         ..Default::default()
                     },
                 )

@@ -127,8 +127,10 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         block_id: Option<BlockId>,
         trace_options: GethDebugTracingCallOptions,
     ) -> ProviderResult<GethTrace> {
-        println!("HC debug_trace_call {:?}", tx);
-        Ok(Middleware::debug_trace_call(self, tx, block_id, trace_options).await?)
+        println!("HC debug_trace_call overrides {:?} tx {:?}", trace_options.state_overrides, tx);
+        let ret = Middleware::debug_trace_call(self, tx, block_id, trace_options).await;
+        println!("HC debug_trace_call ret {:?}", ret);
+	Ok(ret?)
     }
 
     async fn get_balance(&self, address: Address, block: Option<BlockId>) -> ProviderResult<U256> {

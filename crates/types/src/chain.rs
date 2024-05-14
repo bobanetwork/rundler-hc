@@ -23,6 +23,11 @@ pub const OP_BEDROCK_CHAIN_IDS: &[u64] = &[
     Chain::Base as u64,
     Chain::BaseGoerli as u64,
     84532, // BaseSepolia
+/* NOTE - needs to be configured with a valid gas oracle address
+    901,   // Boba/Optimism local devnet
+    28882, // Boba Sepolia
+    288,   // Boba Mainnet
+*/
 ];
 
 // TODO use chain from ethers types once my PR is merged into ethers

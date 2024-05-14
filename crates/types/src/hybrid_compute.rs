@@ -15,7 +15,7 @@ use ethers::{
       AbiDecode, AbiEncode
     },
     types::{
-      Address, Bytes, U256, H256,
+      Address, Bytes, U256, H256, BigEndianHash,
     },
     utils::keccak256,
     signers::{LocalWallet, Signer},
@@ -42,6 +42,8 @@ pub struct HcEntry {
     pub user_op: UserOperation,
     /// Creation timestamp, used to prune expired entries
     pub ts: SystemTime,
+    /// The total computed offchain gas (all 3 phases), part of total_pvg
+    pub oc_gas: U256,
     /// The required preVerificationGas incl. HC overhead (set during successful gas estimation)
     pub total_pvg: U256,
 }
@@ -56,6 +58,7 @@ impl Clone for HcEntry {
             //call_data: self.call_data.clone(),
             user_op: self.user_op.clone(),
 	    ts: self.ts,
+	    oc_gas: self.oc_gas,
 	    total_pvg: self.total_pvg,
         }
     }
@@ -147,17 +150,17 @@ pub fn make_err_calldata(
 
 /// Cleanup to remove any leaked responses at the end of a bundle
 pub fn make_rr_calldata(
-    sender: Address,
     keys : Vec<H256>,
 ) -> Bytes {
-    let mut put_data = [0xcbu8, 0x74, 0x30, 0xae].to_vec(); // helper RemoveResponse(bytes32[])
-//    let mut put_data = [0x10u8, 0x40, 0x4d, 0x34].to_vec(); // helper RemoveResponses(bytes32[])
+//    let mut put_data = [0xcbu8, 0x74, 0x30, 0xae].to_vec(); // helper RemoveResponse(bytes32[])
+    let mut put_data = [0x10u8, 0x40, 0x4d, 0x34].to_vec(); // helper RemoveResponses(bytes32[])
+    let cfg = HC_CONFIG.lock().unwrap();
 
     put_data.extend(AbiEncode::encode(keys));
     let put_bytes : Bytes = put_data.into();
 
     let mut tmp_data = [0xb6u8, 0x1d, 0x27, 0xf6].to_vec(); // account "execute" selector
-    tmp_data.extend(AbiEncode::encode((sender, U256::zero(), put_bytes)));
+    tmp_data.extend(AbiEncode::encode((cfg.helper_addr, U256::zero(), put_bytes)));
     tmp_data.into()
 }
 
@@ -226,9 +229,6 @@ pub async fn external_op(
     let err_code:u32 = if op_success {0} else {1};
     let merged_response = AbiEncode::encode((src_addr, nonce, err_code, tmp_bytes));
 
-    let gas_tmp = U256::from(262144);
-
-    //let helper_addr = HELPER_ADDR_STR.parse::<Address>().unwrap();
     let call_data = make_op_calldata(cfg.helper_addr, sub_key, Bytes::from(merged_response.to_vec()));
     println!("HC external_op call_data {:?}", call_data);
 
@@ -237,9 +237,9 @@ pub async fn external_op(
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
 	call_data: call_data.clone(),
-	call_gas_limit:gas_tmp,
-	verification_gas_limit: gas_tmp,
-	pre_verification_gas: gas_tmp,
+	call_gas_limit: U256::from(0x30000),
+	verification_gas_limit: U256::from(0x10000),
+	pre_verification_gas: U256::from(0x10000),
 	max_fee_per_gas: U256::zero(),
 	max_priority_fee_per_gas: U256::zero(),
 	paymaster_and_data: Bytes::new(),
@@ -249,7 +249,7 @@ pub async fn external_op(
     new_op.signature = sig_hex.parse::<Bytes>().unwrap();
     println!("HC signed {:?}", new_op.signature);
 
-    let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), total_pvg: U256::zero() };
+    let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), total_pvg: U256::zero() };
     HC_MAP.lock().unwrap().insert(op_key, ent);
 }
 
@@ -268,12 +268,9 @@ pub async fn err_op(
 ) {
     println!("HC hybrid_compute err_op op_key {:?} err_str {:?}", op_key, err_str);
 
-    let gas_tmp = U256::from(262144);
-
     assert!(err_code >= 2);
     let response_payload:Bytes = AbiEncode::encode((src_addr, nn, err_code, err_str)).into();
 
-    //let helper_addr = HELPER_ADDR_STR.parse::<Address>().unwrap();
     let call_data = make_err_calldata(cfg.helper_addr, sub_key, Bytes::from(response_payload.to_vec()));
     println!("HC external_op call_data {:?}", call_data);
 
@@ -282,9 +279,9 @@ pub async fn err_op(
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
 	call_data: call_data.clone(),
-	call_gas_limit:gas_tmp,
-	verification_gas_limit: gas_tmp,
-	pre_verification_gas: gas_tmp,
+	call_gas_limit:U256::from(0xF0000),
+	verification_gas_limit: U256::from(0x8000),
+	pre_verification_gas: U256::from(0x8000),
 	max_fee_per_gas: U256::zero(),
 	max_priority_fee_per_gas: U256::zero(),
 	paymaster_and_data: Bytes::new(),
@@ -301,28 +298,17 @@ pub async fn err_op(
     new_op.signature = signature.as_ref().unwrap().to_vec().into();
     println!("HC signed {:?} {:?}", signature, new_op.signature);
 
-    let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), total_pvg:U256::zero()};
+    let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), total_pvg:U256::zero()};
     HC_MAP.lock().unwrap().insert(op_key, ent);
 }
 
 /// Encapsulate a RemoveResposnes into a UserOperation
 pub async fn rr_op(
     cfg: &HcCfg,
-//    op_key:H256,
-//    entry_point:Address,
-//    err_code: u32,
-//    err_str: String,
-//    sub_key: H256,
-//    src_addr: Address,
-//    nn: U256,
-      oo_nonce: U256,
-//    map_key: H256,
+    oo_nonce: U256,
     keys: Vec<H256>,
 ) -> UserOperation {
-   let gas_tmp = U256::from(262144);
-
-    //let helper_addr = HELPER_ADDR_STR.parse::<Address>().unwrap();
-    let call_data = make_rr_calldata(cfg.sys_account, keys);
+    let call_data = make_rr_calldata(keys);
     println!("HC external_op call_data {:?}", call_data);
 
     let mut new_op:UserOperation = UserOperation{
@@ -330,9 +316,9 @@ pub async fn rr_op(
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
 	call_data: call_data.clone(),
-	call_gas_limit:gas_tmp,
-	verification_gas_limit: gas_tmp,
-	pre_verification_gas: gas_tmp,
+	call_gas_limit: U256::from(0x6000),
+	verification_gas_limit: U256::from(0xA000),
+	pre_verification_gas: U256::from(0xE000),
 	max_fee_per_gas: U256::zero(),
 	max_priority_fee_per_gas: U256::zero(),
 	paymaster_and_data: Bytes::new(),
@@ -372,13 +358,51 @@ pub fn get_hc_op_payload(key: H256) -> Bytes {
     dec2.1
 }
 
+/// Retrieve the map_key for a cached op
+pub fn get_hc_map_key(key: H256) -> H256 {
+    let map_key = HC_MAP.lock().unwrap().get(&key).cloned().unwrap().map_key;
+    map_key
+}
+
+/// Retrieve a stateDiff object containing the encoded payload
+pub fn get_hc_op_statediff(op_hash: H256, mut s2: ethers::types::spoof::State) -> ethers::types::spoof::State {
+    if HC_MAP.lock().unwrap().get(&op_hash).is_none() {
+        return s2;
+    }
+    let map_key = get_hc_map_key(op_hash);
+
+    let slot_idx =  "0x0000000000000000000000000000000000000000000000000000000000000001".parse::<Bytes>().unwrap();
+    let mut key:H256 = keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx].concat()).into();
+
+    let payload = get_hc_op_payload(op_hash);
+    let cfg = HC_CONFIG.lock().unwrap();
+
+	// Store an encoded length for the response bytes
+        let val = H256::from_low_u64_be((payload.len() * 2 + 1).try_into().unwrap());
+	println!("HC Store1 {:?} {:?}", key, val);
+
+	s2.account(cfg.helper_addr).store(key, val);
+	key = keccak256(key).into();
+
+	let mut i = 0;
+	while i < payload.len() {
+	    let next_chunk:H256 = H256::from_slice(&payload[i..32+i]);
+	    println!("HC Store_next {:?} {:?}", key , next_chunk);
+	    s2.account(cfg.helper_addr).store(key, next_chunk);
+	    let u_key:U256 = key.into_uint()+1;
+	    key = H256::from_uint(&u_key);
+	    i += 32;
+        }
+    s2
+}
+
 /// Updates the preVerificationGas after a successful simulation.
-pub fn hc_set_pvg(key: H256, pvg: U256) {
+pub fn hc_set_pvg(key: H256, op_pvg: U256, oc_gas: U256) {
     let mut map = HC_MAP.lock().unwrap();
     let ent = map.get(&key).unwrap();
-    assert!(ent.total_pvg == U256::zero());
+    //assert!(ent.total_pvg == U256::zero()); // This is now allowed as an error flag
     // FIXME - should be a better way to do this.
-    let new_ent = HcEntry{ sub_key:ent.sub_key, map_key:ent.map_key, user_op:ent.user_op.clone(), ts:ent.ts, total_pvg:pvg};
+    let new_ent = HcEntry{ sub_key:ent.sub_key, map_key:ent.map_key, user_op:ent.user_op.clone(), ts:ent.ts, oc_gas:oc_gas, total_pvg:op_pvg + oc_gas};
     map.remove(&key);
     map.insert(key, new_ent);
 }

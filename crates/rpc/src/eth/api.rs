@@ -47,7 +47,7 @@ use super::error::{EthResult, EthRpcError, ExecutionRevertedWithBytesData};
 use crate::types::{RichUserOperation, RpcUserOperation, UserOperationReceipt};
 
 use rundler_types::hybrid_compute;
-use ethers::types::BigEndianHash;
+//use ethers::types::BigEndianHash;
 
 use jsonrpsee::{
     core::{client::ClientT, params::ObjectParams, JsonValue},
@@ -216,12 +216,11 @@ where
         &self,
         context:&EntryPointContext<P, E>,
 	op: UserOperationOptionalGas,
-	mut key: H256,
 	state_override: Option<spoof::State>,
 	revert_data: &Bytes,
     ) -> Result<GasEstimate, GasEstimationError> {
 
-	let mut s2 = state_override.unwrap_or_default();
+	let s2 = state_override.unwrap_or_default();
 
 	let es = EstimationSettings {
               max_verification_gas: 0,
@@ -292,24 +291,7 @@ where
 	    hybrid_compute::err_op(hh, context.gas_estimator.entry_point.address(), 2, "HC01: Unknown Error".to_string(), sub_key, op.sender, hc_nonce, err_nonce, map_key, &self.settings.hc).await;
         }
 
-	let resp_bytes = hybrid_compute::get_hc_op_payload(hh);
-	// Store an encoded length for the response bytes
-        let val = H256::from_low_u64_be((resp_bytes.len() * 2 + 1).try_into().unwrap());
-	println!("HC Store1 {:?} {:?}", key, val);
-
-	s2.account(self.settings.hc.helper_addr).store(key, val);
-	key = keccak256(key).into();
-
-	let mut i = 0;
-	while i <resp_bytes.len() {
-	    let next_chunk:H256 = H256::from_slice(&resp_bytes[i..32+i]);
-	    println!("HC Store_next {:?} {:?}", key , next_chunk);
-	    s2.account(self.settings.hc.helper_addr).store(key, next_chunk);
-	    let u_key:U256 = key.into_uint()+1;
-	    key = H256::from_uint(&u_key);
-	    i += 32;
-        }
-
+        let s2 = hybrid_compute::get_hc_op_statediff(hh, s2);
 	let result2 = context
             .gas_estimator
             .estimate_op_gas(op, s2)
@@ -318,10 +300,58 @@ where
 	if result2.is_ok() {
 	    println!("HC api.rs Ok gas result2 = {:?}", result2);
 	    let r3 = result2.unwrap();
-	    let pvg = r3.pre_verification_gas + 2000000; // FIXME - either do a full estimation, or a heuristic based on response length
-            hybrid_compute::hc_set_pvg(hh, pvg);
+
+	    let op_tmp = hybrid_compute::get_hc_ent(hh).unwrap().user_op;
+	    let op_tmp_2: UserOperationOptionalGas = UserOperationOptionalGas {
+	        sender: op_tmp.sender,
+		nonce: op_tmp.nonce,
+		init_code: op_tmp.init_code,
+		call_data: op_tmp.call_data,
+		call_gas_limit: Some(op_tmp.call_gas_limit),
+		verification_gas_limit: Some(op_tmp.verification_gas_limit),
+		pre_verification_gas: Some(op_tmp.pre_verification_gas),
+		max_fee_per_gas: Some(op_tmp.max_fee_per_gas),
+		max_priority_fee_per_gas: Some(op_tmp.max_priority_fee_per_gas),
+		paymaster_and_data: op_tmp.paymaster_and_data,
+		signature: op_tmp.signature,
+	    };
+
+	    let r2 = context
+                .gas_estimator
+                .estimate_op_gas(op_tmp_2, spoof::State::default())
+                .await.unwrap();
+
+            let offchain_gas = r2.pre_verification_gas + r2.verification_gas_limit + r2.call_gas_limit;
+
+            let mut cleanup_keys:Vec<H256> = Vec::new();
+	    cleanup_keys.push(map_key);
+	    let c_nonce = context.gas_estimator.entry_point.get_nonce(self.settings.hc.sys_account, U256::zero()).await.unwrap();
+	    let cleanup_op = hybrid_compute::rr_op(&self.settings.hc, c_nonce, cleanup_keys.clone()).await;
+	    let op_tmp_4: UserOperationOptionalGas = UserOperationOptionalGas {
+	        sender: cleanup_op.sender,
+		nonce: cleanup_op.nonce,
+		init_code: cleanup_op.init_code,
+		call_data: cleanup_op.call_data,
+		call_gas_limit: Some(cleanup_op.call_gas_limit),
+		verification_gas_limit: Some(cleanup_op.verification_gas_limit),
+		pre_verification_gas: Some(cleanup_op.pre_verification_gas),
+		max_fee_per_gas: Some(cleanup_op.max_fee_per_gas),
+		max_priority_fee_per_gas: Some(cleanup_op.max_priority_fee_per_gas),
+		paymaster_and_data: cleanup_op.paymaster_and_data,
+		signature: cleanup_op.signature,
+	    };
+	    //println!("HC op_tmp_4 {:?} {:?}", op_tmp_4, cleanup_keys);
+	    let r4 = context.gas_estimator.estimate_op_gas(op_tmp_4, spoof::State::default()).await.unwrap();
+            let cleanup_gas = r4.pre_verification_gas + r4.verification_gas_limit + r4.call_gas_limit;
+            let op_gas = r3.pre_verification_gas + r3.verification_gas_limit + r3.call_gas_limit;
+	    println!("HC api.rs offchain_gas estimate {:?} sum {:?}", r2, offchain_gas);
+	    println!("HC api.rs userop_gas estimate   {:?} sum {:?}", r3, op_gas);
+	    println!("HC api.rs cleanup_gas estimate  {:?} sum {:?}", r4, cleanup_gas);
+
+            hybrid_compute::hc_set_pvg(hh, r3.pre_verification_gas + offchain_gas + cleanup_gas, offchain_gas + cleanup_gas);
+
 	    return Ok(GasEstimate {
-	        pre_verification_gas: pvg,
+	        pre_verification_gas: r3.pre_verification_gas + offchain_gas,
 	        verification_gas_limit: r3.verification_gas_limit,
 	        call_gas_limit: r3.call_gas_limit,
 	    });
@@ -363,7 +393,7 @@ where
 	      let key:H256 = keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx].concat()).into();
 
 	      if self.hc_verify_trigger(context, op.clone(), key, state_override.clone()).await {
-	        result = self.hc_simulate_response(context, op, key, state_override, revert_data).await;
+	        result = self.hc_simulate_response(context, op, state_override, revert_data).await;
 	      } else {
 	        println!("HC did not get expected _HC_VRFY");
 	      }

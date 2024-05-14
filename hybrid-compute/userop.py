@@ -67,6 +67,8 @@ def showBalances():
   print("HA ", EP.functions.getDepositInfo(HA.address).call(), w3.eth.get_balance(HA.address))
 
 showBalances()
+balStart_bnd = w3.eth.get_balance(bundler_addr)
+balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0]
 
 # -------------------------------------------------------------
 
@@ -97,8 +99,8 @@ def buildOp(A, nKey, payload):
     'callGasLimit': "0x0",
     'verificationGasLimit': Web3.to_hex(0),
     'preVerificationGas': "0x0",
-    'maxFeePerGas': Web3.to_hex(Web3.to_wei(10,'gwei')),
-    'maxPriorityFeePerGas': Web3.to_hex(Web3.to_wei(2,'gwei')),
+    'maxFeePerGas': Web3.to_hex(w3.eth.gas_price),
+    'maxPriorityFeePerGas': Web3.to_hex(w3.eth.max_priority_fee),
     'paymasterAndData': '0x',
     # Dummy signature, per Alchemy AA documentation
     # A future update may require a valid signature on gas estimation ops. This should be safe because the gas
@@ -240,9 +242,30 @@ print("\n------\n")
 nKey = int(1000 + (w3.eth.get_transaction_count(u_addr) % 7));
 #nKey = 0
 print("nKey", nKey)
+l2Fees = 0
+l1Fees = 0
+egPrice = 0
+estGas = 0
+
+def ParseReceipt(opReceipt):
+  global l1Fees,l2Fees,egPrice
+  txRcpt = opReceipt['receipt']
+
+  n = 0
+  for i in txRcpt['logs']:
+    print("log", n, i['topics'][0], i['data'])
+    n += 1
+  print("Total tx gas stats:", Web3.to_int(hexstr=txRcpt['gasUsed']), txRcpt['l1GasUsed'], txRcpt['l1Fee'])
+  opGas = Web3.to_int(hexstr=opReceipt['actualGasUsed'])
+  print("opReceipt gas used", opGas, "unused", estGas - opGas)
+
+  egPrice = Web3.to_int(hexstr=txRcpt['effectiveGasPrice'])
+  l2Fees += Web3.to_int(hexstr=txRcpt['gasUsed']) * egPrice
+  l1Fees += Web3.to_int(hexstr=txRcpt['l1Fee'])
+  #exit(0)
 
 def TestAddSub2 (a, b):
-
+  global estGas
   print("\n  - - - - TestAddSub2({},{}) - - - -".format(a,b))
   print("TestCount(begin)=", TC.functions.counters(SA.address).call())
   # 0xb83adc8b = count(uint256,address)
@@ -278,7 +301,8 @@ def TestAddSub2 (a, b):
     p['preVerificationGas'] = Web3.to_hex(Web3.to_int(hexstr=est_result['preVerificationGas']) + 0)
     p['verificationGasLimit'] = Web3.to_hex(Web3.to_int(hexstr=est_result['verificationGasLimit']) + 0)
     p['callGasLimit'] = Web3.to_hex(Web3.to_int(hexstr=est_result['callGasLimit']) + 0)
-
+    estGas =  Web3.to_int(hexstr=est_result['preVerificationGas']) + Web3.to_int(hexstr=est_result['verificationGasLimit']) + Web3.to_int(hexstr=est_result['callGasLimit'])
+    print("estimateGas total =", estGas)
   opHash = EP.functions.getUserOpHash(packOp(p)).call()
   eMsg = eth_account.messages.encode_defunct(opHash)
   sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
@@ -301,6 +325,7 @@ def TestAddSub2 (a, b):
       #print("opReceipt", opReceipt)
       assert(opReceipt['receipt']['status'] == "0x1")
       print("operation success", opReceipt['success'])
+      ParseReceipt(opReceipt)
       timeout = False
       break
   print("TestCount(end)=", TC.functions.counters(SA.address).call())
@@ -308,8 +333,21 @@ def TestAddSub2 (a, b):
     print("*** Previous operation timed out")
     exit(1)
 TestAddSub2(2, 1)   # Success
-TestAddSub2(2, 10) # Underflow error, asserted
+TestAddSub2(2, 10)  # Underflow error, asserted
 TestAddSub2(2, 3)   # Underflow error, handled internally
+TestAddSub2(7, 0)   # Not HC
 TestAddSub2(4, 1)   # Success again
 
 showBalances()
+balFinal_bnd = w3.eth.get_balance(bundler_addr)
+balFinal_sa = EP.functions.getDepositInfo(SA.address).call()[0]
+
+print("Net balance changes", balFinal_bnd - balStart_bnd, balFinal_sa - balStart_sa, (balFinal_bnd + balFinal_sa) - (balStart_bnd + balStart_sa), (l1Fees + l2Fees))
+
+userPaid = balStart_sa - balFinal_sa
+bundlerProfit = balFinal_bnd - balStart_bnd
+print("User account paid:", userPaid)
+print("   Bundler profit:", bundlerProfit, 100*(bundlerProfit / userPaid), "%")
+print("           L2 gas:", l2Fees, 100*(l2Fees / userPaid), "%")
+print("           L1 fee:", l1Fees, 100*(l1Fees / userPaid), "%")
+print("         Residual:", userPaid - (bundlerProfit + l2Fees + l1Fees))

@@ -147,6 +147,7 @@ where
 
         // Determine fees required for ops to be included in a bundle
         let required_op_fees = self.fee_estimator.required_op_fees(bundle_fees);
+
         let all_paymaster_addresses = ops
             .iter()
             .filter_map(|op| op.uo.paymaster())
@@ -169,7 +170,7 @@ where
             .flatten()
             .collect::<Vec<_>>();
 	if ops_with_simulations.len() > 0 {
-	    println!("HC bundle_proposer before assemble_context {:?}", ops_with_simulations);
+	    println!("HC bundle_proposer before assemble_context len {:?}", ops_with_simulations.len());
 	}
         let mut context = self
             .assemble_context(ops_with_simulations, balances_by_paymaster)
@@ -919,6 +920,7 @@ impl ProposalContext {
     /// may need to be recomputed.
     #[must_use = "rejected op but did not update aggregator signatures"]
     fn reject_index(&mut self, i: usize) -> Option<Address> {
+        println!("HC reject_index at {:?}", i);
         let mut remaining_i = i;
         let mut found_aggregator: Option<Option<Address>> = None;
         for (&aggregator, group) in &mut self.groups_by_aggregator {
