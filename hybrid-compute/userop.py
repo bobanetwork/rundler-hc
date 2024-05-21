@@ -167,6 +167,15 @@ def setOwner(acct, owner):
           'chainId': HC_CHAIN,
     })
     signAndSubmit(tx, u_key)
+def setSysAcct(sys):
+  if HH.functions.systemAccount().call() != sys:
+    tx = HH.functions.SetSystemAccount(sys).build_transaction({
+          'nonce': w3.eth.get_transaction_count(deploy_addr),
+          'from':deploy_addr,
+          'gas':210000,
+          'chainId': HC_CHAIN,
+    })
+    signAndSubmit(tx, deploy_key)
 
 def permitCaller(acct, caller):
   if not acct.functions.PermittedCallers(caller).call():
@@ -212,6 +221,9 @@ fundAddr(bundler_addr)
 fundAddr(u_addr)
 fundAddr(hc0_addr)
 fundAddr(hc1_addr)
+
+setOwner(HH, deploy_addr)
+setSysAcct(BA.address)
 
 setOwner(SA, u_addr)
 setOwner(HA, hc1_addr)

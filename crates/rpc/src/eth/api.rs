@@ -389,7 +389,7 @@ where
               println!("HC api.rs HC trigger at bn {}", bn);
 
 	      let map_key = hybrid_compute::hc_map_key(revert_data);
-	      let slot_idx =  "0x0000000000000000000000000000000000000000000000000000000000000001".parse::<Bytes>().unwrap();
+	      let slot_idx =  "0x0000000000000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
 	      let key:H256 = keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx].concat()).into();
 
 	      if self.hc_verify_trigger(context, op.clone(), key, state_override.clone()).await {

@@ -279,9 +279,9 @@ pub async fn err_op(
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
 	call_data: call_data.clone(),
-	call_gas_limit:U256::from(0xF0000),
-	verification_gas_limit: U256::from(0x8000),
-	pre_verification_gas: U256::from(0x8000),
+	call_gas_limit:U256::from(0x30000),
+	verification_gas_limit: U256::from(0x10000),
+	pre_verification_gas: U256::from(0x10000),
 	max_fee_per_gas: U256::zero(),
 	max_priority_fee_per_gas: U256::zero(),
 	paymaster_and_data: Bytes::new(),
@@ -371,7 +371,7 @@ pub fn get_hc_op_statediff(op_hash: H256, mut s2: ethers::types::spoof::State) -
     }
     let map_key = get_hc_map_key(op_hash);
 
-    let slot_idx =  "0x0000000000000000000000000000000000000000000000000000000000000001".parse::<Bytes>().unwrap();
+    let slot_idx =  "0x0000000000000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
     let mut key:H256 = keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx].concat()).into();
 
     let payload = get_hc_op_payload(op_hash);
