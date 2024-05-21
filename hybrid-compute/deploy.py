@@ -157,3 +157,20 @@ with open("./contracts.json", "w") as f:
 with open("addresses.txt", "w") as f:
   for c in deployed:
     f.write(c + "\t" + deployed[c]['address']+"\n")
+
+if os.path.exists(".env"):
+  print("\nUpdating .env file")
+  env_vars = dict()
+  os.rename(".env", ".env.old")
+  with open(".env.old","r") as f:
+    for line in f.readlines():
+      k,v = line.strip().split('=')
+      env_vars[k] = v
+  env_vars['ENTRY_POINTS'] = epAddr
+  env_vars['HC_HELPER_ADDR'] = hhAddr
+  env_vars['HC_SYS_ACCOUNT'] = ha0Addr
+  env_vars['OC_HYBRID_ACCOUNT'] = ha1Addr
+  with open(".env","w") as f:
+    for k in env_vars:
+      f.write("{}={}\n".format(k,env_vars[k]))
+  # .env.old is left as a backup
