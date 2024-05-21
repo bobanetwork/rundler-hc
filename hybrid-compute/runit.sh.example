@@ -1,7 +1,7 @@
 #!/bin/sh
-ADDRS=./hybrid-compute/addresses.txt
+ADDRS=./addresses.txt
 
-RUST_BACKTRACE=1 target/debug/rundler \
+RUST_BACKTRACE=1 ../target/debug/rundler \
   --hc_helper_addr `grep HCHelper $ADDRS | cut -f 2` \
   --hc_sys_account `grep HybridAccount.0 $ADDRS | cut -f 2` \
   --hc_sys_owner 0x3333333333333333333333333333333333333333 \

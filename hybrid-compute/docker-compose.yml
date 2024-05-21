@@ -16,7 +16,7 @@
 services:
   rundler-hc:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     image: rundler-hc:latest
     environment:
@@ -34,7 +34,7 @@ services:
 
   offchain-rpc:
     build:
-      context: ./hybrid-compute
+      context: .
       dockerfile: Dockerfile.offchain-rpc
     image: offchain-rpc:latest
     environment:
