@@ -1,0 +1,49 @@
+# Docker-compose wrapper for rundler-hc prototype. This version defines
+# two services, the bundler and a placeholder "offchain" JSON-RPC service.
+# These could be decoupled and run on separate machines but they are packaged
+# together here for convenience.
+#
+# The contract addresses are obtained by manually deploying the contracts,
+# and must be updated when the contracts are changed. The present implementation
+# does not put them behind a proxy.
+#
+# There are additional private keys:
+#  - A bundler private key for the EOA through which it submits transactions
+#  - An owner which generates signatures for the system-level Hybrid Account
+#    which is used to insert error responses and clean up stale cache entries
+#  - An owner which generates signatures for the offchain JSON-RPC responses
+
+services:
+  rundler-hc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rundler-hc:latest
+    environment:
+      HC_HELPER_ADDR:  ${HC_HELPER_ADDR}  # Deployed contract address
+      HC_SYS_ACCOUNT:  ${HC_SYS_ACCOUNT}  # Deployed contract address
+      HC_SYS_OWNER:    ${HC_SYS_OWNER}    # Owner/Signer for HC_SYS_ACCOUNT
+      HC_SYS_PRIVKEY:  ${HC_SYS_PRIVKEY}  # Owner/Signer for HC_SYS_ACCOUNT
+      ENTRY_POINTS:    ${ENTRY_POINTS}    # Deployed contract address
+      BUILDER_PRIVATE_KEY: ${BUILDER_PRIVKEY} # Key for bundler EOA
+      NODE_HTTP:       ${NODE_HTTP}       # Replica/Sequencer URL
+      CHAIN_ID:        901                # Chain ID
+      RPC_PORT:        3300               # RPC port to submit into Bundler
+    ports:
+      - 3300:3300
+
+  offchain-rpc:
+    build:
+      context: ./hybrid-compute
+      dockerfile: Dockerfile.offchain-rpc
+    image: offchain-rpc:latest
+    environment:
+      HC_HELPER_ADDR:    ${HC_HELPER_ADDR}     # Deployed contract address
+      ENTRY_POINT:       ${ENTRY_POINTS}       # Deployed contract address (note: only supports a single addr here)
+      CHAIN_ID:          901                   # Chain ID
+      OC_LISTEN_PORT:    1234                  # Port for RPC server
+      OC_HYBRID_ACCOUNT: ${OC_HYBRID_ACCOUNT}  # Deployed contract address
+      OC_OWNER:          ${OC_OWNER}           # Owner/Signer for OC_HYBRID_ACCOUNT
+      OC_PRIVKEY:        ${OC_PRIVKEY}         # Owner/Signer for OC_HYBRID_ACCOUNT
+    ports:
+      - 1234:1234

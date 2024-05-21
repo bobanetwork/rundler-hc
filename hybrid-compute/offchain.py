@@ -1,43 +1,40 @@
 import os,sys
 from web3 import Web3, exceptions
-import threading
-import signal
 import time
-#from random import *
-import queue
-import requests,json
-from web3.gas_strategies.time_based import fast_gas_price_strategy
-from web3.middleware import geth_poa_middleware
-from web3.logs import STRICT, IGNORE, DISCARD, WARN
-import logging
 
-from jsonrpcclient import request, parse, Ok
+import requests,json
+import logging
 import requests
 
 from eth_abi import abi as ethabi
 import eth_account
 
-import rlp
-from multiprocessing import Process
 from jsonrpclib.SimpleJSONRPCServer import SimpleJSONRPCServer,SimpleJSONRPCRequestHandler
 
-# HC1 is used by the offchain JSON-RPC endpoint
-hc1_addr = Web3.to_checksum_address("0xE073fC0ff8122389F6e693DD94CcDc5AF637448e")
-hc1_key  = "0x7c0c629efc797f8c5f658919b7efbae01275470d59d03fdeb0fca1e6bd11d7fa"
+HC_CHAIN = int(os.environ['CHAIN_ID'])
+assert(HC_CHAIN != 0)
 
-# -------------------------------------------------------------
+PORT = int(os.environ['OC_LISTEN_PORT'])
+assert(PORT != 0)
 
-w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:9545"))
-assert (w3.is_connected)
-w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-HC_CHAIN=901
+EP_ADDR = os.environ['ENTRY_POINT']
+assert(len(EP_ADDR) == 42)
+EntryPointAddr = Web3.to_checksum_address(EP_ADDR)
 
-with open("./contracts.json","r") as f:
-  deployed = json.loads(f.read())
+HH_ADDR = os.environ['HC_HELPER_ADDR']
+assert(len(HH_ADDR) == 42)
+HelperAddr = Web3.to_checksum_address(HH_ADDR)
 
-EP = w3.eth.contract(address=deployed['EntryPoint']['address'], abi=deployed['EntryPoint']['abi'])
-HH = w3.eth.contract(address=deployed['HCHelper']['address'], abi=deployed['HCHelper']['abi'])
-HA = w3.eth.contract(address=deployed['HybridAccount.1']['address'], abi=deployed['HybridAccount.1']['abi'])
+HA_ADDR = os.environ['OC_HYBRID_ACCOUNT']
+assert(len(HA_ADDR) == 42)
+HybridAcctAddr = Web3.to_checksum_address(HA_ADDR)
+
+HA_OWNER = os.environ['OC_OWNER']
+assert(len(HA_OWNER) == 42)
+hc1_addr = Web3.to_checksum_address(HA_OWNER)
+
+hc1_key = os.environ['OC_PRIVKEY']
+assert(len(hc1_key) == 66)
 
 # -------------------------------------------------------------
 
@@ -90,11 +87,11 @@ def offchain_addsub2(sk, src_addr, src_nonce, oo_nonce, payload, *args):
   enc1 = ethabi.encode(['bytes32','bytes'], [skey, resp2])
   p_enc1 = "0xdfc98ae8" + Web3.to_hex(enc1)[2:]
 
-  enc2 = ethabi.encode(['address', 'uint256', 'bytes'], [Web3.to_checksum_address(HH.address), 0, Web3.to_bytes(hexstr=p_enc1)])
+  enc2 = ethabi.encode(['address', 'uint256', 'bytes'], [Web3.to_checksum_address(HelperAddr), 0, Web3.to_bytes(hexstr=p_enc1)])
   p_enc2 = "0xb61d27f6" + Web3.to_hex(enc2)[2:]
 
   oo = {
-    'sender':HA.address,
+    'sender':HybridAcctAddr,
     'nonce': Web3.to_hex(opNonce),
     'initCode':'0x',
     'callData': p_enc2,
@@ -107,9 +104,33 @@ def offchain_addsub2(sk, src_addr, src_nonce, oo_nonce, payload, *args):
     'signature': '0x'
   }
 
-  ooHash = EP.functions.getUserOpHash(packOp(oo)).call()
+  p = ethabi.encode([
+    'address',
+    'uint256',
+    'bytes32',
+    'bytes32',
+    'uint256',
+    'uint256',
+    'uint256',
+    'uint256',
+    'uint256',
+    'bytes32',
+  ],[
+    HybridAcctAddr,
+    opNonce,
+    Web3.keccak(Web3.to_bytes(hexstr='0x')),
+    Web3.keccak(Web3.to_bytes(hexstr=p_enc2)),
+    Web3.to_int(hexstr=oo['callGasLimit']),
+    Web3.to_int(hexstr=oo['verificationGasLimit']),
+    Web3.to_int(hexstr=oo['preVerificationGas']),
+    Web3.to_int(hexstr=oo['maxFeePerGas']),
+    Web3.to_int(hexstr=oo['maxPriorityFeePerGas']),
+    Web3.keccak(Web3.to_bytes(hexstr='0x')),
+  ])
+  ooHash = Web3.keccak(ethabi.encode(['bytes32','address','uint256'],[Web3.keccak(p),EntryPointAddr,HC_CHAIN]))
+  signAcct = eth_account.account.Account.from_key(hc1_key)
   eMsg = eth_account.messages.encode_defunct(ooHash)
-  sig = w3.eth.account.sign_message(eMsg, private_key=hc1_key)
+  sig = signAcct.sign_message(eMsg)
 
   print("Method returning success={} response={} signature={}".format(success, Web3.to_hex(resp), Web3.to_hex(sig.signature)))
   return ({
@@ -122,16 +143,8 @@ class RequestHandler(SimpleJSONRPCRequestHandler):
   rpc_paths = ('/', '/hc')
 
 def server_loop():
-  #print ("Registering method", contractAddr)
-  server = SimpleJSONRPCServer(('192.168.4.2', 1234), requestHandler=RequestHandler)
+  server = SimpleJSONRPCServer(('0.0.0.0', PORT), requestHandler=RequestHandler)
   server.register_function(offchain_addsub2, "97e0d7ba")
   server.serve_forever()
 
-serverProc = Process(target=server_loop,args=())
-serverProc.start()
-print("Server started")
-
-time.sleep(86400*10) # Temporary; eventually run forever while waiting for a shutdown signal.
-
-print("You're still here? It's over. Go home.")
-serverProc.kill()
+server_loop() # Run until killed
