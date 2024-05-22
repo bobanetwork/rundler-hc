@@ -33,13 +33,17 @@ assert(len(hc1_key) == 66)
 
 # -------------------------------------------------------------
 
+def selector(name):
+  nameHash = Web3.to_hex(Web3.keccak(text=name))
+  return nameHash[2:10]
+
 def gen_response(req, err_code, resp_payload):
   resp2 = ethabi.encode(['address', 'uint256', 'uint32', 'bytes'], [req['srcAddr'], req['srcNonce'], err_code, resp_payload])
   enc1 = ethabi.encode(['bytes32','bytes'], [req['skey'], resp2])
-  p_enc1 = "0xdfc98ae8" + Web3.to_hex(enc1)[2:]
+  p_enc1 = "0x" + selector("PutResponse(bytes32,bytes)") + Web3.to_hex(enc1)[2:]  # dfc98ae8
 
   enc2 = ethabi.encode(['address', 'uint256', 'bytes'], [Web3.to_checksum_address(HelperAddr), 0, Web3.to_bytes(hexstr=p_enc1)])
-  p_enc2 = "0xb61d27f6" + Web3.to_hex(enc2)[2:]
+  p_enc2 = selector("execute(address,uint256,bytes)") + Web3.to_hex(enc2)[2:] # b61d27f6
 
   limits = {
     'callGasLimit': "0x30000",
@@ -125,7 +129,7 @@ class RequestHandler(SimpleJSONRPCRequestHandler):
 
 def server_loop():
   server = SimpleJSONRPCServer(('0.0.0.0', PORT), requestHandler=RequestHandler)
-  server.register_function(offchain_addsub2, "97e0d7ba")
+  server.register_function(offchain_addsub2, selector("addsub2(uint32,uint32)"))  # 97e0d7ba
   server.serve_forever()
 
 server_loop() # Run until killed
