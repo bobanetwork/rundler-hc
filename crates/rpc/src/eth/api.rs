@@ -25,7 +25,7 @@ use ethers::{
         GethDebugTracingOptions, GethTrace, GethTraceFrame, Log, TransactionReceipt, H256, U256,
         U64,
     },
-    utils::{to_checksum, keccak256, hex},
+    utils::{to_checksum, hex},
 };
 use rundler_pool::PoolServer;
 use rundler_provider::{EntryPoint, Provider };
@@ -389,8 +389,7 @@ where
               println!("HC api.rs HC trigger at bn {}", bn);
 
 	      let map_key = hybrid_compute::hc_map_key(revert_data);
-	      let slot_idx =  "0x0000000000000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
-	      let key:H256 = keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx].concat()).into();
+	      let key:H256 = hybrid_compute::hc_storage_key(map_key);
 
 	      if self.hc_verify_trigger(context, op.clone(), key, state_override.clone()).await {
 	        result = self.hc_simulate_response(context, op, state_override, revert_data).await;

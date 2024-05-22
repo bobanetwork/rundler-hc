@@ -185,6 +185,13 @@ pub fn hc_map_key(revert_data : &Bytes) -> H256 {
     map_key
 }
 
+/// Calculates the HCHelper storage slot key for a ResponseCache entry
+pub fn hc_storage_key(map_key:H256) -> H256 {
+    let slot_idx =  "0x0000000000000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
+    let storage_key:H256 = keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx].concat()).into();
+    storage_key
+}
+
 /// Partial key, to be combined with msg.sender
 pub fn hc_sub_key(revert_data : &Bytes) -> H256 {
     let sub_key:H256 = keccak256(&revert_data[28..]).into();
@@ -370,29 +377,27 @@ pub fn get_hc_op_statediff(op_hash: H256, mut s2: ethers::types::spoof::State) -
         return s2;
     }
     let map_key = get_hc_map_key(op_hash);
-
-    let slot_idx =  "0x0000000000000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
-    let mut key:H256 = keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx].concat()).into();
+    let mut key = hc_storage_key(map_key);
 
     let payload = get_hc_op_payload(op_hash);
     let cfg = HC_CONFIG.lock().unwrap();
 
-	// Store an encoded length for the response bytes
-        let val = H256::from_low_u64_be((payload.len() * 2 + 1).try_into().unwrap());
-	println!("HC Store1 {:?} {:?}", key, val);
+    // Store an encoded length for the response bytes
+    let val = H256::from_low_u64_be((payload.len() * 2 + 1).try_into().unwrap());
+    println!("HC Store1 {:?} {:?}", key, val);
 
-	s2.account(cfg.helper_addr).store(key, val);
-	key = keccak256(key).into();
+    s2.account(cfg.helper_addr).store(key, val);
+    key = keccak256(key).into();
 
-	let mut i = 0;
-	while i < payload.len() {
-	    let next_chunk:H256 = H256::from_slice(&payload[i..32+i]);
-	    println!("HC Store_next {:?} {:?}", key , next_chunk);
-	    s2.account(cfg.helper_addr).store(key, next_chunk);
-	    let u_key:U256 = key.into_uint()+1;
-	    key = H256::from_uint(&u_key);
-	    i += 32;
-        }
+    let mut i = 0;
+    while i < payload.len() {
+	let next_chunk:H256 = H256::from_slice(&payload[i..32+i]);
+	println!("HC Store_next {:?} {:?}", key , next_chunk);
+	s2.account(cfg.helper_addr).store(key, next_chunk);
+	let u_key:U256 = key.into_uint()+1;
+	key = H256::from_uint(&u_key);
+	i += 32;
+    }
     s2
 }
 
