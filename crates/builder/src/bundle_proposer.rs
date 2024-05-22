@@ -43,6 +43,7 @@ use rundler_types::{
 use rundler_utils::{emit::WithEntryPoint, math};
 use tokio::{sync::broadcast, try_join};
 use tracing::{error, info, warn};
+use rundler_types::hybrid_compute;
 
 use crate::emit::{BuilderEvent, OpRejectionReason, SkipReason};
 
@@ -260,8 +261,6 @@ where
         if op.uo.max_fee_per_gas < required_op_fees.max_fee_per_gas
             || op.uo.max_priority_fee_per_gas < required_op_fees.max_priority_fee_per_gas
         {
-	    println!("HC bundle_proposer skipping skip");
-	    /*
             self.emit(BuilderEvent::skipped_op(
                 self.builder_index,
                 self.op_hash(&op.uo),
@@ -274,11 +273,10 @@ where
                 },
             ));
             return None;
-	    */
         }
 
         // Check if the pvg is enough
-        let required_pvg = gas::calc_required_pre_verification_gas(
+        let mut required_pvg = gas::calc_required_pre_verification_gas(
             &op.uo,
             self.entry_point.address(),
             self.provider.clone(),
@@ -299,6 +297,15 @@ where
             e
         })
         .ok()?;
+	let hc_hash = op.uo.op_hc_hash();
+	if let Some(hc_pvg) = hybrid_compute::hc_get_pvg(hc_hash) {
+	    println!("HC pvg override for op_hash {:?} {:?} {:?}", hc_hash, required_pvg, hc_pvg);
+	    if hc_pvg > required_pvg {
+	        required_pvg = hc_pvg;
+            }
+	} else {
+	    println!("HC no pvg override for op_hash {:?}", hc_hash);
+	}
 
         if op.uo.pre_verification_gas < required_pvg {
             self.emit(BuilderEvent::skipped_op(

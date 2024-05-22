@@ -42,10 +42,10 @@ pub struct HcEntry {
     pub user_op: UserOperation,
     /// Creation timestamp, used to prune expired entries
     pub ts: SystemTime,
-    /// The total computed offchain gas (all 3 phases), part of total_pvg
+    /// The total computed offchain gas (all 3 phases)
     pub oc_gas: U256,
     /// The required preVerificationGas incl. HC overhead (set during successful gas estimation)
-    pub total_pvg: U256,
+    pub needed_pvg: U256,
 }
 
 const EXPIRE_SECS:std::time::Duration = Duration::new(120, 0);
@@ -59,7 +59,7 @@ impl Clone for HcEntry {
             user_op: self.user_op.clone(),
 	    ts: self.ts,
 	    oc_gas: self.oc_gas,
-	    total_pvg: self.total_pvg,
+	    needed_pvg: self.needed_pvg,
         }
     }
 }
@@ -249,7 +249,7 @@ pub async fn external_op(
     new_op.signature = sig_hex.parse::<Bytes>().unwrap();
     println!("HC signed {:?}", new_op.signature);
 
-    let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), total_pvg: U256::zero() };
+    let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), needed_pvg: U256::zero() };
     HC_MAP.lock().unwrap().insert(op_key, ent);
 }
 
@@ -298,7 +298,7 @@ pub async fn err_op(
     new_op.signature = signature.as_ref().unwrap().to_vec().into();
     println!("HC signed {:?} {:?}", signature, new_op.signature);
 
-    let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), total_pvg:U256::zero()};
+    let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), needed_pvg:U256::zero()};
     HC_MAP.lock().unwrap().insert(op_key, ent);
 }
 
@@ -397,14 +397,22 @@ pub fn get_hc_op_statediff(op_hash: H256, mut s2: ethers::types::spoof::State) -
 }
 
 /// Updates the preVerificationGas after a successful simulation.
-pub fn hc_set_pvg(key: H256, op_pvg: U256, oc_gas: U256) {
+pub fn hc_set_pvg(key: H256, needed_pvg: U256, oc_gas: U256) {
     let mut map = HC_MAP.lock().unwrap();
     let ent = map.get(&key).unwrap();
-    //assert!(ent.total_pvg == U256::zero()); // This is now allowed as an error flag
+    //assert!(ent.needed_pvg == U256::zero()); // This is now allowed as an error flag
     // FIXME - should be a better way to do this.
-    let new_ent = HcEntry{ sub_key:ent.sub_key, map_key:ent.map_key, user_op:ent.user_op.clone(), ts:ent.ts, oc_gas:oc_gas, total_pvg:op_pvg + oc_gas};
+    let new_ent = HcEntry{ sub_key:ent.sub_key, map_key:ent.map_key, user_op:ent.user_op.clone(), ts:ent.ts, needed_pvg:needed_pvg, oc_gas:oc_gas};
     map.remove(&key);
     map.insert(key, new_ent);
+}
+
+/// Updates the preVerificationGas after a successful simulation.
+pub fn hc_get_pvg(key: H256) -> Option<U256> {
+    if let Some(ent) = HC_MAP.lock().unwrap().get(&key).cloned() {
+        return Some(ent.needed_pvg);
+    }
+    None
 }
 
 /// Iterate and remove expired cache entries
