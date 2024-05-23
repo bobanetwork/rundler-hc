@@ -150,7 +150,7 @@ hhAddr  = deploy2("HCHelper", HH.constructor(epAddr, boba_addr, 0),0)
 saAddr  = deploy2("SimpleAccount", SA.constructor(epAddr),0)
 ha0Addr = deploy2("HybridAccount.0", HA.constructor(epAddr, hhAddr),0)
 ha1Addr = deploy2("HybridAccount.1", HA.constructor(epAddr, hhAddr),1)
-tcAddr  = deploy2("TestCounter", TC.constructor(hhAddr),0)
+tcAddr  = deploy2("TestCounter", TC.constructor(ha1Addr),0)
 
 with open("./contracts.json", "w") as f:
   f.write(json.dumps(deployed))

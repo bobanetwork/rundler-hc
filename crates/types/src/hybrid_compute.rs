@@ -237,14 +237,16 @@ pub async fn external_op(
     let merged_response = AbiEncode::encode((src_addr, nonce, err_code, tmp_bytes));
 
     let call_data = make_op_calldata(cfg.helper_addr, sub_key, Bytes::from(merged_response.to_vec()));
-    println!("HC external_op call_data {:?}", call_data);
+    let call_gas = 705*response_payload.len() + 170000;
+
+    println!("HC external_op call_data len {:?} {:?} gas {:?} {:?}", response_payload.len(), call_data.len(), call_gas, call_data);
 
     let mut new_op:UserOperation = UserOperation{
         sender: ep_addr,
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
 	call_data: call_data.clone(),
-	call_gas_limit: U256::from(0x30000),
+	call_gas_limit: U256::from(call_gas),
 	verification_gas_limit: U256::from(0x10000),
 	pre_verification_gas: U256::from(0x10000),
 	max_fee_per_gas: U256::zero(),

@@ -1,4 +1,4 @@
-import os,sys
+import os,sys,re,random
 from web3 import Web3, exceptions
 from eth_abi import abi as ethabi
 import eth_account
@@ -33,6 +33,18 @@ assert(len(hc1_key) == 66)
 
 # -------------------------------------------------------------
 
+# Load a list of 4-letter dictionary words for a text generation example.
+def load_words():
+  wordlist = []
+  with open("/usr/share/dict/words", "r") as f:
+    p = re.compile('^[a-z]{4}$')
+    for line in f.readlines():
+      line = line.strip()
+      if p.match(line) and line != "frog": # Reserved for "cheat" mode
+       wordlist.append(line)
+  return wordlist
+wordlist = load_words()
+
 def selector(name):
   nameHash = Web3.to_hex(Web3.keccak(text=name))
   return nameHash[2:10]
@@ -43,13 +55,15 @@ def gen_response(req, err_code, resp_payload):
   p_enc1 = "0x" + selector("PutResponse(bytes32,bytes)") + Web3.to_hex(enc1)[2:]  # dfc98ae8
 
   enc2 = ethabi.encode(['address', 'uint256', 'bytes'], [Web3.to_checksum_address(HelperAddr), 0, Web3.to_bytes(hexstr=p_enc1)])
-  p_enc2 = selector("execute(address,uint256,bytes)") + Web3.to_hex(enc2)[2:] # b61d27f6
+  p_enc2 = "0x" + selector("execute(address,uint256,bytes)") + Web3.to_hex(enc2)[2:] # b61d27f6
 
   limits = {
-    'callGasLimit': "0x30000",
     'verificationGasLimit': "0x10000",
     'preVerificationGas': "0x10000",
   }
+  callGas = 705*len(resp_payload) + 170000
+
+  print("callGas calculation", len(resp_payload),4+len(enc2), callGas)
   p = ethabi.encode([
     'address',
     'uint256',
@@ -66,7 +80,7 @@ def gen_response(req, err_code, resp_payload):
     req['opNonce'],
     Web3.keccak(Web3.to_bytes(hexstr='0x')), # initCode
     Web3.keccak(Web3.to_bytes(hexstr=p_enc2)),
-    Web3.to_int(hexstr=limits['callGasLimit']),
+    callGas,
     Web3.to_int(hexstr=limits['verificationGasLimit']),
     Web3.to_int(hexstr=limits['preVerificationGas']),
     0, # maxFeePerGas
@@ -122,6 +136,40 @@ def offchain_addsub2(sk, src_addr, src_nonce, oo_nonce, payload, *args):
 
   return gen_response(req, err_code, resp)
 
+# Demo method, returns a string containing a given number of random words
+def offchain_ramble(sk, src_addr, src_nonce, oo_nonce, payload, *args):
+  global wordlist
+  print("  -> offchain_ramble handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk, src_addr, src_nonce, oo_nonce, payload, args))
+  err_code = 1
+  resp = Web3.to_bytes(text="unknown error")
+
+  try:
+    req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
+    dec = ethabi.decode(['uint256','bool'], req['reqBytes'])
+    n = dec[0]
+    cheat = dec[1]
+    words = []
+
+    if n >= 1 and n < 1000:
+      for i in range(n):
+        r = random.randint(0,len(wordlist)-1)
+        words.append(wordlist[r])
+
+      if cheat:
+        pos = random.randint(0,len(words)-1)
+        print("Cheat at position", pos)
+        words[pos] = "frog"
+
+      resp = ethabi.encode(['string[]'], [words])
+      err_code = 0
+    else:
+      print("Invalid length", n)
+      resp = Web3.to_bytes(text="invalid string length")
+  except Exception as e:
+    print("DECODE FAILED", e)
+
+  return gen_response(req, err_code, resp)
+
 # -------------------------------------------------------------
 
 class RequestHandler(SimpleJSONRPCRequestHandler):
@@ -130,6 +178,8 @@ class RequestHandler(SimpleJSONRPCRequestHandler):
 def server_loop():
   server = SimpleJSONRPCServer(('0.0.0.0', PORT), requestHandler=RequestHandler)
   server.register_function(offchain_addsub2, selector("addsub2(uint32,uint32)"))  # 97e0d7ba
+  server.register_function(offchain_ramble,  selector("ramble(uint256,bool)"))
   server.serve_forever()
+
 
 server_loop() # Run until killed

@@ -38,6 +38,8 @@ hc1_key  = "0x7c0c629efc797f8c5f658919b7efbae01275470d59d03fdeb0fca1e6bd11d7fa"
 bundler_addr = Web3.to_checksum_address("0xB834a876b7234eb5A45C0D5e693566e8842400bB")
 bundler_key  = "0xf91be07ef5a01328015cae4f2e5aefe3c4577a90abb8e2e913fe071b0e3732ed"
 
+bundler_rpc = "http://127.0.0.1:3300"
+
 # -------------------------------------------------------------
 
 w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:9545"))
@@ -65,12 +67,16 @@ def showBalances():
   print("SA ", EP.functions.getDepositInfo(SA.address).call(), w3.eth.get_balance(SA.address))
   print("BA ", EP.functions.getDepositInfo(BA.address).call(), w3.eth.get_balance(BA.address))
   print("HA ", EP.functions.getDepositInfo(HA.address).call(), w3.eth.get_balance(HA.address))
+  print("TC ", EP.functions.getDepositInfo(TC.address).call(), w3.eth.get_balance(TC.address))
 
 showBalances()
 balStart_bnd = w3.eth.get_balance(bundler_addr)
 balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0]
 
 # -------------------------------------------------------------
+def selector(name):
+  nameHash = Web3.to_hex(Web3.keccak(text=name))
+  return nameHash[2:10]
 
 def signAndSubmit(tx, key):
   signed_txn =w3.eth.account.sign_transaction(tx, key)
@@ -276,16 +282,44 @@ def ParseReceipt(opReceipt):
   l1Fees += Web3.to_int(hexstr=txRcpt['l1Fee'])
   #exit(0)
 
+def submitOp(p):
+  opHash = EP.functions.getUserOpHash(packOp(p)).call()
+  eMsg = eth_account.messages.encode_defunct(opHash)
+  sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
+  p['signature'] = Web3.to_hex(sig.signature)
+
+  response = requests.post(bundler_rpc, json=request("eth_sendUserOperation", params=[p, EP.address]))
+  print("sendOperation response", response.json())
+
+  opHash = {}
+  opHash['hash'] = response.json()['result']
+  timeout = True
+  for i in range(10):
+    print("Waiting for receipt...")
+    time.sleep(1)
+    opReceipt = requests.post(bundler_rpc, json=request("eth_getUserOperationReceipt", params=opHash))
+    opReceipt = opReceipt.json()['result']
+    if opReceipt is not None:
+      #print("opReceipt", opReceipt)
+      assert(opReceipt['receipt']['status'] == "0x1")
+      print("operation success", opReceipt['success'])
+      ParseReceipt(opReceipt)
+      timeout = False
+      assert(opReceipt['success'])
+      break
+  if timeout:
+    print("*** Previous operation timed out")
+    exit(1)
+
 def TestAddSub2 (a, b):
   global estGas
   print("\n  - - - - TestAddSub2({},{}) - - - -".format(a,b))
   print("TestCount(begin)=", TC.functions.counters(SA.address).call())
-  # 0xb83adc8b = count(uint256,address)
-  # 0x2e41763e = count(uint32,uint32,address)
-  countCall = Web3.to_bytes(hexstr="0x2e41763e") + ethabi.encode(['uint32', 'uint32', 'address'], [a, b, HA.address]) #HERE
 
-  # 0xb61d27f6 = execute(address,uint256,bytes)
-  exCall = Web3.to_bytes(hexstr="0xb61d27f6") + ethabi.encode(['address','uint256','bytes'],[TC.address,0,countCall])
+  countCall = Web3.to_bytes(hexstr="0x"+selector("count(uint32,uint32)")) + ethabi.encode(['uint32', 'uint32'], [a, b])
+
+  exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + \
+    ethabi.encode(['address','uint256','bytes'],[TC.address, 0, countCall])
 
   p = buildOp(SA, nKey, exCall)
 
@@ -295,7 +329,7 @@ def TestAddSub2 (a, b):
   p['signature'] = Web3.to_hex(sig.signature)
 
   j = [p, EP.address]
-  response = requests.post("http://localhost:3300/", json=request("eth_estimateUserOperationGas", params=j))
+  response = requests.post(bundler_rpc, json=request("eth_estimateUserOperationGas", params=j))
   print("estimateGas response", response.json())
 
   if 'error' in response.json():
@@ -315,40 +349,70 @@ def TestAddSub2 (a, b):
     p['callGasLimit'] = Web3.to_hex(Web3.to_int(hexstr=est_result['callGasLimit']) + 0)
     estGas =  Web3.to_int(hexstr=est_result['preVerificationGas']) + Web3.to_int(hexstr=est_result['verificationGasLimit']) + Web3.to_int(hexstr=est_result['callGasLimit'])
     print("estimateGas total =", estGas)
+
+  print("-----")
+  time.sleep(5)
+  submitOp(p)
+  print("TestCount(end)=", TC.functions.counters(SA.address).call())
+
+def TestWordGuess (n, cheat):
+  global estGas
+  print("\n  - - - - TestWordGuess({},{}) - - - -".format(n, cheat))
+  gameCall = Web3.to_bytes(hexstr="0x"+selector("wordGuess(string,bool)")) + \
+    ethabi.encode(['string', 'bool'], ["frog", cheat])
+
+  perEntry = TC.functions.EntryCost().call();
+  print("Pool balance before playing =", Web3.from_wei(TC.functions.Pool().call(),'gwei'))
+
+  exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + \
+    ethabi.encode(['address','uint256','bytes'],[TC.address, n * perEntry, gameCall])
+  p = buildOp(SA, nKey, exCall)
+
   opHash = EP.functions.getUserOpHash(packOp(p)).call()
   eMsg = eth_account.messages.encode_defunct(opHash)
   sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
   p['signature'] = Web3.to_hex(sig.signature)
 
+  j = [p, EP.address]
+  response = requests.post(bundler_rpc, json=request("eth_estimateUserOperationGas", params=j))
+  print("estimateGas response", response.json())
+
+  if 'error' in response.json():
+    print("*** eth_estimateUserOperationGas failed")
+    time.sleep(2)
+    if True:
+      return
+    print("*** Continuing after failure")
+    p['preVerificationGas'] = "0xffff"
+    p['verificationGasLimit'] = "0xffff"
+    p['callGasLimit'] = "0x40000"
+  else:
+    est_result = response.json()['result']
+
+    p['preVerificationGas'] = Web3.to_hex(Web3.to_int(hexstr=est_result['preVerificationGas']) + 0)
+    p['verificationGasLimit'] = Web3.to_hex(Web3.to_int(hexstr=est_result['verificationGasLimit']) + 0)
+    p['callGasLimit'] = Web3.to_hex(Web3.to_int(hexstr=est_result['callGasLimit']) + 0)
+    estGas =  Web3.to_int(hexstr=est_result['preVerificationGas']) + Web3.to_int(hexstr=est_result['verificationGasLimit']) + Web3.to_int(hexstr=est_result['callGasLimit'])
+    print("estimateGas total =", estGas)
+
   print("-----")
   time.sleep(5)
-  response = requests.post("http://localhost:3300/", json=request("eth_sendUserOperation", params=[p, EP.address]))
-  print("sendOperation response", response.json())
+  submitOp(p)
+  print("Pool balance after playing =", Web3.from_wei(TC.functions.Pool().call(),'gwei'))
 
-  opHash = {}
-  opHash['hash'] = response.json()['result']
-  timeout = True
-  for i in range(10):
-    print("Waiting for receipt...")
-    time.sleep(1)
-    opReceipt = requests.post("http://localhost:3300/", json=request("eth_getUserOperationReceipt", params=opHash))
-    opReceipt = opReceipt.json()['result']
-    if opReceipt is not None:
-      #print("opReceipt", opReceipt)
-      assert(opReceipt['receipt']['status'] == "0x1")
-      print("operation success", opReceipt['success'])
-      ParseReceipt(opReceipt)
-      timeout = False
-      break
-  print("TestCount(end)=", TC.functions.counters(SA.address).call())
-  if timeout:
-    print("*** Previous operation timed out")
-    exit(1)
+# ===============================================
+
+
 TestAddSub2(2, 1)   # Success
 TestAddSub2(2, 10)  # Underflow error, asserted
 TestAddSub2(2, 3)   # Underflow error, handled internally
 TestAddSub2(7, 0)   # Not HC
 TestAddSub2(4, 1)   # Success again
+
+TestWordGuess(1, False)
+TestWordGuess(10, False)
+TestWordGuess(100, False)
+TestWordGuess(2, True)
 
 showBalances()
 balFinal_bnd = w3.eth.get_balance(bundler_addr)
@@ -359,6 +423,7 @@ print("Net balance changes", balFinal_bnd - balStart_bnd, balFinal_sa - balStart
 userPaid = balStart_sa - balFinal_sa
 bundlerProfit = balFinal_bnd - balStart_bnd
 print("User account paid:", userPaid)
+assert(userPaid > 0)
 print("   Bundler profit:", bundlerProfit, 100*(bundlerProfit / userPaid), "%")
 print("           L2 gas:", l2Fees, 100*(l2Fees / userPaid), "%")
 print("           L1 fee:", l1Fees, 100*(l1Fees / userPaid), "%")
