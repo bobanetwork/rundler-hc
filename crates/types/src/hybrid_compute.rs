@@ -6,8 +6,9 @@
   ERR_REMOTE   = 1 Offchain server provided an error response; its delivery was successful
   ERR_RPC      = 2 JSON-RPC returned an error result; message is copied
   ERR_DECODE   = 3 JSON-RPC response was not valid
-  ERR_INTERNAL = 4 Error in the HC implementation
+  ERR_OTHER    = 4 Internal error or unexpected RPC error
   ERR_PAYMENT  = 5 Calling contract did not provide sufficient payment
+  ERR_CONNECT  = 6 Unable to connect to RPC server (incl. 500-class HTTP error). Considered to be a temporary failure.
 */
 
 use ethers::{
@@ -29,6 +30,15 @@ use std::ops::Add;
 use once_cell::sync::Lazy;
 
 use std::time::{Duration, SystemTime};
+
+#[derive(Clone,Debug)]
+/// Error code
+pub struct HcErr {
+    /// numeric code
+    pub code: u32,
+    /// message
+    pub message: String,
+}
 
 /// Cache entry containing an offchain operation
 pub struct HcEntry {
@@ -266,8 +276,7 @@ pub async fn external_op(
 pub async fn err_op(
     op_key:H256,
     entry_point:Address,
-    err_code: u32,
-    err_str: String,
+    err_hc: HcErr,
     sub_key: H256,
     src_addr: Address,
     nn: U256,
@@ -275,10 +284,10 @@ pub async fn err_op(
     map_key: H256,
     cfg: &HcCfg,
 ) {
-    println!("HC hybrid_compute err_op op_key {:?} err_str {:?}", op_key, err_str);
+    println!("HC hybrid_compute err_op op_key {:?} err_str {:?}", op_key, err_hc.message);
 
-    assert!(err_code >= 2);
-    let response_payload:Bytes = AbiEncode::encode((src_addr, nn, err_code, err_str)).into();
+    assert!(err_hc.code >= 2);
+    let response_payload:Bytes = AbiEncode::encode((src_addr, nn, err_hc.code, err_hc.message)).into();
 
     let call_data = make_err_calldata(cfg.helper_addr, sub_key, Bytes::from(response_payload.to_vec()));
     println!("HC external_op call_data {:?}", call_data);

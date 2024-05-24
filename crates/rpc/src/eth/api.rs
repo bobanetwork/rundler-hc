@@ -244,7 +244,7 @@ where
 	let url = hx.registered_callers(ep_addr).await.expect("url_decode").1;
 	println!("HC registered_caller url {:?}", url);
 
-        let cc = HttpClientBuilder::default().build(url).unwrap();
+        let cc = HttpClientBuilder::default().build(url).unwrap();  // could specify a request_timeout() here.
 	let m = hex::encode(hybrid_compute::hc_selector(revert_data));
 	let sub_key = hybrid_compute::hc_sub_key(revert_data);
 	let sk_hex = hex::encode(sub_key);
@@ -270,26 +270,54 @@ where
         let resp: Result<HashMap<String,JsonValue>, _> = cc.request(&m, params).await;
 
         println!("HC resp {:?}", resp);
+        let mut err_hc:hybrid_compute::HcErr = hybrid_compute::HcErr{code:0, message:String::new()};
 
-	if resp.is_ok() {
-	    let resp2 = resp.unwrap();
-	    if resp2.contains_key("success") && resp2.contains_key("response") && resp2.contains_key("signature") &&
-	    resp2["success"].is_boolean() && resp2["response"].is_string() && resp2["signature"].is_string() {
-                let op_success = resp2["success"].as_bool().unwrap();
-	        let resp_hex = resp2["response"].as_str().unwrap();
-	        let sig_hex:String = resp2["signature"].as_str().unwrap().into();
-	        let hc_res:Bytes = hex::decode(resp_hex).unwrap().into();
-	        println!("HC api.rs do_op result sk {:?} success {:?} res {:?}", sub_key, op_success, hc_res);
+        match resp {
+	    Ok(resp) => {
+	        if resp.contains_key("success") && resp.contains_key("response") && resp.contains_key("signature") &&
+		resp["success"].is_boolean() && resp["response"].is_string() && resp["signature"].is_string() {
+                    let op_success = resp["success"].as_bool().unwrap();
+	            let resp_hex = resp["response"].as_str().unwrap();
+	            let sig_hex:String = resp["signature"].as_str().unwrap().into();
+	            let hc_res:Bytes = hex::decode(resp_hex).unwrap().into();
+	            println!("HC api.rs do_op result sk {:?} success {:?} res {:?}", sub_key, op_success, hc_res);
 
-                hybrid_compute::external_op(hh, op.sender, hc_nonce, op_success, &hc_res, sub_key, ep_addr, sig_hex, oo_nonce, map_key, &self.settings.hc).await;
-            } else {
-	        hybrid_compute::err_op(hh, context.gas_estimator.entry_point.address(), 2, "HC01: Decode Error".to_string(), sub_key, op.sender, hc_nonce, err_nonce, map_key, &self.settings.hc).await;
+                    hybrid_compute::external_op(hh, op.sender, hc_nonce, op_success, &hc_res, sub_key, ep_addr, sig_hex, oo_nonce, map_key, &self.settings.hc).await;
+                } else {
+	            err_hc = hybrid_compute::HcErr{code: 3, message:"HC03: Decode Error".to_string()};
+		}
+	    },
+	    Err(error) => {
+                match error {
+                    jsonrpsee::core::Error::Call(e)  => {
+			err_hc = hybrid_compute::HcErr{code: 2, message:"HC02: Call error: ".to_owned() + e.message()};
+	            },
+                    jsonrpsee::core::Error::Transport(e) => {
+			if e.to_string().contains("Connection refused") ||
+			  e.to_string().contains("status code: 5") { // look for 500-class HTTP errors
+		            err_hc = hybrid_compute::HcErr{code: 6, message:"HC06: ".to_owned() + &e.to_string()};
+			} else {
+		            err_hc = hybrid_compute::HcErr{code: 2, message:"HC02: ".to_owned() + &e.to_string()};
+			}
+		    },
+                    jsonrpsee::core::Error::RequestTimeout => {
+                        err_hc = hybrid_compute::HcErr{code: 6, message:"HC06: RequestTimeout".to_string()};
+		    },
+                    jsonrpsee::core::Error::Custom(e) => {
+			err_hc = hybrid_compute::HcErr{code: 2, message:"HC02: Custom error:".to_owned() + &e.to_string()};
+		    },
+		    other => {
+		      println!("HC unmatched error {:?}", other);
+	              err_hc = hybrid_compute::HcErr{code: 4, message:"HC04: Unrecognized Error:".to_owned() + &other.to_string()};
+		    }
+                }
 	    }
-	} else {
-	    println!("HC api.rs calling err_op");
-	    // FIXME - return specific error codes for different failure scenarios
-	    hybrid_compute::err_op(hh, context.gas_estimator.entry_point.address(), 2, "HC01: Unknown Error".to_string(), sub_key, op.sender, hc_nonce, err_nonce, map_key, &self.settings.hc).await;
-        }
+	}
+
+        if err_hc.code != 0 {
+            println!("HC api.rs calling err_op {:?}", err_hc.message);
+	    hybrid_compute::err_op(hh, context.gas_estimator.entry_point.address(), err_hc.clone(), sub_key, op.sender, hc_nonce, err_nonce, map_key, &self.settings.hc).await;
+	}
 
         let s2 = hybrid_compute::get_hc_op_statediff(hh, s2);
 	let result2 = context
@@ -350,6 +378,10 @@ where
 
             let needed_pvg = r3.pre_verification_gas + offchain_gas;
             hybrid_compute::hc_set_pvg(hh, needed_pvg, offchain_gas + cleanup_gas + offchain_gas);
+
+            if err_hc.code != 0 {
+                return Err(GasEstimationError::RevertInValidation(err_hc.message));
+	    }
 
 	    return Ok(GasEstimate {
 	        pre_verification_gas: needed_pvg,

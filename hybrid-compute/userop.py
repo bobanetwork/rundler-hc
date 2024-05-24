@@ -329,7 +329,7 @@ def TestAddSub2 (a, b):
   p['signature'] = Web3.to_hex(sig.signature)
 
   j = [p, EP.address]
-  response = requests.post(bundler_rpc, json=request("eth_estimateUserOperationGas", params=j))
+  response = requests.post(bundler_rpc, json=request("eth_estimateUserOperationGas", params=j), timeout=600)
   print("estimateGas response", response.json())
 
   if 'error' in response.json():
