@@ -28,7 +28,6 @@ use std::{sync::Mutex, collections::HashMap};
 use std::ops::Add;
 
 use once_cell::sync::Lazy;
-
 use std::time::{Duration, SystemTime};
 
 #[derive(Clone,Debug)]
@@ -79,7 +78,7 @@ static HC_MAP: Lazy<Mutex<HashMap<ethers::types::H256, HcEntry>>> = Lazy::new(||
     Mutex::new(m)
 });
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug,PartialEq)]
 /// Parameters needed for Hybrid Compute, accessed from various modules.
 pub struct HcCfg {
     /// Helper contract address
@@ -436,4 +435,68 @@ pub fn expire_hc_cache() {
     let mut map = HC_MAP.lock().unwrap();
     let exp_time = SystemTime::now().add(EXPIRE_SECS);
     map.retain(|_, ent| ent.ts < exp_time);
+}
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_init() {
+        init(
+            "0x0000000000000000000000000000000000000001".parse::<Address>().unwrap(),
+            "0x0000000000000000000000000000000000000002".parse::<Address>().unwrap(),
+            "0x0000000000000000000000000000000000000003".parse::<Address>().unwrap(),
+            "0x1111111111111111111111111111111111111111111111111111111111111111".parse::<H256>().unwrap(),
+            "0x0000000000000000000000000000000000000004".parse::<Address>().unwrap(),
+            123,
+            "http://test.local/rpc".to_string(),
+        );
+        set_signer("0x0000000000000000000000000000000000000005".parse::<Address>().unwrap());
+
+        let expected:HcCfg = HcCfg {
+            helper_addr: "0x0000000000000000000000000000000000000001".parse::<Address>().unwrap(),
+            sys_account: "0x0000000000000000000000000000000000000002".parse::<Address>().unwrap(),
+            sys_owner:   "0x0000000000000000000000000000000000000003".parse::<Address>().unwrap(),
+            sys_privkey: "0x1111111111111111111111111111111111111111111111111111111111111111".parse::<H256>().unwrap(),
+            entry_point: "0x0000000000000000000000000000000000000004".parse::<Address>().unwrap(),
+            chain_id:    123,
+            node_http:   "http://test.local/rpc".to_string(),
+            from_addr:   "0x0000000000000000000000000000000000000005".parse::<Address>().unwrap(),
+        };
+        let cfg:HcCfg = HC_CONFIG.lock().unwrap().clone();
+        assert_eq!(expected, cfg);
+    }
+
+    #[test]
+    fn test_trigger() {
+        let t_no =  "0x5f41415f545249479c6df0d4c9d8f527221b59c66ad5279c16a1dbc221e8f4e33617575840a20013d516f1be1937bb52bbd7d525d996fd557d3d597f97e0d7ba00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001".parse::<Bytes>().unwrap();
+        let t_yes = "0x5f48435f545249479c6df0d4c9d8f527221b59c66ad5279c16a1dbc221e8f4e33617575840a20013d516f1be1937bb52bbd7d525d996fd557d3d597f97e0d7ba00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001".parse::<Bytes>().unwrap();
+        let t_short = "0x5f48435f545249479c6df0d4c9d8f527221b59c66ad5279c16a1dbc221e8f4e33617575840a20013d516f1be1937bb52bbd7d525d996fd557d3d597f97e0d7".parse::<Bytes>().unwrap();
+        assert_eq!(check_trigger(&t_no), false);
+        assert_eq!(check_trigger(&t_yes), true);
+        assert_eq!(check_trigger(&t_short), false);
+    }
+
+    #[test]
+    fn test_req_parse() {
+        let rev_data = "0x5f48435f545249479c6df0d4c9d8f527221b59c66ad5279c16a1dbc221e8f4e33617575840a20013d516f1be1937bb52bbd7d525d996fd557d3d597f97e0d7ba00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001".parse::<Bytes>().unwrap();
+        let e_map_key = "0xa12faae2eedc0b231c96ab3c88c0b7e1e5dbc6fd02c462e79751c1eff7484efb".parse::<H256>().unwrap();
+        let e_sub_key = "0x16d7f606293dca5dbbe97735b2913e6dade6e3f216310b12148cb67a6fd86947".parse::<H256>().unwrap();
+        let e_ep_addr = "0x9c6df0d4c9d8f527221b59c66ad5279c16a1dbc2".parse::<Address>().unwrap();
+        let e_sel = [151, 224, 215, 186];
+        let e_payload = "0x00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001".parse::<Bytes>().unwrap();
+
+	let map_key = hc_map_key(&rev_data);
+	assert_eq!(e_map_key, map_key);
+	let sub_key = hc_sub_key(&rev_data);
+	assert_eq!(e_sub_key, sub_key);
+	let ep_addr = hc_ep_addr(&rev_data);
+	assert_eq!(e_ep_addr, ep_addr);
+	let sel = hc_selector(&rev_data);
+	assert_eq!(e_sel, sel);
+	let payload = hc_req_payload(&rev_data);
+	assert_eq!(e_payload, payload);
+    }
 }
