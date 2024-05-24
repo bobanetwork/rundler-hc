@@ -248,18 +248,18 @@ impl<P: Provider, E: EntryPoint> PrecheckerImpl<P, E> {
 	println!("HC precheck.rs before gas fees {:?}", op.clone());
         // check priority fee first, since once ruled out we can check max fee
         if op.max_priority_fee_per_gas < min_priority_fee {
-	    println!("HC prcheck.rs BYPASS priority_fee {:?} {:?}", op.clone(), min_priority_fee);
-            //violations.push(PrecheckViolation::MaxPriorityFeePerGasTooLow(
-            //    op.max_priority_fee_per_gas,
-            //    min_priority_fee,
-            //));
+	    //println!("HC prcheck.rs BYPASS priority_fee {:?} {:?}", op.clone(), min_priority_fee);
+            violations.push(PrecheckViolation::MaxPriorityFeePerGasTooLow(
+                op.max_priority_fee_per_gas,
+                min_priority_fee,
+            ));
         }
         if op.max_fee_per_gas < min_max_fee {
-	    println!("HC prcheck.rs BYPASS max_fee {:?} {:?}", op.clone(), min_max_fee);
-            //violations.push(PrecheckViolation::MaxFeePerGasTooLow(
-            //    op.max_fee_per_gas,
-            //    min_max_fee,
-            //));
+	    //println!("HC prcheck.rs BYPASS max_fee {:?} {:?}", op.clone(), min_max_fee);
+            violations.push(PrecheckViolation::MaxFeePerGasTooLow(
+                op.max_fee_per_gas,
+                min_max_fee,
+            ));
         }
 
         if op.call_gas_limit < MIN_CALL_GAS_LIMIT {
