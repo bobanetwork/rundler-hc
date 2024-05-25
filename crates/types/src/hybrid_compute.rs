@@ -39,6 +39,7 @@ pub struct HcErr {
     pub message: String,
 }
 
+#[derive(Debug)]
 /// Cache entry containing an offchain operation
 pub struct HcEntry {
     /// Partial key, to be combined with msg.sender in the Helper contract
@@ -224,9 +225,8 @@ pub fn hc_req_payload(revert_data : &Bytes) -> Vec<u8> {
     revert_data[64..].to_vec()
 }
 
-/// Processes an external hybrid compute op.
-pub async fn external_op(
-    op_key: H256,
+/// Internal function to generate a UserOperation for an offchain response
+fn make_external_op(
     src_addr: Address,
     nonce: U256,
     op_success: bool,
@@ -235,10 +235,8 @@ pub async fn external_op(
     ep_addr: Address,
     sig_hex: String,
     oo_nonce: U256,
-    map_key: H256,
     cfg: &HcCfg,
-) {
-    println!("HC hybrid_compute external_op op_key {:?} response_payload {:?}", op_key, response_payload);
+) -> UserOperation {
 
     let tmp_bytes:Bytes = Bytes::from(response_payload.to_vec());
 
@@ -267,8 +265,60 @@ pub async fn external_op(
     new_op.signature = sig_hex.parse::<Bytes>().unwrap();
     println!("HC signed {:?}", new_op.signature);
 
+    new_op
+}
+
+/// Processes an external hybrid compute op.
+pub async fn external_op(
+    op_key: H256,
+    src_addr: Address,
+    nonce: U256,
+    op_success: bool,
+    response_payload: &Bytes,
+    sub_key: H256,
+    ep_addr: Address,
+    sig_hex: String,
+    oo_nonce: U256,
+    map_key: H256,
+    cfg: &HcCfg,
+) {
+    println!("HC hybrid_compute external_op op_key {:?} response_payload {:?}", op_key, response_payload);
+    let new_op = make_external_op(src_addr,nonce,op_success,response_payload,sub_key,ep_addr,sig_hex,oo_nonce,cfg);
+
     let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), needed_pvg: U256::zero() };
     HC_MAP.lock().unwrap().insert(op_key, ent);
+}
+
+fn make_err_op(
+    err_hc: HcErr,
+    sub_key: H256,
+    src_addr: Address,
+    nn: U256,
+    oo_nonce: U256,
+    cfg: &HcCfg,
+) -> UserOperation {
+
+    let response_payload:Bytes = AbiEncode::encode((src_addr, nn, err_hc.code, err_hc.message)).into();
+
+    let call_data = make_err_calldata(cfg.helper_addr, sub_key, Bytes::from(response_payload.to_vec()));
+    println!("HC external_op call_data {:?}", call_data);
+
+    let new_op:UserOperation = UserOperation{
+        sender: cfg.sys_account,
+	nonce: oo_nonce.into(),
+	init_code: Bytes::new(),
+	call_data: call_data.clone(),
+	call_gas_limit:U256::from(0x30000),
+	verification_gas_limit: U256::from(0x10000),
+	pre_verification_gas: U256::from(0x10000),
+	max_fee_per_gas: U256::zero(),
+	max_priority_fee_per_gas: U256::zero(),
+	paymaster_and_data: Bytes::new(),
+	signature: Bytes::new(),
+    };
+
+
+    new_op
 }
 
 /// Encapsulate an error code into a UserOperation
@@ -284,27 +334,8 @@ pub async fn err_op(
     cfg: &HcCfg,
 ) {
     println!("HC hybrid_compute err_op op_key {:?} err_str {:?}", op_key, err_hc.message);
-
     assert!(err_hc.code >= 2);
-    let response_payload:Bytes = AbiEncode::encode((src_addr, nn, err_hc.code, err_hc.message)).into();
-
-    let call_data = make_err_calldata(cfg.helper_addr, sub_key, Bytes::from(response_payload.to_vec()));
-    println!("HC external_op call_data {:?}", call_data);
-
-    let mut new_op:UserOperation = UserOperation{
-        sender: cfg.sys_account,
-	nonce: oo_nonce.into(),
-	init_code: Bytes::new(),
-	call_data: call_data.clone(),
-	call_gas_limit:U256::from(0x30000),
-	verification_gas_limit: U256::from(0x10000),
-	pre_verification_gas: U256::from(0x10000),
-	max_fee_per_gas: U256::zero(),
-	max_priority_fee_per_gas: U256::zero(),
-	paymaster_and_data: Bytes::new(),
-	signature: Bytes::new(),
-    };
-
+    let mut new_op = make_err_op(err_hc, sub_key, src_addr, nn, oo_nonce, cfg);
     let key_bytes: Bytes  = cfg.sys_privkey.as_fixed_bytes().into();
     let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
@@ -498,5 +529,78 @@ mod test {
 	assert_eq!(e_sel, sel);
 	let payload = hc_req_payload(&rev_data);
 	assert_eq!(e_payload, payload);
+    }
+
+    #[test]
+    fn test_op_gen_external() {
+        let cfg:HcCfg = HC_CONFIG.lock().unwrap().clone();
+
+        let payload = "0x0000000000000000000000000000000000000000000000000000000000000002".parse::<Bytes>().unwrap();
+        let op = make_external_op(
+            "0x1000000000000000000000000000000000000001".parse::<Address>().unwrap(),
+            U256::from(100),
+            true,
+            &payload,
+            "0x2222222222222222222222222222222222222222222222222222222222222222".parse::<H256>().unwrap(),
+            "0x2000000000000000000000000000000000000002".parse::<Address>().unwrap(),
+            "0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c".to_string(),
+            U256::from(222),
+            &cfg,
+        );
+
+        let e_calldata = "0xb61d27f60000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000124dfc98ae82222222222222222222222222222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000010000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
+        let expected:UserOperation = UserOperation{
+            sender: "0x2000000000000000000000000000000000000002".parse::<Address>().unwrap(),
+            nonce: U256::from(222),
+            init_code: Bytes::new(),
+            call_data: e_calldata,
+            call_gas_limit: U256::from(192560),
+            verification_gas_limit: U256::from(65536),
+            pre_verification_gas: U256::from(65536),
+            max_fee_per_gas: U256::from(0),
+            max_priority_fee_per_gas: U256::from(0),
+            paymaster_and_data: Bytes::new(),
+            signature: "0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c".parse::<Bytes>().unwrap(),
+        };
+        assert_eq!(expected, op);
+    }
+
+    #[test]
+    fn test_op_gen_error() {
+        let cfg = HcCfg {
+            helper_addr: "0x0000000000000000000000000000000000000001".parse::<Address>().unwrap(),
+            sys_account: "0x0000000000000000000000000000000000000002".parse::<Address>().unwrap(),
+            sys_owner:   "0x0000000000000000000000000000000000000003".parse::<Address>().unwrap(),
+            sys_privkey: "0x1111111111111111111111111111111111111111111111111111111111111111".parse::<H256>().unwrap(),
+            entry_point: "0x0000000000000000000000000000000000000004".parse::<Address>().unwrap(),
+            chain_id:    123,
+            node_http:   "http://test.local/rpc".to_string(),
+            from_addr:   "0x0000000000000000000000000000000000000005".parse::<Address>().unwrap(),
+        };
+
+        let op = make_err_op(
+            HcErr{code:4, message:"unit test".to_string()},
+            "0x2222222222222222222222222222222222222222222222222222222222222222".parse::<H256>().unwrap(),
+            "0x2000000000000000000000000000000000000002".parse::<Address>().unwrap(),
+            U256::from(100),
+            U256::from(222),
+            &cfg,
+        );
+
+        let e_calldata = "0xb61d27f60000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000124fde89b642222222222222222222222222222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000020000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000009756e69742074657374000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
+        let expected:UserOperation = UserOperation{
+            sender: "0x0000000000000000000000000000000000000002".parse::<Address>().unwrap(),
+            nonce: U256::from(222),
+            init_code: Bytes::new(),
+            call_data: e_calldata,
+            call_gas_limit: U256::from(196608),
+            verification_gas_limit: U256::from(65536),
+            pre_verification_gas: U256::from(65536),
+            max_fee_per_gas: U256::from(0),
+            max_priority_fee_per_gas: U256::from(0),
+            paymaster_and_data: Bytes::new(),
+            signature: Bytes::new(),
+        };
+        assert_eq!(expected, op);
     }
 }
