@@ -17,6 +17,9 @@
 .DS_Store
 .helix
 
+/venv
+
+__pycache__
 hybrid-compute/__pycache__/
 hybrid-compute/addresses.txt
 hybrid-compute/contracts.json

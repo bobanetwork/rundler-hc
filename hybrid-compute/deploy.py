@@ -69,6 +69,8 @@ def buildAndSubmit(f, addr, key):
   return signAndSubmit(tx, key)
 
 HH = loadContract(w3, "HCHelper",      path_prefix+"core/HCHelper.sol")
+KYC = loadContract(w3, "TestKyc",          path_prefix+"test/TestKyc.sol")
+TestTokenPrice = loadContract(w3, "TestTokenPrice", path_prefix+"test/TestTokenPrice.sol")
 TC = loadContract(w3, "TestCounter",   path_prefix+"test/TestCounter.sol")
 EP = loadContract(w3, "EntryPoint",    path_prefix+"core/EntryPoint.sol")
 SA = loadContract(w3, "SimpleAccount", path_prefix+"samples/SimpleAccount.sol")
@@ -151,6 +153,8 @@ saAddr  = deploy2("SimpleAccount", SA.constructor(epAddr),0)
 ha0Addr = deploy2("HybridAccount.0", HA.constructor(epAddr, hhAddr),0)
 ha1Addr = deploy2("HybridAccount.1", HA.constructor(epAddr, hhAddr),1)
 tcAddr  = deploy2("TestCounter", TC.constructor(ha1Addr),0)
+kycAddr = deploy2("TestKyc", KYC.constructor(ha1Addr), 0 )
+testTokenAddr = deploy2("TestTokenPrice", TestTokenPrice.constructor(ha1Addr), 0)
 
 with open("./contracts.json", "w") as f:
   f.write(json.dumps(deployed))
