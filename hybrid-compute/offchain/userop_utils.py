@@ -86,10 +86,6 @@ def showBalances():
         TFP.address).call(), w3.eth.get_balance(TFP.address))
 
 
-showBalances()
-balStart_bnd = w3.eth.get_balance(bundler_addr)
-balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0]
-
 # -------------------------------------------------------------
 
 
@@ -177,14 +173,15 @@ def fundAddr(addr):
             tx['gasPrice'] = Web3.to_wei(1, 'gwei')
         signAndSubmit(tx, deploy_key)
 
-    if EP.functions.deposits(addr).call()[0] < Web3.to_wei(0.5, 'ether'):
+def fundAddrEP(addr):
+    if EP.functions.deposits(addr).call()[0] < Web3.to_wei(0.005, 'ether'):
         print("Funding acct (depositTo)", addr)
         tx = EP.functions.depositTo(addr).build_transaction({
             'nonce': w3.eth.get_transaction_count(deploy_addr),
             'from': deploy_addr,
             'gas': 210000,
             'chainId': HC_CHAIN,
-            'value': Web3.to_wei(1, "ether")
+            'value': Web3.to_wei(0.01, "ether")
         })
         signAndSubmit(tx, deploy_key)
     print("Balances for", addr, Web3.from_wei(w3.eth.get_balance(addr), 'ether'),
@@ -251,9 +248,9 @@ def registerUrl(caller, url):
 
 print("Setup...")
 
-fundAddr(HA.address)
 fundAddr(SA.address)
-fundAddr(BA.address)
+fundAddrEP(HA.address)
+fundAddrEP(BA.address)
 fundAddr(bundler_addr)
 
 # FIXME - fix SetOwner() so that these don't need to be funded, only to sign.
@@ -273,8 +270,8 @@ permitCaller(HA, KYC.address)
 permitCaller(HA, TFP.address)
 
 # Change IP address as needed.
-registerUrl(HA.address, "http://192.168.178.37:1234/hc")
-
+registerUrl(HA.address, "http://192.168.178.37.:1234/hc")
+'''
 if not EP.functions.deposits(bundler_addr).call()[1]:
     print("Staking bundler")
     tx = EP.functions.addStake(60).build_transaction({
@@ -285,6 +282,10 @@ if not EP.functions.deposits(bundler_addr).call()[1]:
         'value': Web3.to_wei(0.1, "ether")
     })
     signAndSubmit(tx, bundler_key)
+'''
+showBalances()
+balStart_bnd = w3.eth.get_balance(bundler_addr)
+balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0]
 
 print("TestCount(pre)=", TC.functions.counters(SA.address).call())
 print("TestFetchPrice(pre)=", TFP.functions.counters(0).call())
