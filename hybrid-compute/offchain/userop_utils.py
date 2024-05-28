@@ -270,7 +270,7 @@ permitCaller(HA, KYC.address)
 permitCaller(HA, TFP.address)
 
 # Change IP address as needed.
-registerUrl(HA.address, "http://192.168.178.37.:1234/hc")
+registerUrl(HA.address, "http://192.168.178.37:1234/hc")
 '''
 if not EP.functions.deposits(bundler_addr).call()[1]:
     print("Staking bundler")
@@ -285,7 +285,7 @@ if not EP.functions.deposits(bundler_addr).call()[1]:
 '''
 showBalances()
 balStart_bnd = w3.eth.get_balance(bundler_addr)
-balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0]
+balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0] + w3.eth.get_balance(SA.address)
 
 print("TestCount(pre)=", TC.functions.counters(SA.address).call())
 print("TestFetchPrice(pre)=", TFP.functions.counters(0).call())
@@ -344,7 +344,7 @@ def submitOp(p):
         if opReceipt is not None:
             # print("opReceipt", opReceipt)
             assert (opReceipt['receipt']['status'] == "0x1")
-            print("operation success", opReceipt['success'])
+            print("operation success", opReceipt['success'], "txHash=", opReceipt['receipt']['transactionHash'])
             ParseReceipt(opReceipt)
             timeout = False
             assert (opReceipt['success'])

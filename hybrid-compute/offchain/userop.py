@@ -29,7 +29,7 @@ TestKyc(False)  # Fail
 
 showBalances()
 balFinal_bnd = w3.eth.get_balance(bundler_addr)
-balFinal_sa = EP.functions.getDepositInfo(SA.address).call()[0]
+balFinal_sa = EP.functions.getDepositInfo(SA.address).call()[0] + w3.eth.get_balance(SA.address)
 
 print("Net balance changes", balFinal_bnd - balStart_bnd, balFinal_sa - balStart_sa,
       (balFinal_bnd + balFinal_sa) - (balStart_bnd + balStart_sa), (l1Fees + l2Fees))
