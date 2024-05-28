@@ -347,7 +347,7 @@ where
 	    let r2 = context
                 .gas_estimator
                 .estimate_op_gas(op_tmp_2, spoof::State::default())
-                .await.unwrap();
+                .await?;
 
             let offchain_gas = r2.pre_verification_gas + r2.verification_gas_limit + r2.call_gas_limit;
 
