@@ -27,7 +27,7 @@ services:
       ENTRY_POINTS:    ${ENTRY_POINTS}    # Deployed contract address
       BUILDER_PRIVATE_KEY: ${BUILDER_PRIVKEY} # Key for bundler EOA
       NODE_HTTP:       ${NODE_HTTP}       # Replica/Sequencer URL
-      CHAIN_ID:        901                # Chain ID
+      CHAIN_ID:        ${CHAIN_ID}        # Chain ID
       RPC_PORT:        3300               # RPC port to submit into Bundler
     ports:
       - 3300:3300
@@ -39,8 +39,8 @@ services:
     image: offchain-rpc:latest
     environment:
       HC_HELPER_ADDR:    ${HC_HELPER_ADDR}     # Deployed contract address
-      ENTRY_POINT:       ${ENTRY_POINTS}       # Deployed contract address (note: only supports a single addr here)
-      CHAIN_ID:          901                   # Chain ID
+      ENTRY_POINTS:      ${ENTRY_POINTS}       # Deployed contract address (note: only supports a single addr here)
+      CHAIN_ID:          ${CHAIN_ID}           # Chain ID
       OC_LISTEN_PORT:    1234                  # Port for RPC server
       OC_HYBRID_ACCOUNT: ${OC_HYBRID_ACCOUNT}  # Deployed contract address
       OC_OWNER:          ${OC_OWNER}           # Owner/Signer for OC_HYBRID_ACCOUNT

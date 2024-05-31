@@ -6,7 +6,9 @@ import eth_account
 HC_CHAIN = int(os.environ['CHAIN_ID'])
 assert (HC_CHAIN != 0)
 
-EP_ADDR = os.environ['ENTRY_POINT']
+# This var is named "ENTRY_POINTS" to match rundler-hc, however the current
+# implementation only supports a single entrypoint.
+EP_ADDR = os.environ['ENTRY_POINTS']
 assert (len(EP_ADDR) == 42)
 EntryPointAddr = Web3.to_checksum_address(EP_ADDR)
 
