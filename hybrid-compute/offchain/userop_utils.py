@@ -10,27 +10,20 @@ import requests
 
 import eth_account
 
-deploy_addr = Web3.to_checksum_address(
-    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
-deploy_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-
 # The following addrs and keys are for local demo purposes. Do not deploy to public networks
 u_addr = Web3.to_checksum_address("0x77Fe14A710E33De68855b0eA93Ed8128025328a9")
 u_key = "0x541b3e3b20b8bb0e5bae310b2d4db4c8b7912ba09750e6ff161b7e67a26a9bf7"
 
 # HC0 is used within the bundler to insert system error messages
 hc0_addr = "0x2A9099A58E0830A4Ab418c2a19710022466F1ce7"
-hc0_key = "0x75cd983f0f4714969b152baa258d849473732905e2301467303dacf5a09fdd57"
 
 # HC1 is used by the offchain JSON-RPC endpoint
 hc1_addr = Web3.to_checksum_address(
     "0xE073fC0ff8122389F6e693DD94CcDc5AF637448e")
-hc1_key = "0x7c0c629efc797f8c5f658919b7efbae01275470d59d03fdeb0fca1e6bd11d7fa"
 
 # This is the EOA account which the bundler will use to submit its batches
 bundler_addr = Web3.to_checksum_address(
     "0xB834a876b7234eb5A45C0D5e693566e8842400bB")
-bundler_key = "0xf91be07ef5a01328015cae4f2e5aefe3c4577a90abb8e2e913fe071b0e3732ed"
 
 bundler_rpc = "http://127.0.0.1:3300"
 
@@ -152,137 +145,8 @@ def packOp(op):
     )
     return ret
 
-
-def fundAddr(addr):
-    if w3.eth.get_balance(addr) == 0:
-        print("Funding acct (direct)", addr)
-        n = w3.eth.get_transaction_count(deploy_addr)
-        v = Web3.to_wei(1.001, 'ether')
-        # v += Web3.to_wei(n, 'wei')
-        tx = {
-            'nonce': n,
-            'from': deploy_addr,
-            'to': addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
-            'value': v
-        }
-        if w3.eth.gas_price > 1000000:
-            tx['gasPrice'] = w3.eth.gas_price
-        else:
-            tx['gasPrice'] = Web3.to_wei(1, 'gwei')
-        signAndSubmit(tx, deploy_key)
-
-def fundAddrEP(addr):
-    if EP.functions.deposits(addr).call()[0] < Web3.to_wei(0.005, 'ether'):
-        print("Funding acct (depositTo)", addr)
-        tx = EP.functions.depositTo(addr).build_transaction({
-            'nonce': w3.eth.get_transaction_count(deploy_addr),
-            'from': deploy_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
-            'value': Web3.to_wei(0.01, "ether")
-        })
-        signAndSubmit(tx, deploy_key)
-    print("Balances for", addr, Web3.from_wei(w3.eth.get_balance(addr), 'ether'),
-          Web3.from_wei(EP.functions.deposits(addr).call()[0], 'ether'))
-
-
-def setOwner(acct, owner):
-    if acct.functions.owner().call() != owner:
-        tx = acct.functions.initialize(owner).build_transaction({
-            'nonce': w3.eth.get_transaction_count(u_addr),
-            'from': u_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
-        })
-        signAndSubmit(tx, u_key)
-
-
-def setSysAcct(sys):
-    if HH.functions.systemAccount().call() != sys:
-        tx = HH.functions.SetSystemAccount(sys).build_transaction({
-            'nonce': w3.eth.get_transaction_count(deploy_addr),
-            'from': deploy_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
-        })
-        signAndSubmit(tx, deploy_key)
-
-
-def permitCaller(acct, caller):
-    if not acct.functions.PermittedCallers(caller).call():
-        print("Permit caller {} on {}".format(caller, acct.address))
-        tx = acct.functions.PermitCaller(caller, True).build_transaction({
-            'nonce': w3.eth.get_transaction_count(hc1_addr),
-            'from': hc1_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
-        })
-        signAndSubmit(tx, hc1_key)
-
-
-def registerUrl(caller, url):
-    print("Credit balance=", HH.functions.RegisteredCallers(caller).call()[2])
-    # Temporray hack
-    if HH.functions.RegisteredCallers(caller).call()[1] != url or HH.functions.RegisteredCallers(caller).call()[2] == 0:
-        print("Calling RegisterUrl()")
-        tx = HH.functions.RegisterUrl(caller, url).build_transaction({
-            'nonce': w3.eth.get_transaction_count(deploy_addr),
-            'from': deploy_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
-        })
-        signAndSubmit(tx, deploy_key)
-        print("Calling AddCredit()")
-        tx = HH.functions.AddCredit(caller, 100).build_transaction({
-            'nonce': w3.eth.get_transaction_count(deploy_addr),
-            'from': deploy_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
-        })
-        signAndSubmit(tx, deploy_key)
-
 # -------------------------------------------------------------
 
-
-print("Setup...")
-
-fundAddr(SA.address)
-fundAddrEP(HA.address)
-fundAddrEP(BA.address)
-fundAddr(bundler_addr)
-
-# FIXME - fix SetOwner() so that these don't need to be funded, only to sign.
-fundAddr(u_addr)
-fundAddr(hc0_addr)
-fundAddr(hc1_addr)
-
-setOwner(HH, deploy_addr)
-setSysAcct(BA.address)
-
-setOwner(SA, u_addr)
-setOwner(HA, hc1_addr)
-setOwner(BA, hc0_addr)
-
-permitCaller(HA, TC.address)
-permitCaller(HA, KYC.address)
-permitCaller(HA, TFP.address)
-
-# Change IP address as needed.
-registerUrl(HA.address, "http://192.168.178.37:1234/hc")
-'''
-if not EP.functions.deposits(bundler_addr).call()[1]:
-    print("Staking bundler")
-    tx = EP.functions.addStake(60).build_transaction({
-        'nonce': w3.eth.get_transaction_count(bundler_addr),
-        'from': bundler_addr,
-        'gas': 210000,
-        'chainId': HC_CHAIN,
-        'value': Web3.to_wei(0.1, "ether")
-    })
-    signAndSubmit(tx, bundler_key)
-'''
 showBalances()
 balStart_bnd = w3.eth.get_balance(bundler_addr)
 balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0] + w3.eth.get_balance(SA.address)

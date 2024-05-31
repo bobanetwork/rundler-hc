@@ -13,6 +13,18 @@ boba_addr = Web3.to_checksum_address("0x4200000000000000000000000000000000000023
 deploy_addr = Web3.to_checksum_address("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
 deploy_key  = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
+bundler_addr = Web3.to_checksum_address(
+    "0xB834a876b7234eb5A45C0D5e693566e8842400bB")
+
+# The following addrs and keys are for local demo purposes. Do not deploy to public networks
+u_addr = Web3.to_checksum_address("0x77Fe14A710E33De68855b0eA93Ed8128025328a9")
+u_key = "0x541b3e3b20b8bb0e5bae310b2d4db4c8b7912ba09750e6ff161b7e67a26a9bf7"
+
+# HC1 is used by the offchain JSON-RPC endpoint
+hc1_addr = Web3.to_checksum_address(
+    "0xE073fC0ff8122389F6e693DD94CcDc5AF637448e")
+hc1_key = "0x7c0c629efc797f8c5f658919b7efbae01275470d59d03fdeb0fca1e6bd11d7fa"
+
 l1 = Web3(Web3.HTTPProvider("http://127.0.0.1:8545"))
 assert (l1.is_connected)
 l1.middleware_onion.inject(geth_poa_middleware, layer=0)
@@ -94,24 +106,6 @@ if w3.eth.get_balance(deploy_addr) == 0:
     time.sleep(2)
   print("Continuing")
 
-if w3.eth.get_balance(factory_owner) == 0:
-  print("Funding factory_owner")
-  tx = {
-      'nonce': w3.eth.get_transaction_count(deploy_addr),
-      'from':deploy_addr,
-      'to':factory_owner,
-      'gas':210000,
-      'gasPrice': w3.eth.gas_price,
-      'chainId': HC_CHAIN,
-      'value': Web3.to_wei(10,'ether')
-  }
-  signAndSubmit(w3, tx, deploy_key)
-
-  print("Sleep...")
-  while w3.eth.get_balance(factory_owner) == 0:
-    time.sleep(2)
-  print("Continuing")
-
 deployed = dict()
 
 def deploy2(name, cc, salt):
@@ -145,16 +139,131 @@ def deploy2(name, cc, salt):
   deployed[name] = dict()
   deployed[name]['abi'] = contract_info[cname]['abi']
   deployed[name]['address'] = c2_addr
-  return c2_addr
 
-epAddr  = deploy2("EntryPoint", EP.constructor(),0)
-hhAddr  = deploy2("HCHelper", HH.constructor(epAddr, boba_addr, 0),0)
-saAddr  = deploy2("SimpleAccount", SA.constructor(epAddr),0)
-ha0Addr = deploy2("HybridAccount.0", HA.constructor(epAddr, hhAddr),0)
-ha1Addr = deploy2("HybridAccount.1", HA.constructor(epAddr, hhAddr),1)
-tcAddr  = deploy2("TestCounter", TC.constructor(ha1Addr),0)
-kycAddr = deploy2("TestKyc", KYC.constructor(ha1Addr), 0 )
-testTokenAddr = deploy2("TestTokenPrice", TestTokenPrice.constructor(ha1Addr), 0)
+  C = w3.eth.contract(abi=contract_info[cname]['abi'], address=c2_addr)
+  return C
+
+def setOwner(acct, owner):
+    if acct.functions.owner().call() != owner:
+        print("Setting owner")
+        tx = acct.functions.initialize(owner).build_transaction({
+            'nonce': w3.eth.get_transaction_count(deploy_addr),
+            'from': deploy_addr,
+            'gas': 210000,
+            'chainId': HC_CHAIN,
+        })
+        signAndSubmit(w3, tx, deploy_key)
+
+def setSysAcct(HH, sys):
+    if HH.functions.systemAccount().call() != sys:
+        print("Setting systemAccount")
+        tx = HH.functions.SetSystemAccount(sys).build_transaction({
+            'nonce': w3.eth.get_transaction_count(deploy_addr),
+            'from': deploy_addr,
+            'gas': 210000,
+            'chainId': HC_CHAIN,
+        })
+        signAndSubmit(w3, tx, deploy_key)
+
+def permitCaller(acct, caller):
+    if not acct.functions.PermittedCallers(caller).call():
+        print("Permit caller {} on {}".format(caller, acct.address))
+        tx = acct.functions.PermitCaller(caller, True).build_transaction({
+            'nonce': w3.eth.get_transaction_count(hc1_addr),
+            'from': hc1_addr,
+            'gas': 210000,
+            'chainId': HC_CHAIN,
+        })
+        signAndSubmit(w3, tx, hc1_key)
+
+def registerUrl(caller, url):
+    print("Credit balance=", HH.functions.RegisteredCallers(caller).call()[2])
+    # Temporray hack
+    if HH.functions.RegisteredCallers(caller).call()[1] != url or HH.functions.RegisteredCallers(caller).call()[2] == 0:
+        print("Calling RegisterUrl()")
+        tx = HH.functions.RegisterUrl(caller, url).build_transaction({
+            'nonce': w3.eth.get_transaction_count(deploy_addr),
+            'from': deploy_addr,
+            'gas': 210000,
+            'chainId': HC_CHAIN,
+        })
+        signAndSubmit(w3, tx, deploy_key)
+        print("Calling AddCredit()")
+        tx = HH.functions.AddCredit(caller, 100).build_transaction({
+            'nonce': w3.eth.get_transaction_count(deploy_addr),
+            'from': deploy_addr,
+            'gas': 210000,
+            'chainId': HC_CHAIN,
+        })
+        signAndSubmit(w3, tx, deploy_key)
+
+def fundAddr(addr):
+    if w3.eth.get_balance(addr) == 0:
+        print("Funding acct (direct)", addr)
+        n = w3.eth.get_transaction_count(deploy_addr)
+        v = Web3.to_wei(1.001, 'ether')
+        # v += Web3.to_wei(n, 'wei')
+        tx = {
+            'nonce': n,
+            'from': deploy_addr,
+            'to': addr,
+            'gas': 210000,
+            'chainId': HC_CHAIN,
+            'value': v
+        }
+        if w3.eth.gas_price > 1000000:
+            tx['gasPrice'] = w3.eth.gas_price
+        else:
+            tx['gasPrice'] = Web3.to_wei(1, 'gwei')
+        signAndSubmit(w3, tx, deploy_key)
+
+def fundAddrEP(EP, addr):
+    if EP.functions.deposits(addr).call()[0] < Web3.to_wei(0.005, 'ether'):
+        print("Funding acct (depositTo)", addr)
+        tx = EP.functions.depositTo(addr).build_transaction({
+            'nonce': w3.eth.get_transaction_count(deploy_addr),
+            'from': deploy_addr,
+            'gas': 210000,
+            'chainId': HC_CHAIN,
+            'value': Web3.to_wei(0.01, "ether")
+        })
+        signAndSubmit(w3, tx, deploy_key)
+    print("Balances for", addr, Web3.from_wei(w3.eth.get_balance(addr), 'ether'),
+          Web3.from_wei(EP.functions.deposits(addr).call()[0], 'ether'))
+
+fundAddr(bundler_addr)
+fundAddr(u_addr)
+# FIXME - fix permitCaller() so that these don't need to be funded, only to sign.
+fundAddr(hc1_addr)
+
+EP  = deploy2("EntryPoint", EP.constructor(),0)
+HH  = deploy2("HCHelper", HH.constructor(EP.address, boba_addr, 0),0)
+setOwner(HH, deploy_addr)
+
+SA  = deploy2("SimpleAccount", SA.constructor(EP.address),0)
+setOwner(SA, Web3.to_checksum_address("0x77Fe14A710E33De68855b0eA93Ed8128025328a9"))
+fundAddr(SA.address)
+
+BA = deploy2("HybridAccount.0", HA.constructor(EP.address, HH.address),0)
+setSysAcct(HH, BA.address)
+setOwner(BA, Web3.to_checksum_address("0x2A9099A58E0830A4Ab418c2a19710022466F1ce7"))
+fundAddrEP(EP, BA.address)
+
+HA = deploy2("HybridAccount.1", HA.constructor(EP.address, HH.address),1)
+setOwner(HA, Web3.to_checksum_address("0xE073fC0ff8122389F6e693DD94CcDc5AF637448e"))
+fundAddrEP(EP, HA.address)
+
+TC  = deploy2("TestCounter", TC.constructor(HA.address),0)
+KYC = deploy2("TestKyc", KYC.constructor(HA.address), 0 )
+TFP = deploy2("TestTokenPrice", TestTokenPrice.constructor(HA.address), 0)
+
+# Change IP address as needed.
+registerUrl(HA.address, "http://192.168.178.37:1234/hc")
+#registerUrl(HA.address, "http://192.168.4.2:1234/hc")
+
+permitCaller(HA, TC.address)
+permitCaller(HA, KYC.address)
+permitCaller(HA, TFP.address)
 
 with open("./contracts.json", "w") as f:
   f.write(json.dumps(deployed))
@@ -170,10 +279,10 @@ if os.path.exists(".env"):
     for line in f.readlines():
       k,v = line.strip().split('=')
       env_vars[k] = v
-  env_vars['ENTRY_POINTS'] = epAddr
-  env_vars['HC_HELPER_ADDR'] = hhAddr
-  env_vars['HC_SYS_ACCOUNT'] = ha0Addr
-  env_vars['OC_HYBRID_ACCOUNT'] = ha1Addr
+  env_vars['ENTRY_POINTS'] = EP.address
+  env_vars['HC_HELPER_ADDR'] = HH.address
+  env_vars['HC_SYS_ACCOUNT'] = BA.address
+  env_vars['OC_HYBRID_ACCOUNT'] = HA.address
   with open(".env","w") as f:
     for k in env_vars:
       f.write("{}={}\n".format(k,env_vars[k]))
