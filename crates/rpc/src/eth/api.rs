@@ -260,7 +260,10 @@ where
 	let oo_n_key:U256 = U256::from_big_endian(op.sender.as_fixed_bytes());
 	let oo_nonce = context.gas_estimator.entry_point.get_nonce(ep_addr, oo_n_key).await.unwrap();
 
+        const REQ_VERSION:&str = "0.2";
+
 	let mut params = ObjectParams::new();
+	let _ = params.insert("ver", REQ_VERSION);
 	let _ = params.insert("sk", sk_hex);
 	let _ = params.insert("src_addr", src_addr);
 	let _ = params.insert("src_nonce", src_n);
