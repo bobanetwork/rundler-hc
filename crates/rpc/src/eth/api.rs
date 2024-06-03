@@ -385,7 +385,7 @@ where
 
 	    return Ok(GasEstimate {
 	        pre_verification_gas: needed_pvg,
-	        verification_gas_limit: r3.verification_gas_limit,
+	        verification_gas_limit: r3.verification_gas_limit + 10000,
 	        call_gas_limit: r3.call_gas_limit,
 	    });
 	} else {
