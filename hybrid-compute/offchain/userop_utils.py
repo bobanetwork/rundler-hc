@@ -4,6 +4,7 @@ from random import *
 import requests
 import json
 from web3.middleware import geth_poa_middleware
+import os
 
 from jsonrpcclient import request
 import requests
@@ -14,25 +15,24 @@ import eth_account
 u_addr = Web3.to_checksum_address("0x77Fe14A710E33De68855b0eA93Ed8128025328a9")
 u_key = "0x541b3e3b20b8bb0e5bae310b2d4db4c8b7912ba09750e6ff161b7e67a26a9bf7"
 
-# HC0 is used within the bundler to insert system error messages
-hc0_addr = "0x2A9099A58E0830A4Ab418c2a19710022466F1ce7"
+BUNDLER_ADDR = os.environ['BUNDLER_ADDR']
+assert (len(BUNDLER_ADDR) == 42)
+bundler_addr = Web3.to_checksum_address(BUNDLER_ADDR)
 
-# HC1 is used by the offchain JSON-RPC endpoint
-hc1_addr = Web3.to_checksum_address(
-    "0xE073fC0ff8122389F6e693DD94CcDc5AF637448e")
+bundler_rpc = os.environ['BUNDLER_RPC']
+assert(len(bundler_rpc) > 0)
 
-# This is the EOA account which the bundler will use to submit its batches
-bundler_addr = Web3.to_checksum_address(
-    "0xB834a876b7234eb5A45C0D5e693566e8842400bB")
+node_http = os.environ['NODE_HTTP']
+assert(len(node_http) > 0)
 
-bundler_rpc = "http://127.0.0.1:3300"
+HC_CHAIN = int(os.environ['CHAIN_ID'])
+assert(HC_CHAIN > 0)
 
 # -------------------------------------------------------------
 
-w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:9545"))
+w3 = Web3(Web3.HTTPProvider(node_http))
 assert (w3.is_connected)
 w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-HC_CHAIN = 901
 
 with open("./contracts.json", "r") as f:
     deployed = json.loads(f.read())
@@ -61,10 +61,6 @@ print("EP at", EP.address)
 def showBalances():
     print("u  ", EP.functions.getDepositInfo(
         u_addr).call(), w3.eth.get_balance(u_addr))
-    print("hc0", EP.functions.getDepositInfo(
-        hc0_addr).call(), w3.eth.get_balance(hc0_addr))
-    print("hc1", EP.functions.getDepositInfo(
-        hc1_addr).call(), w3.eth.get_balance(hc1_addr))
     print("bnd", EP.functions.getDepositInfo(
         bundler_addr).call(), w3.eth.get_balance(bundler_addr))
     print("SA ", EP.functions.getDepositInfo(
