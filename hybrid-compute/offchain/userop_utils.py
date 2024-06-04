@@ -144,7 +144,39 @@ def packOp(op):
     )
     return ret
 
+def estimateOp(p):
+    global gasFees
 
+    est_params = [p, EP.address]
+    print("estimation params {}".format(est_params))
+
+    response = requests.post(
+        bundler_rpc, json=request("eth_estimateUserOperationGas", params=est_params))
+    print("estimateGas response", response.json())
+
+    if 'error' in response.json():
+        print("*** eth_estimateUserOperationGas failed")
+        time.sleep(2)
+        if True:
+            return p, 0
+        print("*** Continuing after failure")
+        p['preVerificationGas'] = "0xffff"
+        p['verificationGasLimit'] = "0xffff"
+        p['callGasLimit'] = "0x40000"
+    else:
+        est_result = response.json()['result']
+
+        p['preVerificationGas'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['preVerificationGas']) + 0)
+        p['verificationGasLimit'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['verificationGasLimit']) + 0)
+        p['callGasLimit'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['callGasLimit']) + 0)
+
+        gasFees['estGas'] = Web3.to_int(hexstr=est_result['preVerificationGas']) + Web3.to_int(
+            hexstr=est_result['verificationGasLimit']) + Web3.to_int(hexstr=est_result['callGasLimit'])
+        print("estimateGas total =", gasFees['estGas'])
+    return p, gasFees['estGas']
 # ===============================================
 
 # Generates an AA-style nonce (each key has its own associated sequence count)
