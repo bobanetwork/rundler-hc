@@ -13,7 +13,7 @@ from userop_utils import *
 
 
 def TestKyc(isValid: bool):
-    global estGas
+    global gasFees
     print("\n  - - - - TestKyc({}) - - - -".format(isValid))
     print("SA ADDRESS {}".format(SA.address))
     print("TestKyc begin")
@@ -62,9 +62,10 @@ def TestKyc(isValid: bool):
             hexstr=est_result['verificationGasLimit']) + 0)
         p['callGasLimit'] = Web3.to_hex(Web3.to_int(
             hexstr=est_result['callGasLimit']) + 0)
-        estGas = Web3.to_int(hexstr=est_result['preVerificationGas']) + Web3.to_int(
+
+        gasFees['estGas'] = Web3.to_int(hexstr=est_result['preVerificationGas']) + Web3.to_int(
             hexstr=est_result['verificationGasLimit']) + Web3.to_int(hexstr=est_result['callGasLimit'])
-        print("estimateGas total =", estGas)
+        print("estimateGas total =", gasFees['estGas'])
     opHash = EP.functions.getUserOpHash(packOp(p)).call()
     eMsg = eth_account.messages.encode_defunct(opHash)
     sig = w3.eth.account.sign_message(eMsg, private_key=u_key)

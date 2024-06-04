@@ -13,7 +13,6 @@ from userop_utils import *
 
 
 def TestAddSub2(a, b):
-    global estGas
     print("\n  - - - - TestAddSub2({},{}) - - - -".format(a, b))
     print("TestCount(begin)=", TC.functions.counters(SA.address).call())
 

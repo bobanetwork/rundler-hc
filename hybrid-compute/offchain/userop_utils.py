@@ -30,6 +30,11 @@ assert(HC_CHAIN > 0)
 
 # -------------------------------------------------------------
 
+gasFees = dict()
+gasFees['estGas'] = 123 # Tracks gas between estimate and receipt; should refactor
+gasFees['l2Fees'] = 0   # Cumulative L2 fees
+gasFees['l1Fees'] = 0   # Cumulative L1 fees
+
 w3 = Web3(Web3.HTTPProvider(node_http))
 assert (w3.is_connected)
 w3.middleware_onion.inject(geth_poa_middleware, layer=0)
@@ -54,9 +59,7 @@ KYC = w3.eth.contract(
 TFP = w3.eth.contract(
     address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
 
-
 print("EP at", EP.address)
-
 
 def showBalances():
     print("u  ", EP.functions.getDepositInfo(
@@ -141,30 +144,16 @@ def packOp(op):
     )
     return ret
 
-# -------------------------------------------------------------
-
-showBalances()
-balStart_bnd = w3.eth.get_balance(bundler_addr)
-balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0] + w3.eth.get_balance(SA.address)
-
-print("TestCount(pre)=", TC.functions.counters(SA.address).call())
-print("TestFetchPrice(pre)=", TFP.functions.counters(0).call())
 
 # ===============================================
-print("\n------\n")
 
 # Generates an AA-style nonce (each key has its own associated sequence count)
 nKey = int(1000 + (w3.eth.get_transaction_count(u_addr) % 7))
 # nKey = 0
-print("nKey", nKey)
-l2Fees = 0
-l1Fees = 0
-egPrice = 0
-estGas = 0
-
+#print("nKey", nKey)
 
 def ParseReceipt(opReceipt):
-    global l1Fees, l2Fees, egPrice
+    global gasFees
     txRcpt = opReceipt['receipt']
 
     n = 0
@@ -174,11 +163,11 @@ def ParseReceipt(opReceipt):
     print("Total tx gas stats:", Web3.to_int(
         hexstr=txRcpt['gasUsed']), txRcpt['l1GasUsed'], txRcpt['l1Fee'])
     opGas = Web3.to_int(hexstr=opReceipt['actualGasUsed'])
-    print("opReceipt gas used", opGas, "unused", estGas - opGas)
+    print("opReceipt gas used", opGas, "unused", gasFees['estGas'] - opGas)
 
     egPrice = Web3.to_int(hexstr=txRcpt['effectiveGasPrice'])
-    l2Fees += Web3.to_int(hexstr=txRcpt['gasUsed']) * egPrice
-    l1Fees += Web3.to_int(hexstr=txRcpt['l1Fee'])
+    gasFees['l2Fees'] += Web3.to_int(hexstr=txRcpt['gasUsed']) * egPrice
+    gasFees['l1Fees'] += Web3.to_int(hexstr=txRcpt['l1Fee'])
     # exit(0)
 
 
