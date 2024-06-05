@@ -19,12 +19,13 @@ def load_words():
 wordlist = load_words()
 
 
-def offchain_ramble(sk, src_addr, src_nonce, oo_nonce, payload, *args):
+def offchain_ramble(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     global wordlist
     print("  -> offchain_ramble handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
           src_addr, src_nonce, oo_nonce, payload, args))
     err_code = 1
     resp = Web3.to_bytes(text="unknown error")
+    assert(ver == "0.2")
 
     try:
         req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)

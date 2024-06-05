@@ -4,6 +4,7 @@ from random import *
 import requests
 import json
 from web3.middleware import geth_poa_middleware
+import os
 
 from jsonrpcclient import request
 import requests
@@ -14,25 +15,29 @@ import eth_account
 u_addr = Web3.to_checksum_address("0x77Fe14A710E33De68855b0eA93Ed8128025328a9")
 u_key = "0x541b3e3b20b8bb0e5bae310b2d4db4c8b7912ba09750e6ff161b7e67a26a9bf7"
 
-# HC0 is used within the bundler to insert system error messages
-hc0_addr = "0x2A9099A58E0830A4Ab418c2a19710022466F1ce7"
+BUNDLER_ADDR = os.environ['BUNDLER_ADDR']
+assert (len(BUNDLER_ADDR) == 42)
+bundler_addr = Web3.to_checksum_address(BUNDLER_ADDR)
 
-# HC1 is used by the offchain JSON-RPC endpoint
-hc1_addr = Web3.to_checksum_address(
-    "0xE073fC0ff8122389F6e693DD94CcDc5AF637448e")
+bundler_rpc = os.environ['BUNDLER_RPC']
+assert(len(bundler_rpc) > 0)
 
-# This is the EOA account which the bundler will use to submit its batches
-bundler_addr = Web3.to_checksum_address(
-    "0xB834a876b7234eb5A45C0D5e693566e8842400bB")
+node_http = os.environ['NODE_HTTP']
+assert(len(node_http) > 0)
 
-bundler_rpc = "http://127.0.0.1:3300"
+HC_CHAIN = int(os.environ['CHAIN_ID'])
+assert(HC_CHAIN > 0)
 
 # -------------------------------------------------------------
 
-w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:9545"))
+gasFees = dict()
+gasFees['estGas'] = 123 # Tracks gas between estimate and receipt; should refactor
+gasFees['l2Fees'] = 0   # Cumulative L2 fees
+gasFees['l1Fees'] = 0   # Cumulative L1 fees
+
+w3 = Web3(Web3.HTTPProvider(node_http))
 assert (w3.is_connected)
 w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-HC_CHAIN = 901
 
 with open("./contracts.json", "r") as f:
     deployed = json.loads(f.read())
@@ -56,17 +61,11 @@ TFP = w3.eth.contract(
 TCAPTCHA = w3.eth.contract(
     address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
 
-
 print("EP at", EP.address)
-
 
 def showBalances():
     print("u  ", EP.functions.getDepositInfo(
         u_addr).call(), w3.eth.get_balance(u_addr))
-    print("hc0", EP.functions.getDepositInfo(
-        hc0_addr).call(), w3.eth.get_balance(hc0_addr))
-    print("hc1", EP.functions.getDepositInfo(
-        hc1_addr).call(), w3.eth.get_balance(hc1_addr))
     print("bnd", EP.functions.getDepositInfo(
         bundler_addr).call(), w3.eth.get_balance(bundler_addr))
     print("SA ", EP.functions.getDepositInfo(
@@ -160,21 +159,50 @@ balStart_sa = EP.functions.getDepositInfo(
 print("TestCount(pre)=", TC.functions.counters(SA.address).call())
 print("TestFetchPrice(pre)=", TFP.functions.counters(0).call())
 
+
+def estimateOp(p):
+    global gasFees
+
+    est_params = [p, EP.address]
+    print("estimation params {}".format(est_params))
+
+    response = requests.post(
+        bundler_rpc, json=request("eth_estimateUserOperationGas", params=est_params))
+    print("estimateGas response", response.json())
+
+    if 'error' in response.json():
+        print("*** eth_estimateUserOperationGas failed")
+        time.sleep(2)
+        if True:
+            return p, 0
+        print("*** Continuing after failure")
+        p['preVerificationGas'] = "0xffff"
+        p['verificationGasLimit'] = "0xffff"
+        p['callGasLimit'] = "0x40000"
+    else:
+        est_result = response.json()['result']
+
+        p['preVerificationGas'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['preVerificationGas']) + 0)
+        p['verificationGasLimit'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['verificationGasLimit']) + 0)
+        p['callGasLimit'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['callGasLimit']) + 0)
+
+        gasFees['estGas'] = Web3.to_int(hexstr=est_result['preVerificationGas']) + Web3.to_int(
+            hexstr=est_result['verificationGasLimit']) + Web3.to_int(hexstr=est_result['callGasLimit'])
+        print("estimateGas total =", gasFees['estGas'])
+    return p, gasFees['estGas']
+
 # ===============================================
-print("\n------\n")
 
 # Generates an AA-style nonce (each key has its own associated sequence count)
 nKey = int(1000 + (w3.eth.get_transaction_count(u_addr) % 7))
 # nKey = 0
-print("nKey", nKey)
-l2Fees = 0
-l1Fees = 0
-egPrice = 0
-estGas = 0
-
+#print("nKey", nKey)
 
 def ParseReceipt(opReceipt):
-    global l1Fees, l2Fees, egPrice
+    global gasFees
     txRcpt = opReceipt['receipt']
 
     n = 0
@@ -184,11 +212,11 @@ def ParseReceipt(opReceipt):
     print("Total tx gas stats:", Web3.to_int(
         hexstr=txRcpt['gasUsed']), txRcpt['l1GasUsed'], txRcpt['l1Fee'])
     opGas = Web3.to_int(hexstr=opReceipt['actualGasUsed'])
-    print("opReceipt gas used", opGas, "unused", estGas - opGas)
+    print("opReceipt gas used", opGas, "unused", gasFees['estGas'] - opGas)
 
     egPrice = Web3.to_int(hexstr=txRcpt['effectiveGasPrice'])
-    l2Fees += Web3.to_int(hexstr=txRcpt['gasUsed']) * egPrice
-    l1Fees += Web3.to_int(hexstr=txRcpt['l1Fee'])
+    gasFees['l2Fees'] += Web3.to_int(hexstr=txRcpt['gasUsed']) * egPrice
+    gasFees['l1Fees'] += Web3.to_int(hexstr=txRcpt['l1Fee'])
     # exit(0)
 
 
