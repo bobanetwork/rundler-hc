@@ -67,6 +67,8 @@ KYC = w3.eth.contract(
     address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
 TFP = w3.eth.contract(
     address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
+TCAPTCHA = w3.eth.contract(
+    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
 
 print("EP at", EP.address)
 
@@ -85,6 +87,8 @@ def showBalances():
         TC.address).call(), w3.eth.get_balance(TC.address))
     print("TFP", EP.functions.getDepositInfo(
         TFP.address).call(), w3.eth.get_balance(TFP.address))
+    print("TCAPTCHA", EP.functions.getDepositInfo(
+        TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
 
 
 # -------------------------------------------------------------
@@ -153,6 +157,18 @@ def packOp(op):
     )
     return ret
 
+# -------------------------------------------------------------
+
+
+showBalances()
+balStart_bnd = w3.eth.get_balance(bundler_addr)
+balStart_sa = EP.functions.getDepositInfo(
+    SA.address).call()[0] + w3.eth.get_balance(SA.address)
+
+print("TestCount(pre)=", TC.functions.counters(SA.address).call())
+print("TestFetchPrice(pre)=", TFP.functions.counters(0).call())
+
+
 def estimateOp(p):
     global gasFees
 
@@ -186,6 +202,7 @@ def estimateOp(p):
             hexstr=est_result['verificationGasLimit']) + Web3.to_int(hexstr=est_result['callGasLimit'])
         print("estimateGas total =", gasFees['estGas'])
     return p, gasFees['estGas']
+
 # ===============================================
 
 # Generates an AA-style nonce (each key has its own associated sequence count)
@@ -240,7 +257,8 @@ def submitOp(p):
         if opReceipt is not None:
             # print("opReceipt", opReceipt)
             assert (opReceipt['receipt']['status'] == "0x1")
-            print("operation success", opReceipt['success'], "txHash=", opReceipt['receipt']['transactionHash'])
+            print("operation success", opReceipt['success'],
+                  "txHash=", opReceipt['receipt']['transactionHash'])
             ParseReceipt(opReceipt)
             timeout = False
             assert (opReceipt['success'])

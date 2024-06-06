@@ -6,11 +6,10 @@ from add_sub_2.add_sub_2_offchain import offchain_addsub2
 from ramble.ramble_offchain import offchain_ramble
 from check_kyc.check_kyc_offchain import offchain_checkkyc
 from get_token_price.get_token_price_offchain import offchain_getprice
+from verify_captcha.captcha_offchain import offchain_verifycaptcha
 
 PORT = int(os.environ['OC_LISTEN_PORT'])
 assert (PORT != 0)
-
-
 
 
 def selector(name):
@@ -33,6 +32,8 @@ def server_loop():
         offchain_checkkyc, selector("checkkyc(string)"))
     server.register_function(
         offchain_getprice, selector("getprice(string)"))
+    server.register_function(
+        offchain_verifycaptcha, selector("verifyCaptcha(string,string,string)"))
 
     server.serve_forever()
 

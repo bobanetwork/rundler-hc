@@ -4,6 +4,7 @@ from get_token_price.get_token_price_test import TestTokenPrice
 from check_kyc.check_kyc_test import TestKyc
 from add_sub_2.add_sub_2_test import TestAddSub2
 from ramble.ramble_test import TestWordGuess
+from verify_captcha.captcha_test import TestCaptcha
 from userop_utils import *
 
 print("Starting Balances:")
@@ -15,10 +16,13 @@ print("TestCount(start)=", TC.functions.counters(SA.address).call())
 print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 
 # ===============================================
+
+TestCaptcha("0x123")
+
 #TestTokenPrice("ETH")
 
-TestKyc(True)  # Success
-TestKyc(False)  # Fail
+#TestKyc(True)  # Success
+#TestKyc(False)  # Fail
 
 #TestAddSub2(2, 1)   # Success
 #TestAddSub2(2, 10)  # Underflow error, asserted

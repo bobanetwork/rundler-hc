@@ -83,6 +83,7 @@ def buildAndSubmit(f, addr, key):
 HH = loadContract(w3, "HCHelper",      path_prefix+"core/HCHelper.sol")
 KYC = loadContract(w3, "TestKyc",          path_prefix+"test/TestKyc.sol")
 TestTokenPrice = loadContract(w3, "TestTokenPrice", path_prefix+"test/TestTokenPrice.sol")
+TestCaptcha = loadContract(w3, "TestCaptcha", path_prefix+"test/TestCaptcha.sol")
 TC = loadContract(w3, "TestCounter",   path_prefix+"test/TestCounter.sol")
 EP = loadContract(w3, "EntryPoint",    path_prefix+"core/EntryPoint.sol")
 SA = loadContract(w3, "SimpleAccount", path_prefix+"samples/SimpleAccount.sol")
@@ -256,14 +257,16 @@ fundAddrEP(EP, HA.address)
 TC  = deploy2("TestCounter", TC.constructor(HA.address),0)
 KYC = deploy2("TestKyc", KYC.constructor(HA.address), 0 )
 TFP = deploy2("TestTokenPrice", TestTokenPrice.constructor(HA.address), 0)
+CAPTCHA = deploy2("TestCaptcha", TestCaptcha.constructor(HA.address), 0)
 
 # Change IP address as needed.
-registerUrl(HA.address, "http://192.168.178.37:1234/hc")
+registerUrl(HA.address, "http://192.168.178.59:1234/hc")
 #registerUrl(HA.address, "http://192.168.4.2:1234/hc")
 
 permitCaller(HA, TC.address)
 permitCaller(HA, KYC.address)
 permitCaller(HA, TFP.address)
+permitCaller(HA, CAPTCHA.address)
 
 with open("./contracts.json", "w") as f:
   f.write(json.dumps(deployed))
