@@ -241,7 +241,7 @@ HH  = deploy2("HCHelper", HH.constructor(EP.address, boba_addr, 0),0)
 setOwner(HH, deploy_addr)
 
 SA  = deploy2("SimpleAccount", SA.constructor(EP.address),0)
-setOwner(SA, Web3.to_checksum_address("0x77Fe14A710E33De68855b0eA93Ed8128025328a9"))
+setOwner(SA, u_addr)
 fundAddr(SA.address)
 
 BA = deploy2("HybridAccount.0", HA.constructor(EP.address, HH.address),0)
@@ -250,7 +250,7 @@ setOwner(BA, Web3.to_checksum_address("0x2A9099A58E0830A4Ab418c2a19710022466F1ce
 fundAddrEP(EP, BA.address)
 
 HA = deploy2("HybridAccount.1", HA.constructor(EP.address, HH.address),1)
-setOwner(HA, Web3.to_checksum_address("0xE073fC0ff8122389F6e693DD94CcDc5AF637448e"))
+setOwner(HA, hc1_addr)
 fundAddrEP(EP, HA.address)
 
 TC  = deploy2("TestCounter", TC.constructor(HA.address),0)
@@ -283,6 +283,9 @@ if os.path.exists(".env"):
   env_vars['HC_HELPER_ADDR'] = HH.address
   env_vars['HC_SYS_ACCOUNT'] = BA.address
   env_vars['OC_HYBRID_ACCOUNT'] = HA.address
+  env_vars['CLIENT_ADDR'] = SA.address
+  env_vars['CLIENT_OWNER'] = u_addr
+  env_vars['CLIENT_PRIVKEY'] = u_key
   with open(".env","w") as f:
     for k in env_vars:
       f.write("{}={}\n".format(k,env_vars[k]))

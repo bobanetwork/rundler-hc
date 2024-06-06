@@ -11,10 +11,6 @@ import requests
 
 import eth_account
 
-# The following addrs and keys are for local demo purposes. Do not deploy to public networks
-u_addr = Web3.to_checksum_address("0x77Fe14A710E33De68855b0eA93Ed8128025328a9")
-u_key = "0x541b3e3b20b8bb0e5bae310b2d4db4c8b7912ba09750e6ff161b7e67a26a9bf7"
-
 BUNDLER_ADDR = os.environ['BUNDLER_ADDR']
 assert (len(BUNDLER_ADDR) == 42)
 bundler_addr = Web3.to_checksum_address(BUNDLER_ADDR)
@@ -27,6 +23,18 @@ assert(len(node_http) > 0)
 
 HC_CHAIN = int(os.environ['CHAIN_ID'])
 assert(HC_CHAIN > 0)
+
+# Owner of the user account used to submit client requests
+U_OWNER = os.environ['CLIENT_OWNER']
+assert (len(U_OWNER) == 42)
+u_addr = Web3.to_checksum_address(U_OWNER)
+
+u_key = os.environ['CLIENT_PRIVKEY']
+assert (len(u_key) == 66)
+
+U_ACCT = os.environ['CLIENT_ADDR']
+assert (len(U_ACCT) == 42)
+u_account = Web3.to_checksum_address(U_ACCT)
 
 # -------------------------------------------------------------
 
@@ -46,8 +54,9 @@ EP = w3.eth.contract(
     address=deployed['EntryPoint']['address'], abi=deployed['EntryPoint']['abi'])
 HH = w3.eth.contract(
     address=deployed['HCHelper']['address'], abi=deployed['HCHelper']['abi'])
+# This address is unique for each user, who deploys their own wallet account
 SA = w3.eth.contract(
-    address=deployed['SimpleAccount']['address'], abi=deployed['SimpleAccount']['abi'])
+    address=u_account, abi=deployed['SimpleAccount']['abi'])
 BA = w3.eth.contract(address=deployed['HybridAccount.0']
                      ['address'], abi=deployed['HybridAccount.0']['abi'])
 HA = w3.eth.contract(address=deployed['HybridAccount.1']
@@ -192,8 +201,11 @@ def ParseReceipt(opReceipt):
     for i in txRcpt['logs']:
         print("log", n, i['topics'][0], i['data'])
         n += 1
-    print("Total tx gas stats:", Web3.to_int(
-        hexstr=txRcpt['gasUsed']), txRcpt['l1GasUsed'], txRcpt['l1Fee'])
+    print("Total tx gas stats:",
+        "gasUsed", Web3.to_int(hexstr=txRcpt['gasUsed']),
+	"effectiveGasPrice", Web3.to_int(hexstr=txRcpt['effectiveGasPrice']),
+	"l1GasUsed", Web3.to_int(hexstr=txRcpt['l1GasUsed']),
+	"l1Fee", Web3.to_int(hexstr=txRcpt['l1Fee']))
     opGas = Web3.to_int(hexstr=opReceipt['actualGasUsed'])
     print("opReceipt gas used", opGas, "unused", gasFees['estGas'] - opGas)
 
@@ -212,6 +224,9 @@ def submitOp(p):
     response = requests.post(bundler_rpc, json=request(
         "eth_sendUserOperation", params=[p, EP.address]))
     print("sendOperation response", response.json())
+    if 'error' in response.json():
+        print("*** eth_sendUserOperation failed")
+        exit(1)
 
     opHash = {}
     opHash['hash'] = response.json()['result']
