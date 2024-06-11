@@ -159,16 +159,6 @@ def packOp(op):
 
 # -------------------------------------------------------------
 
-
-showBalances()
-balStart_bnd = w3.eth.get_balance(bundler_addr)
-balStart_sa = EP.functions.getDepositInfo(
-    SA.address).call()[0] + w3.eth.get_balance(SA.address)
-
-print("TestCount(pre)=", TC.functions.counters(SA.address).call())
-print("TestFetchPrice(pre)=", TFP.functions.counters(0).call())
-
-
 def estimateOp(p):
     global gasFees
 
