@@ -271,6 +271,7 @@ where
         loop {
             let update = self.check_for_update_now().await?;
             if let Some(update) = update {
+                println!("HC wait_for_update found {:?}", update);
                 return Ok(update);
             }
             let current_block_number = self
@@ -278,6 +279,7 @@ where
                 .get_block_number()
                 .await
                 .context("tracker should get current block when polling for updates")?;
+            println!("HC wait_for_update at {:?}/{:?}", current_block_number, end_block_number);
             if end_block_number <= current_block_number {
                 return Ok(TrackerUpdate::StillPendingAfterWait);
             }
@@ -287,6 +289,7 @@ where
 
     async fn check_for_update_now(&mut self) -> anyhow::Result<Option<TrackerUpdate>> {
         let external_nonce = self.get_external_nonce().await?;
+        println!("HC check_for_update_now at self.nonce {:?} external_nonce {:?}", self.nonce, external_nonce);
         if self.nonce < external_nonce {
             // The nonce has changed. Check to see which of our transactions has
             // mined, if any.
@@ -298,6 +301,7 @@ where
                     .get_transaction_status(tx.tx_hash)
                     .await
                     .context("tracker should check transaction status when the nonce changes")?;
+                println!("HC check_for_update_now status after nonce change {:?}", status);
                 if let TxStatus::Mined { block_number } = status {
                     let (gas_limit, gas_used) = self.get_mined_tx_gas_info(tx.tx_hash).await?;
                     out = TrackerUpdate::Mined {
@@ -317,11 +321,13 @@ where
         // The nonce has not changed. Check to see if the latest transaction has
         // dropped.
         if self.has_dropped {
+            println!("HC check_for_update_now self.has_dropped");
             // has_dropped being true means that no new transactions have been
             // added since the last time we checked, hence no update.
             return Ok(None);
         }
         let Some(&last_tx) = self.transactions.last() else {
+            println!("HC check_for_update_now no update");
             // If there are no pending transactions, there's no update either.
             return Ok(None);
         };
@@ -330,6 +336,7 @@ where
             .get_transaction_status(last_tx.tx_hash)
             .await
             .context("tracker should check for dropped transactions")?;
+            println!("HC check_for_update_now status {:?}", status);
         Ok(match status {
             TxStatus::Pending | TxStatus::Dropped => None,
             TxStatus::Mined { block_number } => {
@@ -405,6 +412,7 @@ where
             self.provider.get_transaction(tx_hash),
             self.provider.get_transaction_receipt(tx_hash),
         )?;
+        println!("HC get_mined_tx_gas_info looking for hash {:?} got tx {:?} receipt {:?}", tx_hash, tx, tx_receipt);
         let gas_limit = tx.map(|t| t.gas).or_else(|| {
             warn!("failed to fetch transaction data for tx: {}", tx_hash);
             None
