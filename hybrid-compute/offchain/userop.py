@@ -17,14 +17,14 @@ print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 
 # ===============================================
 
-TestCaptcha("0x123")
+#TestCaptcha("0x123")
 
 #TestTokenPrice("ETH")
 
 #TestKyc(True)  # Success
 #TestKyc(False)  # Fail
 
-#TestAddSub2(2, 1)   # Success
+TestAddSub2(2, 1)   # Success
 #TestAddSub2(2, 10)  # Underflow error, asserted
 #TestAddSub2(2, 3)   # Underflow error, handled internally
 #TestAddSub2(7, 0)   # Not HC

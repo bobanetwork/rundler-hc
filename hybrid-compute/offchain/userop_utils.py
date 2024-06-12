@@ -4,7 +4,7 @@ from random import *
 import requests
 import json
 from web3.middleware import geth_poa_middleware
-import os
+import os,re
 
 from jsonrpcclient import request
 import requests
@@ -120,6 +120,13 @@ def buildAndSubmit(f, addr, key):
 def buildOp(A, nKey, payload):
     sender_nonce = EP.functions.getNonce(A.address, nKey).call()
 
+    # Try to avoid stuck / dropped transactions
+    tip = max(w3.eth.max_priority_fee, 2500000)
+    baseFee = w3.eth.gas_price - w3.eth.max_priority_fee
+    assert(baseFee > 0)
+    fee = max(w3.eth.gas_price, baseFee + tip)
+    print ("Using gas prices", fee, tip, "detected", w3.eth.gas_price, w3.eth.max_priority_fee)
+
     p = {
         'sender': A.address,
         'nonce': Web3.to_hex(sender_nonce),  # A.functions.getNonce().call()),
@@ -128,8 +135,8 @@ def buildOp(A, nKey, payload):
         'callGasLimit': "0x0",
         'verificationGasLimit': Web3.to_hex(0),
         'preVerificationGas': "0x0",
-        'maxFeePerGas': Web3.to_hex(w3.eth.gas_price),
-        'maxPriorityFeePerGas': Web3.to_hex(w3.eth.max_priority_fee),
+        'maxFeePerGas': Web3.to_hex(fee),
+        'maxPriorityFeePerGas': Web3.to_hex(tip),
         'paymasterAndData': '0x',
         # Dummy signature, per Alchemy AA documentation
         # A future update may require a valid signature on gas estimation ops. This should be safe because the gas
@@ -196,7 +203,7 @@ def estimateOp(p):
 # ===============================================
 
 # Generates an AA-style nonce (each key has its own associated sequence count)
-nKey = int(1000 + (w3.eth.get_transaction_count(u_addr) % 7))
+nKey = int(1200 + (w3.eth.get_transaction_count(u_addr) % 7))
 # nKey = 0
 #print("nKey", nKey)
 
@@ -227,9 +234,18 @@ def submitOp(p):
     eMsg = eth_account.messages.encode_defunct(opHash)
     sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
     p['signature'] = Web3.to_hex(sig.signature)
+    while True:
+        response = requests.post(bundler_rpc, json=request(
+            "eth_sendUserOperation", params=[p, EP.address]))
+        if 'result' in response.json():
+            break
+        elif 'error' in response.json():
+            emsg = response.json()['error']['message']
+            if not re.search(r'message: block 0x.{64} not found', emsg): # Workaround for sending debug_traceCall to unsynced node
+                break
+        print("*** Retrying eth_sendUserOperation")
+        time.sleep(5)
 
-    response = requests.post(bundler_rpc, json=request(
-        "eth_sendUserOperation", params=[p, EP.address]))
     print("sendOperation response", response.json())
     if 'error' in response.json():
         print("*** eth_sendUserOperation failed")
@@ -238,9 +254,9 @@ def submitOp(p):
     opHash = {}
     opHash['hash'] = response.json()['result']
     timeout = True
-    for i in range(10):
+    for i in range(100):
         print("Waiting for receipt...")
-        time.sleep(1)
+        time.sleep(10)
         opReceipt = requests.post(bundler_rpc, json=request(
             "eth_getUserOperationReceipt", params=opHash))
         opReceipt = opReceipt.json()['result']
