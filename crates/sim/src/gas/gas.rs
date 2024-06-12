@@ -399,7 +399,7 @@ pub const POLYGON_MAINNET_MAX_PRIORITY_FEE_MIN: u64 = 30_000_000_000;
 /// Optimism Bedrock chains max priority fee min
 pub const OPTIMISM_BEDROCK_MAX_PRIORITY_FEE_MIN: u64 = 100_000;
 /// Boba Sepolia max priority fee min
-pub const BOBA_TESTNET_MAX_PRIORITY_FEE_MIN: u64 = 1_000_000;
+pub const BOBA_TESTNET_MAX_PRIORITY_FEE_MIN: u64 = 2_000_000;
 
 /// Returns the minimum max priority fee per gas for the given chain id.
 pub fn get_min_max_priority_fee_per_gas(chain_id: u64) -> U256 {
