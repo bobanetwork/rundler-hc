@@ -215,7 +215,9 @@ where
     ) -> anyhow::Result<SendResult> {
         self.validate_transaction(&tx)?;
         let gas_fees = GasFees::from(&tx);
+        println!("HC send_transaction will send tx {:?}", tx.clone());
         let send_result = self.sender.send_transaction(tx, expected_storage).await;
+        println!("HC send_transaction result {:?}", send_result);
         let sent_tx = match send_result {
             Ok(sent_tx) => sent_tx,
             Err(error) => {
