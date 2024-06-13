@@ -5,14 +5,21 @@ from check_kyc.check_kyc_test import TestKyc
 from add_sub_2.add_sub_2_test import TestAddSub2
 from ramble.ramble_test import TestWordGuess
 from verify_captcha.captcha_test import TestCaptcha
+from rainfall_insurance.rainfall_insurance_test import test_rainfall_insurance, test_rainfall_insurance_payout
 from userop_utils import *
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 
 
 # ===============================================
 
+test_rainfall_insurance_payout(int(os.getenv("POLICY_ID")))
 
-TestCaptcha("0x123")
+#TestCaptcha("0x123")
+
 #TestTokenPrice("ETH")
 
 #TestKyc(True)  # Success
