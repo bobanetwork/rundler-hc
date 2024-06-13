@@ -1,6 +1,6 @@
 FROM python:3.8-slim
 RUN apt update
 RUN apt install wamerican # for /usr/share/dict/words
-RUN pip3 install --default-timeout=100 web3 jsonrpclib redis
+RUN pip3 install --default-timeout=100 web3 jsonrpclib redis python-dotenv
 COPY ./offchain /
 CMD [ "python", "-u", "./offchain.py" ]
