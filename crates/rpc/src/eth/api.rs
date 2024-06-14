@@ -379,8 +379,8 @@ where
 	    println!("HC api.rs userop_gas estimate   {:?} sum {:?}", r3, op_gas);
 	    println!("HC api.rs cleanup_gas estimate  {:?} sum {:?}", r4, cleanup_gas);
 
-            let needed_pvg = r3.pre_verification_gas; // FIXME - temporarily disabled + offchain_gas;
-            hybrid_compute::hc_set_pvg(hh, needed_pvg, cleanup_gas + offchain_gas);
+            let needed_pvg = r3.pre_verification_gas + offchain_gas;
+            hybrid_compute::hc_set_pvg(hh, needed_pvg, offchain_gas + cleanup_gas + offchain_gas);
 
             if err_hc.code != 0 {
                 return Err(GasEstimationError::RevertInValidation(err_hc.message));
