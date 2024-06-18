@@ -36,7 +36,6 @@ use rundler_task::{
 use rundler_types::contracts::i_entry_point::IEntryPoint;
 use rundler_utils::eth;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 use crate::{
     debug::{DebugApi, DebugApiServer},
@@ -123,16 +122,14 @@ where
             .allow_origin(Any)
             .allow_headers([hyper::header::CONTENT_TYPE]);
 
-        let middleware_builder = tower::ServiceBuilder::new().layer(cors);
-
         // Set up health check endpoint via GET /health registers the jsonrpc handler
         let service_builder = tower::ServiceBuilder::new()
             // Proxy `GET /health` requests to internal `system_health` method.
             .layer(ProxyGetRequestLayer::new("/health", "system_health")?)
-            .timeout(self.args.rpc_timeout);
+            .timeout(self.args.rpc_timeout)
+            .layer(cors);
 
         let server = ServerBuilder::default()
-            .set_middleware(middleware_builder)
             .set_logger(RpcMetricsLogger)
             .set_middleware(service_builder)
             .max_connections(self.args.max_connections)
