@@ -23,6 +23,8 @@ use jsonrpsee::{
     server::{middleware::ProxyGetRequestLayer, ServerBuilder},
     RpcModule,
 };
+use hyper::Method;
+use tower_http::cors::{Any, CorsLayer};
 use rundler_builder::BuilderServer;
 use rundler_pool::PoolServer;
 use rundler_provider::EntryPoint;
@@ -110,6 +112,19 @@ where
         let health_checker = HealthChecker::new(servers);
         module.merge(health_checker.into_rpc())?;
 
+        // Add a CORS middleware for handling HTTP requests.
+        // This middleware does affect the response, including appropriate
+        // headers to satisfy CORS. Because any origins are allowed, the
+        // "Access-Control-Allow-Origin: *" header is appended to the response.
+        let cors = CorsLayer::new()
+            // Allow `POST` when accessing the resource
+            .allow_methods([Method::OPTIONS, Method::POST, Method::GET])
+            // Allow requests from any origin
+            .allow_origin(Any)
+            .allow_headers([hyper::header::CONTENT_TYPE]);
+
+        let middleware_builder = tower::ServiceBuilder::new().layer(cors);
+
         // Set up health check endpoint via GET /health registers the jsonrpc handler
         let service_builder = tower::ServiceBuilder::new()
             // Proxy `GET /health` requests to internal `system_health` method.
@@ -117,6 +132,7 @@ where
             .timeout(self.args.rpc_timeout);
 
         let server = ServerBuilder::default()
+            .set_middleware(middleware_builder)
             .set_logger(RpcMetricsLogger)
             .set_middleware(service_builder)
             .max_connections(self.args.max_connections)
@@ -125,7 +141,7 @@ where
             .await?;
         let handle = server.start(module);
 
-        info!("Started RPC server");
+        println!("Started RPC server");
 
         tokio::select! {
             _ = handle.stopped() => {
