@@ -5,6 +5,7 @@ from check_kyc.check_kyc_test import TestKyc
 from add_sub_2.add_sub_2_test import TestAddSub2
 from ramble.ramble_test import TestWordGuess
 from verify_captcha.captcha_test import TestCaptcha
+from auction_system.auction_system_test import TestAuction
 from userop_utils import *
 
 print("Starting Balances:")
@@ -17,6 +18,7 @@ print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 
 # ===============================================
 
+TestAuction()
 #TestCaptcha("0x123")
 
 #TestTokenPrice("ETH")
@@ -24,7 +26,7 @@ print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 #TestKyc(True)  # Success
 #TestKyc(False)  # Fail
 
-TestAddSub2(2, 1)   # Success
+#TestAddSub2(2, 1)   # Success
 #TestAddSub2(2, 10)  # Underflow error, asserted
 #TestAddSub2(2, 3)   # Underflow error, handled internally
 #TestAddSub2(7, 0)   # Not HC

@@ -88,6 +88,7 @@ TC = loadContract(w3, "TestCounter",   path_prefix+"test/TestCounter.sol")
 EP = loadContract(w3, "EntryPoint",    path_prefix+"core/EntryPoint.sol")
 SA = loadContract(w3, "SimpleAccount", path_prefix+"samples/SimpleAccount.sol")
 HA = loadContract(w3, "HybridAccount", path_prefix+"samples/HybridAccount.sol")
+TEST_AUCTION = loadContract(w3, "TestAuctionSystem", path_prefix+"test/TestAuctionSystem.sol")
 
 if w3.eth.get_balance(deploy_addr) == 0:
   tx = {
@@ -237,6 +238,7 @@ fundAddr(u_addr)
 # FIXME - fix permitCaller() so that these don't need to be funded, only to sign.
 fundAddr(hc1_addr)
 
+
 EP  = deploy2("EntryPoint", EP.constructor(),0)
 HH  = deploy2("HCHelper", HH.constructor(EP.address, boba_addr, 0),0)
 setOwner(HH, deploy_addr)
@@ -258,6 +260,7 @@ TC  = deploy2("TestCounter", TC.constructor(HA.address),0)
 KYC = deploy2("TestKyc", KYC.constructor(HA.address), 0 )
 TFP = deploy2("TestTokenPrice", TestTokenPrice.constructor(HA.address), 0)
 CAPTCHA = deploy2("TestCaptcha", TestCaptcha.constructor(HA.address), 0)
+TEST_AUCTION = deploy2("TestAuctionSystem", TEST_AUCTION.constructor(HA.address), 0)
 
 # Change IP address as needed.
 registerUrl(HA.address, "http://192.168.178.59:1234/hc")
@@ -267,6 +270,7 @@ permitCaller(HA, TC.address)
 permitCaller(HA, KYC.address)
 permitCaller(HA, TFP.address)
 permitCaller(HA, CAPTCHA.address)
+permitCaller(HA, TEST_AUCTION.address)
 
 with open("./contracts.json", "w") as f:
   f.write(json.dumps(deployed))
