@@ -135,6 +135,7 @@ where
             }
         });
 
+        println!("HC starting send_bundles loop");
         loop {
             let mut send_bundle_response: Option<oneshot::Sender<SendBundleResult>> = None;
             let mut last_block = None;
@@ -178,26 +179,34 @@ where
             // and can land in the next block
             self.check_for_and_log_transaction_update().await;
             let result = self.send_bundle_with_increasing_gas_fees().await;
-	    println!("HC send_bundle_with_increasing_gas_fees result {:?}", result);
 
             match &result {
                 SendBundleResult::Success {
                     block_number,
                     attempt_number,
                     tx_hash,
-                } =>
+                } => {
+	            println!("HC send_bundle_with_increasing_gas_fees result {:?}", result);
                     if *attempt_number == 0 {
                         info!("Bundle with hash {tx_hash:?} landed in block {block_number}");
                     } else {
                         info!("Bundle with hash {tx_hash:?} landed in block {block_number} after increasing gas fees {attempt_number} time(s)");
                     }
+		}
                 SendBundleResult::NoOperationsInitially => trace!("No ops to send at block {}", last_block.unwrap_or_default().block_number),
                 SendBundleResult::NoOperationsAfterFeeIncreases {
                     initial_op_count,
                     attempt_number,
-                } => info!("Bundle initially had {initial_op_count} operations, but after increasing gas fees {attempt_number} time(s) it was empty"),
-                SendBundleResult::StalledAtMaxFeeIncreases => warn!("Bundle failed to mine after {} fee increases", self.settings.max_fee_increases),
+                } => {
+	            println!("HC send_bundle_with_increasing_gas_fees result {:?}", result);
+		    info!("Bundle initially had {initial_op_count} operations, but after increasing gas fees {attempt_number} time(s) it was empty");
+                }
+		SendBundleResult::StalledAtMaxFeeIncreases => {
+	            println!("HC send_bundle_with_increasing_gas_fees result {:?}", result);
+		    warn!("Bundle failed to mine after {} fee increases", self.settings.max_fee_increases);
+		}
                 SendBundleResult::Error(error) => {
+                    println!("HC send_bundle_with_increasing_gas_fees result {:?}", result);
                     BuilderMetrics::increment_bundle_txns_failed(self.builder_index);
                     error!("Failed to send bundle. Will retry next block: {error:#?}");
                 }

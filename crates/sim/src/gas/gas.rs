@@ -398,6 +398,8 @@ pub const POLYGON_MUMBAI_MAX_PRIORITY_FEE_MIN: u64 = 1_500_000_000;
 pub const POLYGON_MAINNET_MAX_PRIORITY_FEE_MIN: u64 = 30_000_000_000;
 /// Optimism Bedrock chains max priority fee min
 pub const OPTIMISM_BEDROCK_MAX_PRIORITY_FEE_MIN: u64 = 100_000;
+/// Boba Sepolia max priority fee min
+pub const BOBA_TESTNET_MAX_PRIORITY_FEE_MIN: u64 = 1_000_000;
 
 /// Returns the minimum max priority fee per gas for the given chain id.
 pub fn get_min_max_priority_fee_per_gas(chain_id: u64) -> U256 {
@@ -405,6 +407,8 @@ pub fn get_min_max_priority_fee_per_gas(chain_id: u64) -> U256 {
         x if x == Chain::Mainnet as u64 => ETHEREUM_MAINNET_MAX_PRIORITY_FEE_MIN.into(),
         x if x == Chain::Polygon as u64 => POLYGON_MAINNET_MAX_PRIORITY_FEE_MIN.into(),
         x if x == Chain::PolygonMumbai as u64 => POLYGON_MUMBAI_MAX_PRIORITY_FEE_MIN.into(),
+        x if x == 28882 as u64 => BOBA_TESTNET_MAX_PRIORITY_FEE_MIN.into(),
+        x if x == 901   as u64 => BOBA_TESTNET_MAX_PRIORITY_FEE_MIN.into(),
         x if OP_BEDROCK_CHAIN_IDS.contains(&x) => OPTIMISM_BEDROCK_MAX_PRIORITY_FEE_MIN.into(),
         _ => U256::zero(),
     }
@@ -415,6 +419,7 @@ where
     P: Provider + Debug,
 {
     let minimum_fee = get_min_max_priority_fee_per_gas(chain_id);
+    println!("HC get_fee_oracle minimum {:?} chain {:?} is_optimism {:?}", minimum_fee, &chain_id, OP_BEDROCK_CHAIN_IDS.contains(&chain_id));
 
     if ARBITRUM_CHAIN_IDS.contains(&chain_id) {
         Arc::new(Box::new(ConstantOracle::new(U256::zero())))
