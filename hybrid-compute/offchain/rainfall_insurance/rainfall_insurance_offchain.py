@@ -11,11 +11,12 @@ load_dotenv()
 API_KEY = ""
 
 
-def offchain_getrainfall(sk, src_addr, src_nonce, oo_nonce, payload, *args):
+def offchain_getrainfall(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     print("  -> offchain_getrainfall handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
           src_addr, src_nonce, oo_nonce, payload, args))
     err_code = 0
     resp = Web3.to_bytes(text="unknown error")
+    assert(ver == "0.2")
 
     try:
         req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
