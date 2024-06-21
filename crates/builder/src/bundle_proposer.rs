@@ -257,6 +257,7 @@ where
         base_fee: U256,
         required_op_fees: GasFees,
     ) -> Option<(PoolOperation, Result<SimulationResult, SimulationError>)> {
+        println!("HC filter_and_simulate op {:?}", op);
         // filter by fees
         if op.uo.max_fee_per_gas < required_op_fees.max_fee_per_gas
             || op.uo.max_priority_fee_per_gas < required_op_fees.max_priority_fee_per_gas
@@ -369,6 +370,8 @@ where
 
         let ov = GasOverheads::default();
         let mut gas_spent = ov.transaction_gas_overhead;
+        let mut cleanup_keys:Vec<H256> = Vec::new();
+
         for (po, simulation) in ops_with_simulations {
             let op = po.clone().uo;
             let simulation = match simulation {
@@ -412,13 +415,23 @@ where
             }
 
             // Skip this op if the bundle does not have enough remaining gas to execute it.
-            let required_gas = get_gas_required_for_op(
+            let mut required_gas = get_gas_required_for_op(
                 gas_spent,
                 self.settings.chain_id,
                 ov,
                 &op,
                 simulation.requires_post_op,
             );
+
+            let hc_hash = op.op_hc_hash();
+            let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
+            if hc_ent.is_some() {
+                println!("HC bundle_properer found hc_ent {:?}", hc_ent);
+                required_gas += hc_ent.clone().unwrap().oc_gas;
+            }
+
+            println!("HC required_gas {:?} for op {:?}", required_gas, op);
+
             if required_gas > self.settings.max_bundle_gas.into() {
                 continue;
             }
@@ -461,6 +474,20 @@ where
                 simulation.requires_post_op,
             );
 
+            if hc_ent.is_some() {
+                gas_spent += hc_ent.clone().unwrap().oc_gas;
+                println!("HC insert, hc_ent {:?}", hc_ent);
+                let op2 = hc_ent.clone().unwrap().user_op;
+                let sim2 = SimulationResult::default();
+                context
+                    .groups_by_aggregator
+                    .entry(simulation.aggregator_address())
+                    .or_default()
+                    .ops_with_simulations
+                    .push(OpWithSimulation { op:op2, simulation:sim2 });
+                cleanup_keys.push(hc_ent.clone().unwrap().map_key);
+            }
+
             context
                 .groups_by_aggregator
                 .entry(simulation.aggregator_address())
@@ -468,6 +495,21 @@ where
                 .ops_with_simulations
                 .push(OpWithSimulation { op, simulation });
         }
+
+	if cleanup_keys.len() > 0 {
+	    println!("HC cleanup_keys {:?}", cleanup_keys);
+	    let cfg = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
+	    let c_nonce = self.entry_point.get_nonce(cfg.sys_account, U256::zero()).await.unwrap();
+	    let cleanup_op = hybrid_compute::rr_op(&cfg, c_nonce, cleanup_keys).await;
+
+             context
+                .groups_by_aggregator
+                .entry(None)
+                .or_default()
+                .ops_with_simulations
+                .push(OpWithSimulation { op:cleanup_op, simulation:SimulationResult::default() });
+	}
+
         for paymaster in paymasters_to_reject {
             // No need to update aggregator signatures because we haven't computed them yet.
             let _ =
@@ -542,7 +584,7 @@ where
             )
             .await
             .context("should call handle ops with candidate bundle")?;
-        println!("HC bundle_proposer gas2 {:?}", handle_ops_out);
+        println!("HC bundle_proposer gas2 result {:?}", handle_ops_out);
         match handle_ops_out {
             HandleOpsOut::Success => Ok(Some(gas)),
             HandleOpsOut::FailedOp(index, message) => {
@@ -927,12 +969,27 @@ impl ProposalContext {
     /// may need to be recomputed.
     #[must_use = "rejected op but did not update aggregator signatures"]
     fn reject_index(&mut self, i: usize) -> Option<Address> {
-        println!("HC reject_index at {:?}", i);
         let mut remaining_i = i;
         let mut found_aggregator: Option<Option<Address>> = None;
         for (&aggregator, group) in &mut self.groups_by_aggregator {
             if remaining_i < group.ops_with_simulations.len() {
                 let rejected = group.ops_with_simulations.remove(remaining_i);
+                println!("HC reject_index at {:?} of {:?} - {:?}", i, group.ops_with_simulations.len(), rejected.op);
+                if rejected.op.max_fee_per_gas == U256::from(0) {
+                    // Assume an Offchain op
+                    if i == group.ops_with_simulations.len() {
+                         println!("HC ERR rejecting Cleanup op {:?}", rejected.op);
+                    } else {
+                        println!("HC ERR rejecting offchain op {:?}", rejected.op);
+                    }
+                } else {
+                    let hc_hash = rejected.op.op_hc_hash();
+                    let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
+                    println!("HC rejecting regular op with hash {:?} paired_op {:?}", hc_hash, hc_ent);
+                    if hc_ent.is_some() {
+                        todo!("Should remove paired op");
+                    }
+                }
                 self.rejected_ops
                     .push((rejected.op, rejected.simulation.entity_infos));
                 found_aggregator = Some(aggregator);
@@ -960,6 +1017,7 @@ impl ProposalContext {
     /// Returns the addresses of any aggregators whose signature may need to be recomputed.
     #[must_use = "rejected entity but did not update aggregator signatures"]
     fn reject_entity(&mut self, entity: Entity, is_staked: bool) -> Vec<Address> {
+        println!("HC reject_entity for {:?}", entity);
         let ret = match entity.kind {
             EntityType::Aggregator => {
                 self.reject_aggregator(entity.address);
