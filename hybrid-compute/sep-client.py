@@ -43,13 +43,13 @@ def selector(name):
 
 def aa_nonce(addr):
   # sender_nonce = EP.functions.getNonce(u_addr, 0).call()
-  calldata = selector("getNonce(address,uint192)") + ethabi.encode(['address','uint192'],[addr, 1234])
+  calldata = selector("getNonce(address,uint192)") + ethabi.encode(['address','uint192'],[addr, 1235])
   ret = w3.eth.call({'to':EP_addr,'data':calldata})
   return Web3.to_hex(ret)
 
-def buildOp(to_contract, sel_text, payload):
+def buildOp(to_contract, value_in_eth, sel_text, payload):
   exCall = selector("execute(address,uint256,bytes)") + \
-        ethabi.encode(['address', 'uint256', 'bytes'], [to_contract, 0, selector(sel_text) + payload])
+        ethabi.encode(['address', 'uint256', 'bytes'], [to_contract, Web3.to_wei(value_in_eth, "ether"), selector(sel_text) + payload])
   p = {
     'sender':u_addr,
     'nonce': aa_nonce(u_addr),
@@ -190,13 +190,14 @@ def submitOp(op):
 # Test configuration - specify the contract and method you wish to call.
 
 # TestCounter.sol
-op = buildOp("0x63BceAfAF62fB12394ecbEf10dBF1c5c36ba8b38", "count(uint32,uint32)", ethabi.encode(['uint32', 'uint32'], [4, 1]))
+op = buildOp("0x63BceAfAF62fB12394ecbEf10dBF1c5c36ba8b38", 0, "count(uint32,uint32)", ethabi.encode(['uint32', 'uint32'], [4, 1]))
 
 # Translator.sol
-#op = buildOp("0xA2b0AD1275f4af175cC96feb63b838bDe25892dd", "do_it(string)", ethabi.encode(['string'], ["send 0.001 ETH to alice.eth"]))
+#op = buildOp("0xA2b0AD1275f4af175cC96feb63b838bDe25892dd", 0.0001, "do_it(string)", ethabi.encode(['string'], ["send 0.0001 ETH to alice.eth"]))
+#op = buildOp("0xA2b0AD1275f4af175cC96feb63b838bDe25892dd", 0.0001, "do_it(string)", ethabi.encode(['string'], ["If it is raining in London, send 0.0001 ETH to alice.eth"]))
 
 # PresiSimToken.sol (Boyuan)
-#op = buildOp("0xa3b4603961e8D1F4a2d98Ff7b28Cf92A6C592441", "getDailyQuestion(string)", ethabi.encode(['string'], ["test"]))
+#op = buildOp("0xa3b4603961e8D1F4a2d98Ff7b28Cf92A6C592441", 0, "getDailyQuestion(string)", ethabi.encode(['string'], ["test"]))
 
 
 op, gas_est = estimateOp(op)
