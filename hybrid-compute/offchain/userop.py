@@ -6,6 +6,7 @@ from add_sub_2.add_sub_2_test import TestAddSub2
 from ramble.ramble_test import TestWordGuess
 from verify_captcha.captcha_test import TestCaptcha
 from auction_system.auction_system_test import TestAuction
+from sports_betting.sports_betting_test import TestSportsBetting
 from userop_utils import *
 
 print("Starting Balances:")
@@ -18,7 +19,8 @@ print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 
 # ===============================================
 
-TestAuction()
+TestSportsBetting()
+#TestAuction()
 #TestCaptcha("0x123")
 
 #TestTokenPrice("ETH")

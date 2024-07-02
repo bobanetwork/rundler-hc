@@ -4,7 +4,8 @@ from random import *
 import requests
 import json
 from web3.middleware import geth_poa_middleware
-import os,re
+import os
+import re
 
 from jsonrpcclient import request
 import requests
@@ -20,13 +21,13 @@ assert (len(BUNDLER_ADDR) == 42)
 bundler_addr = Web3.to_checksum_address(BUNDLER_ADDR)
 
 bundler_rpc = os.environ['BUNDLER_RPC']
-assert(len(bundler_rpc) > 0)
+assert (len(bundler_rpc) > 0)
 
 node_http = os.environ['NODE_HTTP']
-assert(len(node_http) > 0)
+assert (len(node_http) > 0)
 
 HC_CHAIN = int(os.environ['CHAIN_ID'])
-assert(HC_CHAIN > 0)
+assert (HC_CHAIN > 0)
 
 # Owner of the user account used to submit client requests
 U_OWNER = os.environ['CLIENT_OWNER']
@@ -43,7 +44,8 @@ u_account = Web3.to_checksum_address(U_ACCT)
 # -------------------------------------------------------------
 
 gasFees = dict()
-gasFees['estGas'] = 123 # Tracks gas between estimate and receipt; should refactor
+# Tracks gas between estimate and receipt; should refactor
+gasFees['estGas'] = 123
 gasFees['l2Fees'] = 0   # Cumulative L2 fees
 gasFees['l1Fees'] = 0   # Cumulative L1 fees
 
@@ -73,11 +75,15 @@ TFP = w3.eth.contract(
     address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
 TCAPTCHA = w3.eth.contract(
     address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
-TEST_AUCTION = w3.eth.contract(
-    address=deployed['TestAuctionSystem']['address'], abi=deployed['TestAuctionSystem']['abi']
+#TEST_AUCTION = w3.eth.contract(
+#    address=deployed['TestAuctionSystem']['address'], abi=deployed['TestAuctionSystem']['abi']
+#)
+TEST_SPORTS_BETTING = w3.eth.contract(
+    address=deployed['TestSportsBetting']['address'], abi=deployed['TestSportsBetting']['abi']
 )
 
 print("EP at", EP.address)
+
 
 def showBalances():
     print("u  ", EP.functions.getDepositInfo(
@@ -94,9 +100,12 @@ def showBalances():
         TC.address).call(), w3.eth.get_balance(TC.address))
     print("TFP", EP.functions.getDepositInfo(
         TFP.address).call(), w3.eth.get_balance(TFP.address))
-    print("AUCTION_SYSTEM", EP.functions.getDepositInfo(TEST_AUCTION.address).call(), w3.eth.get_balance(TEST_AUCTION.address))
+   # print("AUCTION_SYSTEM", EP.functions.getDepositInfo(
+   #     TEST_AUCTION.address).call(), w3.eth.get_balance(TEST_AUCTION.address))
     print("TCAPTCHA", EP.functions.getDepositInfo(
         TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
+    print("SPORTS BETTING", EP.functions.getDepositInfo(
+        TEST_SPORTS_BETTING.address).call(), w3.eth.get_balance(TEST_SPORTS_BETTING.address))
 
 
 # -------------------------------------------------------------
@@ -131,9 +140,10 @@ def buildOp(A, nKey, payload):
     # Try to avoid stuck / dropped transactions
     tip = max(w3.eth.max_priority_fee, 2500000)
     baseFee = w3.eth.gas_price - w3.eth.max_priority_fee
-    assert(baseFee > 0)
+    assert (baseFee > 0)
     fee = max(w3.eth.gas_price, baseFee + tip)
-    print ("Using gas prices", fee, tip, "detected", w3.eth.gas_price, w3.eth.max_priority_fee)
+    print("Using gas prices", fee, tip, "detected",
+          w3.eth.gas_price, w3.eth.max_priority_fee)
 
     p = {
         'sender': A.address,
@@ -174,6 +184,7 @@ def packOp(op):
 
 # -------------------------------------------------------------
 
+
 def estimateOp(p):
     global gasFees
 
@@ -210,10 +221,12 @@ def estimateOp(p):
 
 # ===============================================
 
+
 # Generates an AA-style nonce (each key has its own associated sequence count)
 nKey = int(1200 + (w3.eth.get_transaction_count(u_addr) % 7))
 # nKey = 0
-#print("nKey", nKey)
+# print("nKey", nKey)
+
 
 def ParseReceipt(opReceipt):
     global gasFees
@@ -224,10 +237,10 @@ def ParseReceipt(opReceipt):
         print("log", n, i['topics'][0], i['data'])
         n += 1
     print("Total tx gas stats:",
-        "gasUsed", Web3.to_int(hexstr=txRcpt['gasUsed']),
-	"effectiveGasPrice", Web3.to_int(hexstr=txRcpt['effectiveGasPrice']),
-	"l1GasUsed", Web3.to_int(hexstr=txRcpt['l1GasUsed']),
-	"l1Fee", Web3.to_int(hexstr=txRcpt['l1Fee']))
+          "gasUsed", Web3.to_int(hexstr=txRcpt['gasUsed']),
+          "effectiveGasPrice", Web3.to_int(hexstr=txRcpt['effectiveGasPrice']),
+          "l1GasUsed", Web3.to_int(hexstr=txRcpt['l1GasUsed']),
+          "l1Fee", Web3.to_int(hexstr=txRcpt['l1Fee']))
     opGas = Web3.to_int(hexstr=opReceipt['actualGasUsed'])
     print("opReceipt gas used", opGas, "unused", gasFees['estGas'] - opGas)
 
@@ -249,7 +262,8 @@ def submitOp(p):
             break
         elif 'error' in response.json():
             emsg = response.json()['error']['message']
-            if not re.search(r'message: block 0x.{64} not found', emsg): # Workaround for sending debug_traceCall to unsynced node
+            # Workaround for sending debug_traceCall to unsynced node
+            if not re.search(r'message: block 0x.{64} not found', emsg):
                 break
         print("*** Retrying eth_sendUserOperation")
         time.sleep(5)
