@@ -16,7 +16,7 @@ use ethers::{
       AbiDecode, AbiEncode
     },
     types::{
-      Address, Bytes, U256, H256, BigEndianHash,
+      Address, Bytes, U256, H256, BigEndianHash, RecoveryMessage::Data,
     },
     utils::keccak256,
     signers::{LocalWallet, Signer},
@@ -24,7 +24,7 @@ use ethers::{
 
 use crate::contracts::shared_types::UserOperation;
 
-use std::{sync::Mutex, collections::HashMap};
+use std::{sync::Mutex, collections::HashMap, str::FromStr};
 use std::ops::Add;
 
 use once_cell::sync::Lazy;
@@ -263,7 +263,6 @@ fn make_external_op(
     };
 
     new_op.signature = sig_hex.parse::<Bytes>().unwrap();
-    println!("HC signed {:?}", new_op.signature);
 
     new_op
 }
@@ -281,12 +280,28 @@ pub async fn external_op(
     oo_nonce: U256,
     map_key: H256,
     cfg: &HcCfg,
-) {
+    ha_owner: Address,
+    nn: U256,
+) -> HcErr {
     println!("HC hybrid_compute external_op op_key {:?} response_payload {:?}", op_key, response_payload);
-    let new_op = make_external_op(src_addr,nonce,op_success,response_payload,sub_key,ep_addr,sig_hex,oo_nonce,cfg);
+    let mut new_op = make_external_op(src_addr,nonce,op_success,response_payload,sub_key,ep_addr,sig_hex.clone(),oo_nonce,cfg);
+
+    let check_hash = new_op.op_hash(cfg.entry_point, cfg.chain_id);
+    let check_sig: ethers::types::Signature = ethers::types::Signature::from_str(&sig_hex).expect("Signature decode");
+    let check_msg: ethers::types::RecoveryMessage =  Data(check_hash.to_fixed_bytes().to_vec());
+
+    let mut hc_err = HcErr{code: 0, message:"".to_string()};
+
+    if check_sig.verify(check_msg, ha_owner).is_err() {
+        println!("HC Bad offchain signature");
+        hc_err = HcErr{code: 3, message:"HC03: Bad offchain signature".to_string()};
+        new_op = make_err_op(hc_err.clone(), sub_key, src_addr, nn, oo_nonce, cfg);
+    }
 
     let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), needed_pvg: U256::zero() };
     HC_MAP.lock().unwrap().insert(op_key, ent);
+
+    hc_err
 }
 
 fn make_err_op(
