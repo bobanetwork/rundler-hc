@@ -5,7 +5,12 @@ from check_kyc.check_kyc_test import TestKyc
 from add_sub_2.add_sub_2_test import TestAddSub2
 from ramble.ramble_test import TestWordGuess
 from verify_captcha.captcha_test import TestCaptcha
+from rainfall_insurance.rainfall_insurance_test import test_rainfall_insurance_payout
 from userop_utils import *
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 print("Starting Balances:")
 showBalances()
@@ -16,6 +21,8 @@ print("TestCount(start)=", TC.functions.counters(SA.address).call())
 print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 
 # ===============================================
+
+test_rainfall_insurance_payout(int(os.getenv("POLICY_ID")))
 
 #TestCaptcha("0x123")
 

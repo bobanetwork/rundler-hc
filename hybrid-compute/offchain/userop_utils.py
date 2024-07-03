@@ -67,8 +67,11 @@ KYC = w3.eth.contract(
     address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
 TFP = w3.eth.contract(
     address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
-TCAPTCHA = w3.eth.contract(
-    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
+# TCAPTCHA = w3.eth.contract(
+#    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
+TEST_RAINFALL_INSURANCE = w3.eth.contract(
+    address=deployed['TestRainfallInsurance']['address'], abi=deployed['TestRainfallInsurance']['abi']
+)
 
 print("EP at", EP.address)
 
@@ -87,8 +90,10 @@ def showBalances():
         TC.address).call(), w3.eth.get_balance(TC.address))
     print("TFP", EP.functions.getDepositInfo(
         TFP.address).call(), w3.eth.get_balance(TFP.address))
-    print("TCAPTCHA", EP.functions.getDepositInfo(
-        TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
+    # print("TCAPTCHA", EP.functions.getDepositInfo(
+    #    TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
+    print("TEST_RAINFALL_INSURANCE", EP.functions.getDepositInfo(
+        TEST_RAINFALL_INSURANCE.address).call(), w3.eth.get_balance(TEST_RAINFALL_INSURANCE.address))
 
 
 # -------------------------------------------------------------
