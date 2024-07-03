@@ -75,6 +75,7 @@ TFP = w3.eth.contract(
 #    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
 TEST_AUCTION = w3.eth.contract(
     address=deployed['TestAuctionSystem']['address'], abi=deployed['TestAuctionSystem']['abi']
+)
 TEST_RAINFALL_INSURANCE = w3.eth.contract(
     address=deployed['TestRainfallInsurance']['address'], abi=deployed['TestRainfallInsurance']['abi']
 )
