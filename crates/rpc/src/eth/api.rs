@@ -38,6 +38,7 @@ use rundler_types::{
         IEntryPointCalls, UserOperationEventFilter, UserOperationRevertReasonFilter,
     },
     contracts::hc_helper::{HCHelper as HH2},
+    contracts::simple_account::SimpleAccount,
     UserOperation,
 };
 use rundler_utils::{eth::log_to_raw_log, log::LogOnError};
@@ -239,8 +240,8 @@ where
 	let err_nonce = context.gas_estimator.entry_point.get_nonce(self.settings.hc.sys_account, n_key).await.unwrap();
 	println!("HC hc_nonce {:?} op_nonce {:?} n_key {:?}", hc_nonce, op.nonce, n_key);
 	let p2 = eth::new_provider(&self.settings.hc.node_http, None)?;
-	let hx = HH2::new(self.settings.hc.helper_addr, p2);
 
+	let hx = HH2::new(self.settings.hc.helper_addr, p2.clone());
 	let url = hx.registered_callers(ep_addr).await.expect("url_decode").1;
 	println!("HC registered_caller url {:?}", url);
 
@@ -259,6 +260,12 @@ where
 
 	let oo_n_key:U256 = U256::from_big_endian(op.sender.as_fixed_bytes());
 	let oo_nonce = context.gas_estimator.entry_point.get_nonce(ep_addr, oo_n_key).await.unwrap();
+
+        let ha_owner = SimpleAccount::new(ep_addr, p2).owner().await;
+
+        if ha_owner.is_err() {
+            return Err(GasEstimationError::RevertInValidation("Failed to look up HybridAccount owner".to_string()));
+        }
 
         const REQ_VERSION:&str = "0.2";
 
@@ -285,7 +292,7 @@ where
 	            let hc_res:Bytes = hex::decode(resp_hex).unwrap().into();
 	            println!("HC api.rs do_op result sk {:?} success {:?} res {:?}", sub_key, op_success, hc_res);
 
-                    hybrid_compute::external_op(hh, op.sender, hc_nonce, op_success, &hc_res, sub_key, ep_addr, sig_hex, oo_nonce, map_key, &self.settings.hc).await;
+                    err_hc = hybrid_compute::external_op(hh, op.sender, hc_nonce, op_success, &hc_res, sub_key, ep_addr, sig_hex, oo_nonce, map_key, &self.settings.hc, ha_owner.unwrap(), err_nonce).await;
                 } else {
 	            err_hc = hybrid_compute::HcErr{code: 3, message:"HC03: Decode Error".to_string()};
 		}
