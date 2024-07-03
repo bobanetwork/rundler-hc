@@ -18,6 +18,7 @@ def offchain_getprice(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
         tokenSymbol = tokenSymbol.upper()
         print("tokensymbol", tokenSymbol)
 
+        # The first few requests are free, but if you want to add an API-Key, you can do so here
         coinListUrl = "https://api.coinranking.com/v2/coins"
         headers = {
             "accept": "application/json",

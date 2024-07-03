@@ -75,41 +75,9 @@ where
         gas: U256,
     ) -> anyhow::Result<HandleOpsOut> {
 
-        println!("HC entry_point call_handle_ops 1, len {:?}", ops_per_aggregator[0].user_ops.len());
+        println!("HC entry_point call_handle_ops 1, len {:?} gas {:?}", ops_per_aggregator[0].user_ops.len(), gas);
 
-	let mut new_ops = Vec::<UserOperation>::new();
-	let mut idx_map = Vec::<usize>::new();
-	let mut is_hc   = Vec::<bool>::new();
-	let mut hc_gas = U256::zero();
-
-	for (i, uo) in ops_per_aggregator[0].user_ops.clone().iter().enumerate() {
-	  let hc_hash = uo.op_hc_hash();
-          println!("HC call_handle_ops checking idx {} hc_hash {:?}", i, hc_hash);
-
-	  let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
-	  if hc_ent.is_some() {
-	      let oc_gas = hc_ent.clone().unwrap().oc_gas;
-	      if oc_gas != U256::zero() {
-	          println!("HC call_handle_ops inserting HC op {:?} at i {:?}", hc_ent.clone().unwrap().user_op, i);
-                  idx_map.push(i);
-	          is_hc.push(true);
-	          hc_gas += oc_gas;
-	          new_ops.push(hc_ent.unwrap().user_op);
-              } else {
-	          println!("HC call_handle_ops zeroPVG {:?}", hc_hash);
-	          hybrid_compute::del_hc_ent(hc_hash);
-	      }
-	  }
-	  idx_map.push(i);
-	  is_hc.push(false);
-	  new_ops.push(uo.clone());
-        }
-
-	ops_per_aggregator[0].user_ops = new_ops;
-
-        println!("HC call_handle_ops gas was {:?}", gas);
-
-	let result = get_handle_ops_call(self, ops_per_aggregator.clone(), beneficiary, gas + hc_gas)
+	let result = get_handle_ops_call(self, ops_per_aggregator.clone(), beneficiary, gas)
             .call()
             .await;
         println!("HC entry_point call_handle_ops 2 result{:?}", result);
@@ -122,12 +90,7 @@ where
                 match &reason[..4] {
                     "AA95" => anyhow::bail!("Handle ops called with insufficient gas; {:?}", gas),
                     _ => {
-                        if is_hc[op_index.as_usize()] {
-		            let h2 = ops_per_aggregator[0].user_ops[op_index.as_usize() + 1].op_hc_hash();
-		            println!("HC offchain op failed {:?}; paired op is {:?}", reason, h2);
-                            hybrid_compute::hc_set_pvg(h2, U256::zero(), U256::zero()); // FIXME - should instead insert an error operation
-			    anyhow::bail!("HC operation failed in call_handle_ops");
-		        }
+                        println!("HC AA95 at index {:?}", op_index);
 		        return Ok(HandleOpsOut::FailedOp(op_index.as_usize(), reason));
 		    },
                 }
