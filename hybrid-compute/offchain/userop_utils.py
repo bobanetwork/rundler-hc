@@ -11,6 +11,10 @@ import requests
 
 import eth_account
 
+from dotenv import load_dotenv, find_dotenv
+
+load_dotenv(find_dotenv())
+
 BUNDLER_ADDR = os.environ['BUNDLER_ADDR']
 assert (len(BUNDLER_ADDR) == 42)
 bundler_addr = Web3.to_checksum_address(BUNDLER_ADDR)
@@ -67,8 +71,11 @@ KYC = w3.eth.contract(
     address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
 TFP = w3.eth.contract(
     address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
-# TCAPTCHA = w3.eth.contract(
+#TCAPTCHA = w3.eth.contract(
 #    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
+TEST_AUCTION = w3.eth.contract(
+    address=deployed['TestAuctionSystem']['address'], abi=deployed['TestAuctionSystem']['abi']
+)
 TEST_RAINFALL_INSURANCE = w3.eth.contract(
     address=deployed['TestRainfallInsurance']['address'], abi=deployed['TestRainfallInsurance']['abi']
 )
@@ -90,8 +97,9 @@ def showBalances():
         TC.address).call(), w3.eth.get_balance(TC.address))
     print("TFP", EP.functions.getDepositInfo(
         TFP.address).call(), w3.eth.get_balance(TFP.address))
-    # print("TCAPTCHA", EP.functions.getDepositInfo(
-    #    TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
+    print("AUCTION_SYSTEM", EP.functions.getDepositInfo(TEST_AUCTION.address).call(), w3.eth.get_balance(TEST_AUCTION.address))
+#    print("TCAPTCHA", EP.functions.getDepositInfo(
+#        TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
     print("TEST_RAINFALL_INSURANCE", EP.functions.getDepositInfo(
         TEST_RAINFALL_INSURANCE.address).call(), w3.eth.get_balance(TEST_RAINFALL_INSURANCE.address))
 
