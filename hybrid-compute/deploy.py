@@ -104,7 +104,7 @@ TestRainfallInsurance = loadContract(
 EP = loadContract(w3, "EntryPoint",    path_prefix+"core/EntryPoint.sol")
 SA = loadContract(w3, "SimpleAccount", path_prefix+"samples/SimpleAccount.sol")
 HA = loadContract(w3, "HybridAccount", path_prefix+"samples/HybridAccount.sol")
-#TEST_AUCTION = loadContract(w3, "TestAuctionSystem", path_prefix+"test/TestAuctionSystem.sol")
+TEST_AUCTION = loadContract(w3, "TestAuctionSystem", path_prefix+"test/TestAuctionSystem.sol")
 SPORT_BET = loadContract(w3, "TestSportsBetting", path_prefix+"test/TestSportsBetting.sol")
 
 print('balance', w3.eth.get_balance(deploy_addr))
