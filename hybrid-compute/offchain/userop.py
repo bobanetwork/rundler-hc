@@ -7,7 +7,13 @@ from ramble.ramble_test import TestWordGuess
 from verify_captcha.captcha_test import TestCaptcha
 from auction_system.auction_system_test import TestAuction
 from sports_betting.sports_betting_test import TestSportsBetting
+from rainfall_insurance.rainfall_insurance_test import test_rainfall_insurance_payout
+
 from userop_utils import *
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 print("Starting Balances:")
 showBalances()
@@ -20,7 +26,11 @@ print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 # ===============================================
 
 TestSportsBetting()
-#TestAuction()
+
+TestAuction()
+
+test_rainfall_insurance_payout(int(os.getenv("POLICY_ID")))
+
 #TestCaptcha("0x123")
 
 #TestTokenPrice("ETH")
@@ -28,7 +38,7 @@ TestSportsBetting()
 #TestKyc(True)  # Success
 #TestKyc(False)  # Fail
 
-#TestAddSub2(2, 1)   # Success
+TestAddSub2(2, 1)   # Success
 #TestAddSub2(2, 10)  # Underflow error, asserted
 #TestAddSub2(2, 3)   # Underflow error, handled internally
 #TestAddSub2(7, 0)   # Not HC

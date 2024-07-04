@@ -461,12 +461,11 @@ where
         nonce: U256,
         required_fees: Option<GasFees>,
     ) -> anyhow::Result<Option<BundleTx>> {
-        let mut bundle = self
+        let bundle = self
             .proposer
             .make_bundle(required_fees)
             .await
             .context("proposer should create bundle for builder")?;
-        //println!("HC made bundle {:?}", bundle);
         let remove_ops_future = async {
             let result = self.remove_ops_from_pool(&bundle.rejected_ops).await;
             if let Err(error) = result {
@@ -498,47 +497,10 @@ where
         );
         let op_hashes: Vec<_> = bundle.iter_ops().map(|op| self.op_hash(op)).collect();
         println!("HC bundle_sender bundle {:?} OH {:?}", bundle, op_hashes);
-	
-	let mut cleanup_keys:Vec<H256> = Vec::new();
-	let mut hc_gas = U256::zero();
-
-        let mut new_ops:Vec<UserOperation> = Vec::new();
-	for (i, uo) in bundle.ops_per_aggregator[0].user_ops.iter().enumerate() {   
-	    let hc_hash = uo.op_hc_hash();
-            println!("HC send_bundle checking idx {:?} hc_hash {:?}", i, hc_hash);
-	    let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
-	    if hc_ent.is_some() {
-	        let oc_gas = hc_ent.clone().unwrap().oc_gas;
-	        if oc_gas != U256::zero() {
-                    hc_gas += oc_gas;
-	            cleanup_keys.push(hc_ent.clone().unwrap().map_key);
-	            new_ops.push(hc_ent.unwrap().user_op);
-                } else {
-	            println!("HC get_send_bundle_transaction zeroPVG {:?}", hc_hash);
-                    hybrid_compute::del_hc_ent(hc_hash);
-	        }
-	    }
-	    new_ops.push(uo.clone());
-	}
-
-	if cleanup_keys.len() > 0 {
-	    println!("HC cleanup_keys {:?}", cleanup_keys);
-	    let cfg = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
-	    let c_nonce = self.entry_point.get_nonce(cfg.sys_account, U256::zero()).await.unwrap();
-	    let cleanup_op = hybrid_compute::rr_op(&cfg, c_nonce, cleanup_keys).await;
-	    new_ops.push(cleanup_op)
-	}
-
-        println!("HC get_send_bundle_transaction continuing, len {} bundle {:?}",
-	    new_ops.len(),
-	    new_ops,
-	);
-
-	bundle.ops_per_aggregator[0].user_ops = new_ops;
 	let mut tx = self.entry_point.get_send_bundle_transaction(
             bundle.ops_per_aggregator,
             self.beneficiary,
-            bundle.gas_estimate + hc_gas,
+            bundle.gas_estimate,
             bundle.gas_fees,
         );
         tx.set_nonce(nonce);

@@ -73,14 +73,14 @@ KYC = w3.eth.contract(
     address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
 TFP = w3.eth.contract(
     address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
-TCAPTCHA = w3.eth.contract(
-    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
-#TEST_AUCTION = w3.eth.contract(
-#    address=deployed['TestAuctionSystem']['address'], abi=deployed['TestAuctionSystem']['abi']
-#)
+#TCAPTCHA = w3.eth.contract(
+#    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
+TEST_AUCTION = w3.eth.contract(
+    address=deployed['TestAuctionSystem']['address'], abi=deployed['TestAuctionSystem']['abi'])
 TEST_SPORTS_BETTING = w3.eth.contract(
-    address=deployed['TestSportsBetting']['address'], abi=deployed['TestSportsBetting']['abi']
-)
+    address=deployed['TestSportsBetting']['address'], abi=deployed['TestSportsBetting']['abi'])
+TEST_RAINFALL_INSURANCE = w3.eth.contract(
+    address=deployed['TestRainfallInsurance']['address'], abi=deployed['TestRainfallInsurance']['abi'])
 
 print("EP at", EP.address)
 
@@ -100,13 +100,13 @@ def showBalances():
         TC.address).call(), w3.eth.get_balance(TC.address))
     print("TFP", EP.functions.getDepositInfo(
         TFP.address).call(), w3.eth.get_balance(TFP.address))
-   # print("AUCTION_SYSTEM", EP.functions.getDepositInfo(
-   #     TEST_AUCTION.address).call(), w3.eth.get_balance(TEST_AUCTION.address))
-    print("TCAPTCHA", EP.functions.getDepositInfo(
-        TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
+    print("AUCTION_SYSTEM", EP.functions.getDepositInfo(TEST_AUCTION.address).call(), w3.eth.get_balance(TEST_AUCTION.address))
+#    print("TCAPTCHA", EP.functions.getDepositInfo(
+#        TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
+    print("TEST_RAINFALL_INSURANCE", EP.functions.getDepositInfo(
+        TEST_RAINFALL_INSURANCE.address).call(), w3.eth.get_balance(TEST_RAINFALL_INSURANCE.address))
     print("SPORTS BETTING", EP.functions.getDepositInfo(
         TEST_SPORTS_BETTING.address).call(), w3.eth.get_balance(TEST_SPORTS_BETTING.address))
-
 
 # -------------------------------------------------------------
 

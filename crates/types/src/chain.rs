@@ -23,9 +23,9 @@ pub const OP_BEDROCK_CHAIN_IDS: &[u64] = &[
     Chain::Base as u64,
     Chain::BaseGoerli as u64,
     84532, // BaseSepolia
-    288,   // Boba Mainnet
-    28882, // Boba Sepolia
-    901,   // Boba/Optimism local devnet
+    //288,   // Boba Mainnet
+    //28882, // Boba Sepolia
+    //901,   // Boba/Optimism local devnet
 ];
 
 // TODO use chain from ethers types once my PR is merged into ethers

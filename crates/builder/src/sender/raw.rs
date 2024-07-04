@@ -66,13 +66,25 @@ where
             .await
             .context("provider should return transaction status")?;
         Ok(match tx {
-            None => TxStatus::Dropped,
-            Some(tx) => match tx.block_number {
-                None => TxStatus::Pending,
-                Some(block_number) => TxStatus::Mined {
-                    block_number: block_number.as_u64(),
-                },
+//            None => TxStatus::Dropped,
+            None => {
+                // FIXME - workaround
+                println!("HC get_transaction_status for {:?} returned None, overriding", tx_hash);
+                TxStatus::Pending
             },
+            Some(tx) =>
+                match tx.block_number {
+                    None => {
+                        println!("HC get_transaction_status found tx, no block");
+                        TxStatus::Pending
+                    },
+                    Some(block_number) => {
+                        println!("HC get_transaction_status found tx at block {:?}", block_number);
+                        TxStatus::Mined {
+                            block_number: block_number.as_u64(),
+                        }
+                    },
+                },
         })
     }
 

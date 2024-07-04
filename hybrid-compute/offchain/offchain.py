@@ -9,6 +9,7 @@ from get_token_price.get_token_price_offchain import offchain_getprice
 from verify_captcha.captcha_offchain import offchain_verifycaptcha
 from auction_system.auction_system_offchain import offchain_auction
 from sports_betting.sports_betting_offchain import offchain_sports_betting
+from rainfall_insurance.rainfall_insurance_offchain import offchain_getrainfall
 
 PORT = int(os.environ['OC_LISTEN_PORT'])
 assert (PORT != 0)
@@ -37,13 +38,14 @@ def server_loop():
     server.register_function(
         offchain_verifycaptcha, selector("verifyCaptcha(string,string,string)"))
     server.register_function(
-        offchain_auction, selector("verifyBidder(address)")
-    )
+        offchain_auction, selector("verifyBidder(address)"))
     server.register_function(
-        offchain_sports_betting, selector("get_score(uint256)")
-    )
+        offchain_sports_betting, selector("get_score(uint256)"))
+    server.register_function(
+        offchain_auction, selector("verifyBidder(address)"))
+    server.register_function(
+        offchain_getrainfall, selector("get_rainfall(string)"))
 
     server.serve_forever()
-
 
 server_loop()  # Run until killed
