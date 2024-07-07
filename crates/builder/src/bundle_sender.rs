@@ -139,6 +139,7 @@ where
         loop {
             let mut send_bundle_response: Option<oneshot::Sender<SendBundleResult>> = None;
             let mut last_block = None;
+            hybrid_compute::expire_hc_cache();
 
             if self.manual_bundling_mode.load(Ordering::Relaxed) {
                 if let Some(r) = self.send_bundle_receiver.recv().await {

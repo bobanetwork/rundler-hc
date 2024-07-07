@@ -37,7 +37,6 @@ def TestAuction():
     p['signature'] = Web3.to_hex(sig.signature)
 
     print("-----")
-    time.sleep(5)
     submitOp(p)
 
     bid()
@@ -69,6 +68,5 @@ def bid():
     p['signature'] = Web3.to_hex(sig.signature)
 
     print("-----")
-    time.sleep(5)
     submitOp(p)
     print("TestAuction end")

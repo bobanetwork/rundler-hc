@@ -79,7 +79,6 @@ def TestCaptcha(user_addr):
     p['signature'] = Web3.to_hex(sig.signature)
 
     print("-----")
-    time.sleep(5)
     response = requests.post(
         "http://localhost:3300/", json=request("eth_sendUserOperation", params=[p, EP.address]))
     print("sendOperation response", response.json())

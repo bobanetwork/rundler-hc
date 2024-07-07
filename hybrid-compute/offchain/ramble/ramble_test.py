@@ -36,7 +36,6 @@ def TestWordGuess(n, cheat):
         return
 
     print("-----")
-    time.sleep(5)
     submitOp(p)
     print("Pool balance after playing =", Web3.from_wei(
         TC.functions.Pool().call(), 'gwei'))

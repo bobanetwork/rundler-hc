@@ -46,6 +46,5 @@ def TestKyc(isValid: bool):
     p['signature'] = Web3.to_hex(sig.signature)
 
     print("-----")
-    time.sleep(5)
     submitOp(p)
     print("TestKyc end")

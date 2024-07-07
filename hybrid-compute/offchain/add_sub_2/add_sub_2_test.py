@@ -35,6 +35,5 @@ def TestAddSub2(a, b):
         return
 
     print("-----")
-    time.sleep(5)
     submitOp(p)
     print("TestCount(end)=", TC.functions.counters(SA.address).call())

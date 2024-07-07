@@ -25,7 +25,6 @@ use ethers::{
 use crate::contracts::shared_types::UserOperation;
 
 use std::{sync::Mutex, collections::HashMap, str::FromStr};
-use std::ops::Add;
 
 use once_cell::sync::Lazy;
 use std::time::{Duration, SystemTime};
@@ -479,8 +478,8 @@ pub fn hc_get_pvg(key: H256) -> Option<U256> {
 /// Iterate and remove expired cache entries
 pub fn expire_hc_cache() {
     let mut map = HC_MAP.lock().unwrap();
-    let exp_time = SystemTime::now().add(EXPIRE_SECS);
-    map.retain(|_, ent| ent.ts < exp_time);
+    let exp_time = SystemTime::now().checked_sub(EXPIRE_SECS).unwrap();
+    map.retain(|_, ent| ent.ts > exp_time);
 }
 
 

@@ -147,15 +147,6 @@ impl<P: Provider, E: EntryPoint> GasEstimator for GasEstimatorImpl<P, E> {
         // verification and call estimation fail.
         let timer = std::time::Instant::now();
         let (verification_gas_limit, call_gas_limit) = join!(verification_future, call_future);
-/*
-	//println!("HC before verification_gas_limit");
-	let verification_gas_limit = verification_future.await;
-	println!("HC verification_gas_limit {:?}", verification_gas_limit);
-
-	std::thread::sleep(std::time::Duration::from_secs(1));
-	println!("HC before call_gas_limit");
-	let call_gas_limit = call_future.await;
-*/
         tracing::debug!("gas estimation took {}ms", timer.elapsed().as_millis());
 
         let verification_gas_limit = verification_gas_limit?;
@@ -163,7 +154,6 @@ impl<P: Provider, E: EntryPoint> GasEstimator for GasEstimatorImpl<P, E> {
         let call_gas_limit = call_gas_limit?;
 
 	println!("HC call_gas_limit {:?}", call_gas_limit);
-	std::thread::sleep(std::time::Duration::from_millis(250));
 
         if let Some(err) = settings.validate() {
             return Err(GasEstimationError::RevertInValidation(err));
@@ -336,7 +326,6 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
         block_hash: H256,
         mut state_override: spoof::State,
     ) -> Result<U256, GasEstimationError> {
-	std::thread::sleep(std::time::Duration::from_secs(1));
         let timer = std::time::Instant::now();
         // For an explanation of what's going on here, see the comment at the
         // top of `CallGasEstimationProxy.sol`.

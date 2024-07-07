@@ -54,7 +54,6 @@ def create_bet(game_id):
     p['signature'] = Web3.to_hex(sig.signature)
 
     print("-----")
-    time.sleep(5)
     submitOp(p)
     print("Create Bet end")
 
@@ -87,7 +86,6 @@ def place_bet(game_id):
     p['signature'] = Web3.to_hex(sig.signature)
 
     print("-----")
-    time.sleep(5)
     submitOp(p)
     print("Place Bet end")
 
@@ -117,6 +115,5 @@ def settle_bet(game_id):
     p['signature'] = Web3.to_hex(sig.signature)
 
     print("-----")
-    time.sleep(5)
     submitOp(p)
     print("Settle Bet end")
