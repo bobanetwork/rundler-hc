@@ -199,7 +199,7 @@ def deployBase():
   cmd_env = os.environ.copy()
   cmd_env['PRIVATE_KEY'] = deploy_key
   cmd_env['HC_SYS_OWNER'] = ha0_owner
-  cmd_env['DEPLOY_SALT'] = "2"  # Update to force redeployment
+  cmd_env['DEPLOY_SALT'] = "0"  # Update to force redeployment
 
   out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env, capture_output=True)
 
