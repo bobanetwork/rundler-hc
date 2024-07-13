@@ -63,16 +63,16 @@ HH = w3.eth.contract(
 # This address is unique for each user, who deploys their own wallet account
 SA = w3.eth.contract(
     address=u_account, abi=deployed['SimpleAccount']['abi'])
-BA = w3.eth.contract(address=deployed['HybridAccount.0']
-                     ['address'], abi=deployed['HybridAccount.0']['abi'])
-HA = w3.eth.contract(address=deployed['HybridAccount.1']
-                     ['address'], abi=deployed['HybridAccount.1']['abi'])
+#BA = w3.eth.contract(address=deployed['HybridAccount.0']
+#                     ['address'], abi=deployed['HybridAccount.0']['abi'])
+HA = w3.eth.contract(address=deployed['HybridAccount']
+                     ['address'], abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
     address=deployed['TestCounter']['address'], abi=deployed['TestCounter']['abi'])
-KYC = w3.eth.contract(
-    address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
-TFP = w3.eth.contract(
-    address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
+#KYC = w3.eth.contract(
+#    address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
+#TFP = w3.eth.contract(
+#    address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
 #TCAPTCHA = w3.eth.contract(
 #    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
 TEST_AUCTION = w3.eth.contract(
@@ -92,14 +92,14 @@ def showBalances():
         bundler_addr).call(), w3.eth.get_balance(bundler_addr))
     print("SA ", EP.functions.getDepositInfo(
         SA.address).call(), w3.eth.get_balance(SA.address))
-    print("BA ", EP.functions.getDepositInfo(
-        BA.address).call(), w3.eth.get_balance(BA.address))
+#    print("BA ", EP.functions.getDepositInfo(
+#        BA.address).call(), w3.eth.get_balance(BA.address))
     print("HA ", EP.functions.getDepositInfo(
         HA.address).call(), w3.eth.get_balance(HA.address))
     print("TC ", EP.functions.getDepositInfo(
         TC.address).call(), w3.eth.get_balance(TC.address))
-    print("TFP", EP.functions.getDepositInfo(
-        TFP.address).call(), w3.eth.get_balance(TFP.address))
+#    print("TFP", EP.functions.getDepositInfo(
+#        TFP.address).call(), w3.eth.get_balance(TFP.address))
     print("AUCTION_SYSTEM", EP.functions.getDepositInfo(TEST_AUCTION.address).call(), w3.eth.get_balance(TEST_AUCTION.address))
 #    print("TCAPTCHA", EP.functions.getDepositInfo(
 #        TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))

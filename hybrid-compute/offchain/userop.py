@@ -21,15 +21,27 @@ balStart_bnd = w3.eth.get_balance(bundler_addr)
 balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0] + w3.eth.get_balance(SA.address)
 
 print("TestCount(start)=", TC.functions.counters(SA.address).call())
-print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
+#print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 
 # ===============================================
 
-TestSportsBetting()
+
+TestAddSub2(2, 1)   # Success
+TestAddSub2(2, 10)  # Underflow error, asserted
+TestAddSub2(2, 3)   # Underflow error, handled internally
+TestAddSub2(7, 0)   # Not HC
+TestAddSub2(4, 1)   # Success again
+
+TestWordGuess(1, False)
+TestWordGuess(10, False)
+#TestWordGuess(100, False)
+TestWordGuess(2, True)
 
 TestAuction()
 
-test_rainfall_insurance_payout(int(os.getenv("POLICY_ID")))
+TestSportsBetting()
+
+#test_rainfall_insurance_payout(int(os.getenv("POLICY_ID")))
 
 #TestCaptcha("0x123")
 
@@ -37,22 +49,10 @@ test_rainfall_insurance_payout(int(os.getenv("POLICY_ID")))
 
 #TestKyc(True)  # Success
 #TestKyc(False)  # Fail
-
-TestAddSub2(2, 1)   # Success
-#TestAddSub2(2, 10)  # Underflow error, asserted
-#TestAddSub2(2, 3)   # Underflow error, handled internally
-#TestAddSub2(7, 0)   # Not HC
-#TestAddSub2(4, 1)   # Success again
-
-#TestWordGuess(1, False)
-#TestWordGuess(10, False)
-#TestWordGuess(100, False)
-#TestWordGuess(2, True)
-
 # ===============================================
 
 print("TestCount(final)=", TC.functions.counters(SA.address).call())
-print("TestFetchPrice(final)=", TFP.functions.counters(0).call())
+#print("TestFetchPrice(final)=", TFP.functions.counters(0).call())
 
 print("\nFinal Balances:")
 showBalances()

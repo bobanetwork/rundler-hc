@@ -23,3 +23,5 @@ __pycache__
 hybrid-compute/__pycache__/
 hybrid-compute/addresses.txt
 hybrid-compute/contracts.json
+hybrid-compute/.env.old
+crates/types/contracts/broadcast
