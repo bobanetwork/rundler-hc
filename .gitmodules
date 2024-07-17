@@ -1,6 +1,6 @@
 [submodule "crates/types/contracts/lib/account-abstraction"]
 	path = crates/types/contracts/lib/account-abstraction
-	url = https://github.com/bobanetwork/account-abstraction-hc
+	url = git@github.com:bobanetwork/account-abstraction-hc
 	branch = hc-dev
 [submodule "crates/types/contracts/lib/forge-std"]
 	path = crates/types/contracts/lib/forge-std
