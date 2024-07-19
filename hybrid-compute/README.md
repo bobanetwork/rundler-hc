@@ -10,7 +10,36 @@ The `crates/types/contracts/hc_scripts/LocalDeploy.s.sol` script can be adapted 
 
 Each Hybrid Compute application has two pieces - an on-chain Hybrid Account contract and an offchain JSON-RPC service to process the requests. The URL of that service must be associated with the contract's address by calling the `RegisterURL()` method (administrators only) on the `HCHelper` contract. When an authorized contract makes a request to the HybridAccount, the Bundler will pass the request parameters to the JSON-RPC service and will exepct a correctly-formatted response including a signature.
 
-When the HybridAccount is deployed, a nominal amount of testnet ETH must be deposited to the EntryPoint contract. This balance is not spent, but must be present for early validation steps to succeed.
+When the HybridAccount is deployed, a nominal amount of testnet ETH must be deposited to the EntryPoint contract. This balance is not spent, but must be present for early validation steps to succeed. This is handled automatically with a deployment script:
+```
+Generate an OC_OWNER/OC_PRIVKEY address/key pair using whichever method you
+prefer. The key will be used by your offchain RPC server to sign its responses,
+and does not need to be exposed beyond that server (so a hardware wallet etc.
+may be used as long as it is capable of generating the necessary signatures).
+
+You will need a funded deployer account.
+
+$ cd rundler-hc/crates/types/contracts
+$ export OC_OWNER=0x1111111111111111111111111111111111111111        # Replace with the address you generated
+$ export ENTRY_POINTS=0x2222222222222222222222222222222222222222    # FIXME - Placeholder
+$ export HA_FACTORY_ADDR=0x3333333333333333333333333333333333333333 # FIXME - Placeholder
+
+The address of the HybridAccount will be determined by the OC_OWNER address and
+by an optional Salt value. If not specified it will default to 0
+
+$ export DEPLOY_SALT=0 # Optional
+
+Run the command, supplying appropriate parameters including the privkey of your
+deployer account
+
+$ forge script hc_scripts/DeployHybridAccount.sol --rpc-url=... --private-key=...
+
+If simulation is successful, run the comamand again to send actual transactions
+$ forge script hc_scripts/DeployHybridAccount.sol --rpc-url=... --private-key=... --broadcast
+
+The address of the HybridAccount will be returned. Assign this to the
+OC_HYBRID_ACCOUNT environment variable.
+```
 
 The HybridAccount must also maintain a balance of Boba tokens in the HCHelper contract. These tokens are spent when calls are made. The eventual pricing model is TBD but is currently implemented as a flat fee per call to GetResponse().
 

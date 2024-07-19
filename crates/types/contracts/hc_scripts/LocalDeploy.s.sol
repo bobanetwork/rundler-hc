@@ -8,7 +8,7 @@ import "lib/account-abstraction/contracts/samples/HybridAccountFactory.sol";
 import "lib/account-abstraction/contracts/samples/SimpleAccountFactory.sol";
 
 contract LocalDeploy is Script {
-    function run() external 
+    function run() external
         returns (address[5] memory) {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address hcSysOwner = vm.envAddress("HC_SYS_OWNER");
@@ -24,7 +24,7 @@ contract LocalDeploy is Script {
         HybridAccount ha0;
 
         bytes32 salt_val = bytes32(deploySalt);
-        uint112 min_deposit = 0.01 ether;
+        uint112 min_deposit = 0.001 ether;
 
         vm.startBroadcast(deployerPrivateKey);
 

@@ -20,6 +20,7 @@ parser.add_argument("--account", required=True, help="Account address")
 parser.add_argument("--target", required=True, help="Target contract address")
 parser.add_argument("--value", type=int, default=0, help="Value of ETH (in wei) to send with call")
 parser.add_argument("--calldata", required=True, help="Hex-encoded calldata")
+parser.add_argument("--initcode", default="0x", help="Hex-encoded initcode")
 
 args = parser.parse_args()
 
@@ -41,13 +42,13 @@ def aa_nonce(addr):
   ret = w3.eth.call({'to':EP_addr,'data':calldata})
   return Web3.to_hex(ret)
 
-def build_op(to_contract, value_in_wei, calldata_hex):
+def build_op(to_contract, value_in_wei, initcode_hex, calldata_hex):
   exCall = selector("execute(address,uint256,bytes)") + \
         ethabi.encode(['address', 'uint256', 'bytes'], [to_contract, value_in_wei, Web3.to_bytes(hexstr=calldata_hex)])
   p = {
     'sender':u_addr,
     'nonce': aa_nonce(u_addr),
-    'initCode':'0x',
+    'initCode':initdata_hex,
     'callData': Web3.to_hex(exCall),
     'callGasLimit': "0x0",
     'verificationGasLimit': Web3.to_hex(0),
@@ -192,7 +193,7 @@ acct_owner_hex = Web3.to_hex(w3.eth.call({'to':u_addr,'data':selector("owner()")
 assert(Web3.to_checksum_address("0x" + acct_owner_hex[26:]) == u_owner) # Make sure the account owner is valid
 
 target_addr = Web3.to_checksum_address(args.target)
-op = build_op(target_addr, args.value, args.calldata)
+op = build_op(target_addr, args.value, args.initcode, args.calldata)
 op, gas_est = estimate_op(op)
 print("Total gas estimate for op =", gas_est)
 submitOp(op)
