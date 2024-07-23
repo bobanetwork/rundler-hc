@@ -11,6 +11,7 @@ import time
 import re
 import subprocess
 from eth_abi import abi as ethabi
+import socket
 
 boba_addr = Web3.to_checksum_address(
     "0x4200000000000000000000000000000000000023")
@@ -35,6 +36,12 @@ ha0_privkey = "0x75cd983f0f4714969b152baa258d849473732905e2301467303dacf5a09fdd5
 ha1_owner = Web3.to_checksum_address(
     "0xE073fC0ff8122389F6e693DD94CcDc5AF637448e")
 ha1_privkey = "0x7c0c629efc797f8c5f658919b7efbae01275470d59d03fdeb0fca1e6bd11d7fa"
+
+# Get the local IP (not localhost) of this machine
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("192.0.2.0", 1))
+local_ip = s.getsockname()[0]
+s.close()
 
 l1 = Web3(Web3.HTTPProvider("http://127.0.0.1:8545"))
 assert (l1.is_connected)
@@ -313,9 +320,8 @@ for a in example_addrs:
   permitCaller(HA, a)
 
 policy_id = buy_insurance(RAINFALL_INSURANCE)
-# Change IP address as needed.
-#registerUrl(HA.address, "http://192.168.178.37:1234/hc")
-registerUrl(ha1_addr, "http://192.168.4.2:1234/hc")
+local_url = "http://" + str(local_ip) + ":1234/hc"
+registerUrl(ha1_addr, local_url)
 
 with open("./contracts.json", "w") as f:
   f.write(json.dumps(deployed))
