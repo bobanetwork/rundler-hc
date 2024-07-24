@@ -49,7 +49,7 @@ gasFees['estGas'] = 123
 gasFees['l2Fees'] = 0   # Cumulative L2 fees
 gasFees['l1Fees'] = 0   # Cumulative L1 fees
 
-w3 = Web3(Web3.HTTPProvider(node_http))
+w3 = Web3(Web3.HTTPProvider(node_http, request_kwargs={'timeout': 900}))
 assert (w3.is_connected)
 w3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
@@ -137,11 +137,14 @@ def buildAndSubmit(f, addr, key):
 def buildOp(A, nKey, payload):
     sender_nonce = EP.functions.getNonce(A.address, nKey).call()
 
-    # Try to avoid stuck / dropped transactions
-    tip = max(w3.eth.max_priority_fee, 2500000)
+    # Note - currently Tip affects the preVerificationGas estimate due to
+    # the mechanism for offsetting the L1 storage fee. If tip is too low
+    # the required L2 gas can exceed the block gas limit.
+    tip = max(w3.eth.max_priority_fee, Web3.to_wei(0.5, 'gwei'))
     baseFee = w3.eth.gas_price - w3.eth.max_priority_fee
+    print("tip", tip, "baseFee", baseFee)
     assert (baseFee > 0)
-    fee = max(w3.eth.gas_price, baseFee + tip)
+    fee = max(w3.eth.gas_price, 2 * baseFee + tip)
     print("Using gas prices", fee, tip, "detected",
           w3.eth.gas_price, w3.eth.max_priority_fee)
 

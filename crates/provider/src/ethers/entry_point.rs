@@ -57,7 +57,7 @@ where
         let gas_price = user_op.max_fee_per_gas;
         let mut tx = self
             .simulate_validation(user_op)
-            .gas(U256::from(max_validation_gas) + pvg)
+            .gas(U256::from(max_validation_gas))
             .tx;
 	let from_addr = hybrid_compute::HC_CONFIG.lock().unwrap().from_addr;
 	tx.set_from(from_addr);

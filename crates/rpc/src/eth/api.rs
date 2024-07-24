@@ -235,7 +235,7 @@ where
 	let ep_addr = hybrid_compute::hc_ep_addr(revert_data);
 
 	let n_key:U256 = op.nonce >> 64;
-        let at_gas = op.max_priority_fee_per_gas;
+        let at_price = op.max_priority_fee_per_gas;
 	let hc_nonce = context.gas_estimator.entry_point.get_nonce(op.sender, n_key).await.unwrap();
 	let err_nonce = context.gas_estimator.entry_point.get_nonce(self.settings.hc.sys_account, n_key).await.unwrap();
 	println!("HC hc_nonce {:?} op_nonce {:?} n_key {:?}", hc_nonce, op.nonce, n_key);
@@ -363,7 +363,7 @@ where
 
 	    let r2a = context
                 .gas_estimator
-                .estimate_op_gas(op_tmp_2, spoof::State::default(), at_gas)
+                .estimate_op_gas(op_tmp_2, spoof::State::default(), at_price)
                 .await;
 
             if let Err(GasEstimationError::RevertInValidation(ref r2_err)) = r2a {
@@ -392,7 +392,7 @@ where
 		signature: cleanup_op.signature,
 	    };
 	    //println!("HC op_tmp_4 {:?} {:?}", op_tmp_4, cleanup_keys);
-	    let r4 = context.gas_estimator.estimate_op_gas(op_tmp_4, spoof::State::default(), at_gas).await.unwrap();
+	    let r4 = context.gas_estimator.estimate_op_gas(op_tmp_4, spoof::State::default(), at_price).await?;
             let cleanup_gas = r4.pre_verification_gas + r4.verification_gas_limit + r4.call_gas_limit;
             let op_gas = r3.pre_verification_gas + r3.verification_gas_limit + r3.call_gas_limit;
 	    println!("HC api.rs offchain_gas estimate {:?} sum {:?}", r2, offchain_gas);
@@ -406,7 +406,12 @@ where
                 return Err(GasEstimationError::RevertInValidation(err_hc.message));
 	    }
 
-            let total_gas = needed_pvg + (r3.verification_gas_limit + 10000) + r3.call_gas_limit;
+            // Can't track down what's causing the gas differences between
+            // simulateHandleOps and SimulateValidation, so pad it and
+            // hope for the best. Unused gas will be refunded.
+            let vg_pad = 20000;
+
+            let total_gas = needed_pvg + (r3.verification_gas_limit + vg_pad) + r3.call_gas_limit;
             if total_gas > U256::from(25_000_000) { // Approaching the block gas limit
                 let err_msg:String = "Excessive HC total_gas estimate = ".to_owned() + &total_gas.to_string();
                 return Err(GasEstimationError::RevertInValidation(err_msg));
@@ -414,7 +419,7 @@ where
 
 	    return Ok(GasEstimate {
 	        pre_verification_gas: needed_pvg,
-	        verification_gas_limit: r3.verification_gas_limit + 10000,
+	        verification_gas_limit: r3.verification_gas_limit + vg_pad,
 	        call_gas_limit: r3.call_gas_limit,
 	    });
 	} else {

@@ -124,7 +124,7 @@ impl<P: Provider, E: EntryPoint> GasEstimator for GasEstimatorImpl<P, E> {
         // Estimate pre verification gas at the current fees
         // If the user provides fees, use them, otherwise use the current bundle fees
         let (bundle_fees, base_fee) = self.fee_estimator.required_bundle_fees(None).await?;
-        println!("HC bundle_fees {:?} base_fee {:?}", bundle_fees, base_fee);
+        println!("HC bundle_fees {:?} base_fee {:?} at_price {:?}", bundle_fees, base_fee, at_price);
         let gas_price = if let Some(at_price) = at_price {
             at_price
         } else if let (Some(max_fee), Some(prio_fee)) =
@@ -134,9 +134,9 @@ impl<P: Provider, E: EntryPoint> GasEstimator for GasEstimatorImpl<P, E> {
         } else {
             base_fee + bundle_fees.max_priority_fee_per_gas
         };
+        assert!(gas_price > U256::zero());
 
         let pre_verification_gas = self.estimate_pre_verification_gas(&op, gas_price).await?;
-
         let op = UserOperation {
             pre_verification_gas,
             ..op.into_user_operation(settings)
@@ -315,7 +315,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
             }
             guess = (max_failure_gas + min_success_gas) / 2;
         }
-	//println!("HC ----- after gas estimation loop");
+	println!("HC after gas estimation loop max_fail {:?} min_success {:?}", max_failure_gas, min_success_gas);
 
         tracing::debug!(
             "binary search for verification gas took {num_rounds} rounds, {}ms",
