@@ -197,7 +197,7 @@ where
 
 	let result_v = context
 	  .gas_estimator
-	  .estimate_op_gas(op.clone(), s2.clone())
+	  .estimate_op_gas(op.clone(), s2.clone(), None)
 	  .await;
 	println!("HC HC result_v {:?}", result_v);
         match result_v {
@@ -235,7 +235,7 @@ where
 	let ep_addr = hybrid_compute::hc_ep_addr(revert_data);
 
 	let n_key:U256 = op.nonce >> 64;
-
+        let at_gas = op.max_priority_fee_per_gas;
 	let hc_nonce = context.gas_estimator.entry_point.get_nonce(op.sender, n_key).await.unwrap();
 	let err_nonce = context.gas_estimator.entry_point.get_nonce(self.settings.hc.sys_account, n_key).await.unwrap();
 	println!("HC hc_nonce {:?} op_nonce {:?} n_key {:?}", hc_nonce, op.nonce, n_key);
@@ -245,7 +245,11 @@ where
 	let url = hx.registered_callers(ep_addr).await.expect("url_decode").1;
 	println!("HC registered_caller url {:?}", url);
 
-        let cc = HttpClientBuilder::default().build(url).unwrap();  // could specify a request_timeout() here.
+        let cc = HttpClientBuilder::default().build(url);  // could specify a request_timeout() here.
+        if cc.is_err() {
+            return Err(GasEstimationError::RevertInValidation("Invalid URL registered for HC".to_string()));
+        }
+
 	let m = hex::encode(hybrid_compute::hc_selector(revert_data));
 	let sub_key = hybrid_compute::hc_sub_key(revert_data);
 	let sk_hex = hex::encode(sub_key);
@@ -277,7 +281,7 @@ where
 	let _ = params.insert("oo_nonce", oo_nonce);
 	let _ = params.insert("payload", payload);
 
-        let resp: Result<HashMap<String,JsonValue>, _> = cc.request(&m, params).await;
+        let resp: Result<HashMap<String,JsonValue>, _> = cc.unwrap().request(&m, params).await;
 
         println!("HC resp {:?}", resp);
         let err_hc:hybrid_compute::HcErr;
@@ -332,7 +336,7 @@ where
         let s2 = hybrid_compute::get_hc_op_statediff(hh, s2);
 	let result2 = context
             .gas_estimator
-            .estimate_op_gas(op, s2)
+            .estimate_op_gas(op, s2, None)
             .await;
 	println!("HC result2 {:?}", result2);
 	if result2.is_ok() {
@@ -354,9 +358,12 @@ where
 		signature: op_tmp.signature,
 	    };
 
+            // The op_tmp_2 below specifies a 0 gas price, but we need to estimate the L1 fee at the
+            // price offered by real userOperation which will be paying for it.
+
 	    let r2a = context
                 .gas_estimator
-                .estimate_op_gas(op_tmp_2, spoof::State::default())
+                .estimate_op_gas(op_tmp_2, spoof::State::default(), at_gas)
                 .await;
 
             if let Err(GasEstimationError::RevertInValidation(ref r2_err)) = r2a {
@@ -385,7 +392,7 @@ where
 		signature: cleanup_op.signature,
 	    };
 	    //println!("HC op_tmp_4 {:?} {:?}", op_tmp_4, cleanup_keys);
-	    let r4 = context.gas_estimator.estimate_op_gas(op_tmp_4, spoof::State::default()).await.unwrap();
+	    let r4 = context.gas_estimator.estimate_op_gas(op_tmp_4, spoof::State::default(), at_gas).await.unwrap();
             let cleanup_gas = r4.pre_verification_gas + r4.verification_gas_limit + r4.call_gas_limit;
             let op_gas = r3.pre_verification_gas + r3.verification_gas_limit + r3.call_gas_limit;
 	    println!("HC api.rs offchain_gas estimate {:?} sum {:?}", r2, offchain_gas);
@@ -398,6 +405,12 @@ where
             if err_hc.code != 0 {
                 return Err(GasEstimationError::RevertInValidation(err_hc.message));
 	    }
+
+            let total_gas = needed_pvg + (r3.verification_gas_limit + 10000) + r3.call_gas_limit;
+            if total_gas > U256::from(25_000_000) { // Approaching the block gas limit
+                let err_msg:String = "Excessive HC total_gas estimate = ".to_owned() + &total_gas.to_string();
+                return Err(GasEstimationError::RevertInValidation(err_msg));
+            }
 
 	    return Ok(GasEstimate {
 	        pre_verification_gas: needed_pvg,
@@ -427,7 +440,7 @@ where
 	println!("HC api.rs Before estimate_gas {:?}", op);
         let mut result = context
             .gas_estimator
-            .estimate_op_gas(op.clone(), state_override.clone().unwrap_or_default())
+            .estimate_op_gas(op.clone(), state_override.clone().unwrap_or_default(), None)
             .await;
 	println!("HC api.rs estimate_gas result1 {:?}", result);
         match result {

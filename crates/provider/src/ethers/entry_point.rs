@@ -70,7 +70,7 @@ where
 
     async fn call_handle_ops(
         &self,
-        mut ops_per_aggregator: Vec<UserOpsPerAggregator>,
+        ops_per_aggregator: Vec<UserOpsPerAggregator>,
         beneficiary: Address,
         gas: U256,
     ) -> anyhow::Result<HandleOpsOut> {

@@ -87,6 +87,7 @@ pub trait GasEstimator: Send + Sync + 'static {
         &self,
         op: UserOperationOptionalGas,
         state_override: spoof::State,
+        at_price: Option<U256>,
     ) -> Result<GasEstimate, GasEstimationError>;
 }
 
@@ -108,6 +109,7 @@ impl<P: Provider, E: EntryPoint> GasEstimator for GasEstimatorImpl<P, E> {
         &self,
         op: UserOperationOptionalGas,
         state_override: spoof::State,
+        at_price: Option<U256>,
     ) -> Result<GasEstimate, GasEstimationError> {
 	//println!("HC entering estimate_op_gas, op {:?}", op);
         let Self {
@@ -123,13 +125,16 @@ impl<P: Provider, E: EntryPoint> GasEstimator for GasEstimatorImpl<P, E> {
         // If the user provides fees, use them, otherwise use the current bundle fees
         let (bundle_fees, base_fee) = self.fee_estimator.required_bundle_fees(None).await?;
         println!("HC bundle_fees {:?} base_fee {:?}", bundle_fees, base_fee);
-        let gas_price = if let (Some(max_fee), Some(prio_fee)) =
+        let gas_price = if let Some(at_price) = at_price {
+            at_price
+        } else if let (Some(max_fee), Some(prio_fee)) =
             (op.max_fee_per_gas, op.max_priority_fee_per_gas)
         {
-            if max_fee == U256::from(0) { bundle_fees.max_fee_per_gas } else { cmp::min(max_fee, base_fee + prio_fee) }
+            cmp::min(max_fee, base_fee + prio_fee)
         } else {
             base_fee + bundle_fees.max_priority_fee_per_gas
         };
+
         let pre_verification_gas = self.estimate_pre_verification_gas(&op, gas_price).await?;
 
         let op = UserOperation {
@@ -1231,7 +1236,7 @@ mod tests {
         let user_op = demo_user_op_optional_gas();
 
         let estimation = estimator
-            .estimate_op_gas(user_op, spoof::state())
+            .estimate_op_gas(user_op, spoof::state(), None)
             .await
             .unwrap();
 
@@ -1328,7 +1333,7 @@ mod tests {
         );
         let user_op = demo_user_op_optional_gas();
         let estimation = estimator
-            .estimate_op_gas(user_op, spoof::state())
+            .estimate_op_gas(user_op, spoof::state(), None)
             .await
             .err();
 
