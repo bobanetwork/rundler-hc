@@ -105,6 +105,11 @@ where
     }
 }
 
+// Can't track down what's causing the gas differences between
+// simulateHandleOps and SimulateValidation, so pad it and
+// hope for the best. Unused gas will be refunded.
+const VG_PAD:i32 = 20000;
+
 #[derive(Debug)]
 pub(crate) struct EthApi<P, E, PS> where E: EntryPoint {
     contexts_by_entry_point: HashMap<Address, EntryPointContext<P, E>>,
@@ -406,12 +411,7 @@ where
                 return Err(GasEstimationError::RevertInValidation(err_hc.message));
 	    }
 
-            // Can't track down what's causing the gas differences between
-            // simulateHandleOps and SimulateValidation, so pad it and
-            // hope for the best. Unused gas will be refunded.
-            let vg_pad = 20000;
-
-            let total_gas = needed_pvg + (r3.verification_gas_limit + vg_pad) + r3.call_gas_limit;
+            let total_gas = needed_pvg + (r3.verification_gas_limit + VG_PAD) + r3.call_gas_limit;
             if total_gas > U256::from(25_000_000) { // Approaching the block gas limit
                 let err_msg:String = "Excessive HC total_gas estimate = ".to_owned() + &total_gas.to_string();
                 return Err(GasEstimationError::RevertInValidation(err_msg));
@@ -419,7 +419,7 @@ where
 
 	    return Ok(GasEstimate {
 	        pre_verification_gas: needed_pvg,
-	        verification_gas_limit: r3.verification_gas_limit + vg_pad,
+	        verification_gas_limit: r3.verification_gas_limit,
 	        call_gas_limit: r3.call_gas_limit,
 	    });
 	} else {
@@ -469,7 +469,11 @@ where
 	}
 
         match result {
-            Ok(estimate) => Ok(estimate),
+            Ok(estimate) => Ok(GasEstimate {
+                pre_verification_gas: estimate.pre_verification_gas,
+	        verification_gas_limit: estimate.verification_gas_limit + VG_PAD,
+	        call_gas_limit: estimate.call_gas_limit,
+            }),
             Err(GasEstimationError::RevertInValidation(message)) => {
                 Err(EthRpcError::EntryPointValidationRejected(message))?
             }
