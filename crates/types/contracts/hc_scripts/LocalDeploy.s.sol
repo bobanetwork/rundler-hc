@@ -10,6 +10,7 @@ import "lib/account-abstraction/contracts/samples/SimpleAccountFactory.sol";
 contract LocalDeploy is Script {
     function run() external
         returns (address[5] memory) {
+        address deployAddr = vm.envAddress("DEPLOY_ADDR");
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address hcSysOwner = vm.envAddress("HC_SYS_OWNER");
         require (hcSysOwner != address(0), "HC_SYS_OWNER not set");
@@ -41,7 +42,7 @@ contract LocalDeploy is Script {
             if (helperAddr != address(0) && helperAddr.code.length > 0) {
                 helper = HCHelper(helperAddr);
             } else {
-                helper = new HCHelper{salt: salt_val}(address(ept), bobaAddr, 0);
+                helper = new HCHelper{salt: salt_val}(address(ept), bobaAddr);
             }
         }
         {
@@ -69,7 +70,7 @@ contract LocalDeploy is Script {
             }
         }    
         if (helper.systemAccount() != address(ha0)) {
-            helper.initialize(msg.sender, address(ha0));
+            helper.initialize(deployAddr, address(ha0));
         }
 
         (uint112 bal,,,,) = ept.deposits(address(ha0));

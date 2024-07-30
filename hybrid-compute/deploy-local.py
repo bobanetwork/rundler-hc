@@ -18,6 +18,10 @@ boba_addr = Web3.to_checksum_address(
 
 # The following addrs and keys are for local demo purposes. Do not deploy to public networks
 
+# Taken from .devnet/addresses.json
+boba_l1_addr = "0x84eA74d481Ee0A5332c457a4d796187F6Ba67fEB" # Boba L1
+bridge_addr = "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9" # L1 Standard Bridge
+
 deploy_addr = Web3.to_checksum_address(
     "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
 deploy_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -121,7 +125,7 @@ def buy_insurance(contract):
 
 def registerUrl(caller, url):
     print("Credit balance=", HH.functions.RegisteredCallers(caller).call()[2])
-    # Temporray hack
+    # Temporary hack
     if HH.functions.RegisteredCallers(caller).call()[1] != url or HH.functions.RegisteredCallers(caller).call()[2] == 0:
         print("Calling RegisterUrl()")
         tx = HH.functions.RegisterUrl(caller, url).build_transaction({
@@ -130,6 +134,7 @@ def registerUrl(caller, url):
             'gas': 210000,
             'chainId': HC_CHAIN,
         })
+
         signAndSubmit(w3, tx, deploy_key)
         print("Calling AddCredit()")
         tx = HH.functions.AddCredit(caller, 100).build_transaction({
@@ -206,6 +211,7 @@ def deployBase():
   cmd_env = os.environ.copy()
   cmd_env['PRIVATE_KEY'] = deploy_key
   cmd_env['HC_SYS_OWNER'] = ha0_owner
+  cmd_env['DEPLOY_ADDR'] = deploy_addr
   cmd_env['DEPLOY_SALT'] = "0"  # Update to force redeployment
 
   out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env, capture_output=True)
@@ -247,8 +253,29 @@ def getContract(cname, deployed_addr):
   deployed[cname] = dict()
   deployed[cname]['abi'] = contract_info[cname]['abi']
   deployed[cname]['address'] = deployed_addr
-
   return C
+
+def approveToken(rpc, token, spender):
+  approveCD = selector("approve(address,uint256)") + ethabi.encode(
+    ['address','uint256'],
+    [spender, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
+
+  tx = {
+      'nonce': rpc.eth.get_transaction_count(deploy_addr),
+      'from': deploy_addr,
+      'data': approveCD,
+      'to': token,
+      'gas': 210000,
+      'gasPrice': rpc.eth.gas_price,
+      'chainId': rpc.eth.chain_id,
+  }
+  print("Boba ERC20 approval")
+  signAndSubmit(rpc, tx, deploy_key)
+
+def bobaBalance(addr):
+  balCD = selector("balanceOf(address)") + ethabi.encode(['address'], [addr]);
+  bal = w3.eth.call({'to':boba_addr, 'data':balCD})
+  return bal
 
 HH = loadContract(w3, "HCHelper",      path_prefix+"core/HCHelper.sol")
 KYC = loadContract(w3, "TestKyc",          path_prefix+"test/TestKyc.sol")
@@ -280,11 +307,35 @@ if w3.eth.get_balance(deploy_addr) == 0:
       'chainId': 900,
       'value': Web3.to_wei(1000, 'ether')
   }
-  print("Funding L2 deploy_addr")
+  print("Funding L2 deploy_addr (ETH)")
   signAndSubmit(l1, tx, deploy_key)
 
   print("Sleep...")
   while l2.eth.get_balance(deploy_addr) == 0:
+    time.sleep(2)
+  print("Continuing")
+
+
+if bobaBalance(deploy_addr) == 0 or True:
+  approveToken(l1, boba_l1_addr, bridge_addr)
+
+  depositCD = selector("depositERC20(address,address,uint256,uint32,bytes)") + ethabi.encode(
+    ['address','address','uint256','uint32','bytes'],
+    [boba_l1_addr, boba_addr, Web3.to_wei(100,'ether'), 4000000, Web3.to_bytes(hexstr="0x")])
+  tx = {
+      'nonce': l1.eth.get_transaction_count(deploy_addr),
+      'from': deploy_addr,
+      'data': Web3.to_hex(depositCD),
+      'to': bridge_addr,
+      'chainId': 900,
+  }
+  tx['gas'] = int(l1.eth.estimate_gas(tx) * 1.5)
+  tx['gasPrice'] = l1.eth.gas_price
+  print("Funding L2 deploy_addr (BOBA)")
+  signAndSubmit(l1, tx, deploy_key)
+
+  print("Sleep...")
+  while bobaBalance(deploy_addr) == 0:
     time.sleep(2)
   print("Continuing")
 
@@ -296,6 +347,16 @@ fundAddr(bundler_addr)
 
 EP = getContract('EntryPoint',ep_addr)
 HH = getContract('HCHelper',hh_addr)
+
+approveToken(w3, boba_addr, HH.address)
+
+tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
+    'nonce': w3.eth.get_transaction_count(deploy_addr),
+    'from': deploy_addr,
+    'gas': 210000,
+    'chainId': HC_CHAIN,
+})
+signAndSubmit(w3, tx, deploy_key)
 
 # FIXME - fix permitCaller() so that these don't need to be funded, only to sign.
 fundAddr(ha1_owner)
