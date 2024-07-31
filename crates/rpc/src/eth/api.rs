@@ -368,7 +368,7 @@ where
 
 	    let r2a = context
                 .gas_estimator
-                .estimate_op_gas(op_tmp_2, spoof::State::default(), at_price)
+                .estimate_op_gas(op_tmp_2.clone(), spoof::State::default(), at_price)
                 .await;
 
             if let Err(GasEstimationError::RevertInValidation(ref r2_err)) = r2a {
@@ -376,6 +376,13 @@ where
                 return Err(GasEstimationError::RevertInValidation(msg));
             };
             let r2 = r2a?;
+
+            // The current formula used to estimate gas usage in the offchain_rpc service
+            // sometimes underestimates the true cost. For now all we can do is error here.
+            if r2.call_gas_limit > op_tmp_2.call_gas_limit.unwrap() {
+                let msg = "HC04: Offchain call_gas_limit too low".to_string();
+                return Err(GasEstimationError::RevertInValidation(msg));
+            }
 
             let offchain_gas = r2.pre_verification_gas + r2.verification_gas_limit + r2.call_gas_limit;
 
