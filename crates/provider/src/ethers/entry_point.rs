@@ -52,7 +52,7 @@ where
         user_op: UserOperation,
         max_validation_gas: u64,
     ) -> anyhow::Result<TypedTransaction> {
-        let pvg = user_op.pre_verification_gas;
+        //let pvg = user_op.pre_verification_gas;
 
         let gas_price = user_op.max_fee_per_gas;
         let mut tx = self
@@ -62,7 +62,7 @@ where
 	let from_addr = hybrid_compute::HC_CONFIG.lock().unwrap().from_addr;
 	tx.set_from(from_addr);
 	tx.set_gas_price(gas_price);
-	println!("HC entry_point.rs s_v {:?} {:?} {:?} {:?} gas_price", max_validation_gas, pvg, tx, gas_price);
+	//println!("HC entry_point.rs s_v {:?} {:?} {:?} {:?} gas_price", max_validation_gas, pvg, tx, gas_price);
 
         Ok(tx)
     }
@@ -132,7 +132,7 @@ where
         gas: U256,
         spoofed_state: &spoof::State,
     ) -> anyhow::Result<Result<ExecutionResult, String>> {
-        println!("HC entry_point call_spoofed_simOp op {:?} {:?}", op.sender, op.nonce);
+        //println!("HC entry_point call_spoofed_simOp op {:?} {:?}", op.sender, op.nonce);
 
 	let contract_error = self
             .simulate_handle_op(op, target, target_call_data)
@@ -157,9 +157,7 @@ where
         gas_fees: GasFees,
     ) -> TypedTransaction {
 
-        println!("HC starting get_send_bundle_transaction, len {}", ops_per_aggregator[0].user_ops.len());
-
-	println!("HC get_send_bundle_transaction beneficiary {:?} gas {:?} maxfees {:?}", beneficiary, gas, gas_fees);
+        println!("HC starting get_send_bundle_transaction, len {} gas {:?} maxfees {:?}", ops_per_aggregator[0].user_ops.len(), gas, gas_fees);
 
         let tx: Eip1559TransactionRequest =
             get_handle_ops_call(self, ops_per_aggregator, beneficiary, gas)
@@ -175,10 +173,10 @@ where
         revert_data: Bytes,
     ) -> Result<ExecutionResult, String> {
         if let Ok(result) = ExecutionResult::decode(&revert_data) {
-            println!("HC decodeSHO OK_result {:?}", result);
+            //println!("HC decodeSHO OK_result {:?}", result);
             Ok(result)
         } else if let Ok(failed_op) = FailedOp::decode(&revert_data) {
-            println!("HC decodeSHO failedOp {:?}", failed_op.reason);
+            //println!("HC decodeSHO failedOp {:?}", failed_op.reason);
 	    Err(failed_op.reason)
         } else if let Ok(err) = ContractRevertError::decode(&revert_data) {
             println!("HC decodeSHO errReason {:?}", err.reason);
@@ -203,10 +201,10 @@ fn get_handle_ops_call<M: Middleware>(
 ) -> FunctionCall<Arc<M>, M, ()> {
     let call =
         if ops_per_aggregator.len() == 1 && ops_per_aggregator[0].aggregator == Address::zero() {
-            println!("HC get_handle_ops_call will use entry_point.handle_ops");
+            //println!("HC get_handle_ops_call will use entry_point.handle_ops");
 	    entry_point.handle_ops(ops_per_aggregator.swap_remove(0).user_ops, beneficiary)
         } else {
-            println!("HC get_handle_ops_call will use entry_point.handle_aggregated_ops");
+            //println!("HC get_handle_ops_call will use entry_point.handle_aggregated_ops");
             entry_point.handle_aggregated_ops(ops_per_aggregator, beneficiary)
         };
     call.gas(gas)

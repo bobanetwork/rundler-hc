@@ -268,7 +268,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                 )
                 .await?
                 .err();
-	println!("HC binary search call_spoofed_simulate_op {:?} err={:?}", op.verification_gas_limit, error_message);
+	//println!("HC binary search call_spoofed_simulate_op {:?} err={:?}", op.verification_gas_limit, error_message);
 
             if let Some(error_message) = error_message {
                 if error_message.contains("AA13")
@@ -276,12 +276,10 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                     || error_message.contains("AA33")
                     || error_message.contains("AA40")
                     || error_message.contains("AA41")
+                    || error_message.contains("AA51")
                 {
                     // This error occurs when out of gas, return false.
                     Ok(false)
-                } else if error_message.contains("AA51") {
-		  println!("HC AA51 at {:?}", op.verification_gas_limit);
-		  Ok(false)
 		} else {
                     // This is a different error, return it
                     Err(GasEstimationError::RevertInValidation(error_message))
@@ -361,7 +359,6 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
             verification_gas_limit: self.settings.max_verification_gas.into(),
             ..op.clone()
         };
-        println!("HC ecg 3 {:?}", self.settings.max_verification_gas);
 
         let mut min_gas = U256::zero();
         let mut max_gas = U256::from(self.settings.max_call_gas);
@@ -379,7 +376,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
                     is_continuation,
                 },),
             );
-	    println!("HC pre ecg 4 {:?}...", callless_op.clone());
+	    //println!("HC pre ecg 4 {:?}...", callless_op.clone());
             let target_revert_data = self
                 .entry_point
                 .call_spoofed_simulate_op(
@@ -441,7 +438,7 @@ impl<P: Provider, E: EntryPoint> GasEstimatorImpl<P, E> {
         op: &UserOperationOptionalGas,
         gas_price: U256,
     ) -> Result<U256, GasEstimationError> {
-        println!("HC in estimate_pre_verification_gas gas_price {:?}", gas_price);
+        //println!("HC in estimate_pre_verification_gas gas_price {:?}", gas_price);
         Ok(gas::estimate_pre_verification_gas(
             &op.max_fill(&self.settings),
             &op.random_fill(&self.settings),

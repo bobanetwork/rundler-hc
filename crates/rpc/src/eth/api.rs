@@ -299,7 +299,7 @@ where
 	            let resp_hex = resp["response"].as_str().unwrap();
 	            let sig_hex:String = resp["signature"].as_str().unwrap().into();
 	            let hc_res:Bytes = hex::decode(resp_hex).unwrap().into();
-	            println!("HC api.rs do_op result sk {:?} success {:?} res {:?}", sub_key, op_success, hc_res);
+	            //println!("HC api.rs do_op result sk {:?} success {:?} res {:?}", sub_key, op_success, hc_res);
 
                     err_hc = hybrid_compute::external_op(hh, op.sender, hc_nonce, op_success, &hc_res, sub_key, ep_addr, sig_hex, oo_nonce, map_key, &self.settings.hc, ha_owner.unwrap(), err_nonce).await;
                 } else {
@@ -449,7 +449,7 @@ where
                 )
             })?;
 
-	println!("HC api.rs Before estimate_gas {:?}", op);
+	//println!("HC api.rs Before estimate_gas {:?}", op);
         let mut result = context
             .gas_estimator
             .estimate_op_gas(op.clone(), state_override.clone().unwrap_or_default(), None)

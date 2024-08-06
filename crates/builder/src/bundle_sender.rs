@@ -391,7 +391,7 @@ where
                     self.transaction_tracker.wait_for_update().await?
                 }
             };
-	    println!("HC bundle_sender update {:?}", update);
+	    //println!("HC bundle_sender update {:?}", update);
             match update {
                 TrackerUpdate::Mined {
                     tx_hash,

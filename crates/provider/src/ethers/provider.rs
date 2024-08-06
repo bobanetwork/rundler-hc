@@ -117,7 +117,7 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         tx_hash: TxHash,
         trace_options: GethDebugTracingOptions,
     ) -> ProviderResult<GethTrace> {
-        println!("HC debug_trace_transaction");
+        //println!("HC debug_trace_transaction");
         Ok(Middleware::debug_trace_transaction(self, tx_hash, trace_options).await?)
     }
 

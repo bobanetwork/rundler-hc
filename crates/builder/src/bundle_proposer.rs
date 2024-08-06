@@ -426,11 +426,9 @@ where
             let hc_hash = op.op_hc_hash();
             let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
             if hc_ent.is_some() {
-                println!("HC bundle_properer found hc_ent {:?}", hc_ent);
                 required_gas += hc_ent.clone().unwrap().oc_gas;
+                println!("HC bundle_properer found hc_ent {:?} op_hash {:?} required_gas {:?}", hc_ent, hc_hash, required_gas);
             }
-
-            println!("HC required_gas {:?} for op {:?}", required_gas, op);
 
             if required_gas > self.settings.max_bundle_gas.into() {
                 continue;
@@ -476,7 +474,7 @@ where
 
             if hc_ent.is_some() {
                 gas_spent += hc_ent.clone().unwrap().oc_gas;
-                println!("HC insert, hc_ent {:?}", hc_ent);
+                //println!("HC insert, hc_ent {:?}", hc_ent);
                 let op2 = hc_ent.clone().unwrap().user_op;
                 let sim2 = SimulationResult::default();
                 context

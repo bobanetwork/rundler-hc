@@ -245,7 +245,7 @@ impl<P: Provider, E: EntryPoint> PrecheckerImpl<P, E> {
         );
         let min_max_fee = min_base_fee + min_priority_fee;
 
-	println!("HC precheck.rs before gas fees {:?}", op.clone());
+	//println!("HC precheck.rs before gas fees {:?}", op.clone());
         // check priority fee first, since once ruled out we can check max fee
         if op.max_priority_fee_per_gas < min_priority_fee {
 	    //println!("HC prcheck.rs BYPASS priority_fee {:?} {:?}", op.clone(), min_priority_fee);
