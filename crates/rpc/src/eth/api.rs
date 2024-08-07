@@ -23,7 +23,7 @@ use ethers::{
     types::{
         spoof, Address, Bytes, Filter, GethDebugBuiltInTracerType, GethDebugTracerType,
         GethDebugTracingOptions, GethTrace, GethTraceFrame, Log, TransactionReceipt, H256, U256,
-        U64,
+        U64,BigEndianHash,
     },
     utils::{to_checksum, hex},
 };
@@ -198,7 +198,7 @@ where
 
 	// Set a 1-byte value which will trigger a special revert code
 	let val_vrfy = "0xff00000000000000000000000000000000000000000000000000000000000002".parse::<Bytes>().unwrap();
-	s2.account(hc_addr).store(key, H256::from_slice(&val_vrfy));
+	s2.account(hc_addr).store(key, H256::from_slice(&val_vrfy).into_uint());
 
 	let result_v = context
 	  .gas_estimator
