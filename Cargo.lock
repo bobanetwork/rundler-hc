@@ -1472,7 +1472,7 @@ checksum = "1ad13497f6e0a24292fc7b408e30d22fe9dc262da1f40d7b542c3a44e7fc0476"
 dependencies = [
  "ethers-addressbook",
  "ethers-contract",
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "ethers-etherscan",
  "ethers-middleware",
  "ethers-providers",
@@ -1486,7 +1486,7 @@ version = "2.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6e9e8acd0ed348403cc73a670c24daba3226c40b98dc1a41903766b3ab6240a"
 dependencies = [
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "once_cell",
  "serde",
  "serde_json",
@@ -1501,7 +1501,7 @@ dependencies = [
  "const-hex",
  "ethers-contract-abigen",
  "ethers-contract-derive",
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "ethers-providers",
  "futures-util",
  "once_cell",
@@ -1520,7 +1520,7 @@ dependencies = [
  "Inflector",
  "const-hex",
  "dunce",
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "ethers-etherscan",
  "eyre",
  "prettyplease",
@@ -1544,7 +1544,7 @@ dependencies = [
  "Inflector",
  "const-hex",
  "ethers-contract-abigen",
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -1556,6 +1556,12 @@ name = "ethers-core"
 version = "2.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0a17f0708692024db9956b31d7a20163607d2745953f5ae8125ab368ba280ad"
+replace = "ethers-core 2.0.10 (git+https://github.com/bobanetwork/ethers-rs?branch=hc-dev)"
+
+[[package]]
+name = "ethers-core"
+version = "2.0.10"
+source = "git+https://github.com/bobanetwork/ethers-rs?branch=hc-dev#b98226dd56dc56c06b859301f34f2a75b4e820d4"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -1587,7 +1593,7 @@ version = "2.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e53451ea4a8128fbce33966da71132cf9e1040dcfd2a2084fd7733ada7b2045"
 dependencies = [
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "reqwest",
  "semver",
  "serde",
@@ -1605,7 +1611,7 @@ dependencies = [
  "async-trait",
  "auto_impl",
  "ethers-contract",
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "ethers-etherscan",
  "ethers-providers",
  "ethers-signers",
@@ -1635,7 +1641,7 @@ dependencies = [
  "bytes",
  "const-hex",
  "enr",
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-core",
  "futures-timer",
  "futures-util",
@@ -1672,7 +1678,7 @@ dependencies = [
  "const-hex",
  "elliptic-curve",
  "eth-keystore",
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand",
  "rusoto_core",
  "rusoto_kms",
@@ -1692,7 +1698,7 @@ dependencies = [
  "const-hex",
  "dirs",
  "dunce",
- "ethers-core",
+ "ethers-core 2.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "glob",
  "home",
  "md-5 0.10.5",

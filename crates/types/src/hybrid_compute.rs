@@ -438,7 +438,8 @@ pub fn get_hc_op_statediff(op_hash: H256, mut s2: ethers::types::spoof::State) -
     let cfg = HC_CONFIG.lock().unwrap();
 
     // Store an encoded length for the response bytes
-    let val = H256::from_low_u64_be((payload.len() * 2 + 1).try_into().unwrap());
+    //let val = H256::from_low_u64_be((payload.len() * 2 + 1).try_into().unwrap());
+    let val = U256::from(payload.len() * 2 + 1);
     //println!("HC Store1 {:?} {:?}", key, val);
 
     s2.account(cfg.helper_addr).store(key, val);
@@ -446,7 +447,7 @@ pub fn get_hc_op_statediff(op_hash: H256, mut s2: ethers::types::spoof::State) -
 
     let mut i = 0;
     while i < payload.len() {
-	let next_chunk:H256 = H256::from_slice(&payload[i..32+i]);
+	let next_chunk:U256 = H256::from_slice(&payload[i..32+i]).into_uint();
 	//println!("HC Store_next {:?} {:?}", key , next_chunk);
 	s2.account(cfg.helper_addr).store(key, next_chunk);
 	let u_key:U256 = key.into_uint()+1;
