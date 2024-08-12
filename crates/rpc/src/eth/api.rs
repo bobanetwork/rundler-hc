@@ -372,6 +372,7 @@ where
                 .await;
 
             if let Err(GasEstimationError::RevertInValidation(ref r2_err)) = r2a {
+                println!("HC op_tmp_2 gas estimation failed (RevertInValidation)");
                 let msg = "HC04: Offchain validation failed: ".to_string() + &r2_err;
                 return Err(GasEstimationError::RevertInValidation(msg));
             };
@@ -380,6 +381,7 @@ where
             // The current formula used to estimate gas usage in the offchain_rpc service
             // sometimes underestimates the true cost. For now all we can do is error here.
             if r2.call_gas_limit > op_tmp_2.call_gas_limit.unwrap() {
+                println!("HC op_tmp_2 failed, call_gas_limit too low");
                 let msg = "HC04: Offchain call_gas_limit too low".to_string();
                 return Err(GasEstimationError::RevertInValidation(msg));
             }

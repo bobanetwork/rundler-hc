@@ -358,20 +358,20 @@ pub async fn err_op(
 
     let signature = wallet.sign_message(hh).await;
     new_op.signature = signature.as_ref().unwrap().to_vec().into();
-    //println!("HC signed {:?} {:?}", signature, new_op.signature);
+    println!("HC err_op signed {:?} {:?}", signature, new_op.signature);
 
     let ent:HcEntry = HcEntry{ sub_key:sub_key, map_key:map_key, user_op:new_op.clone(), ts:SystemTime::now(), oc_gas:U256::zero(), needed_pvg:U256::zero()};
     HC_MAP.lock().unwrap().insert(op_key, ent);
 }
 
-/// Encapsulate a RemoveResposnes into a UserOperation
+/// Encapsulate a RemoveResponses into a UserOperation
 pub async fn rr_op(
     cfg: &HcCfg,
     oo_nonce: U256,
     keys: Vec<H256>,
 ) -> UserOperation {
     let call_data = make_rr_calldata(keys);
-    println!("HC external_op call_data {:?}", call_data);
+    println!("HC rr_op call_data {:?}", call_data);
 
     let mut new_op:UserOperation = UserOperation{
         sender: cfg.sys_account,
@@ -395,7 +395,7 @@ pub async fn rr_op(
 
     let signature = wallet.sign_message(hh).await;
     new_op.signature = signature.as_ref().unwrap().to_vec().into();
-    println!("HC signed {:?} {:?}", signature, new_op.signature);
+    println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
 
     new_op
 }
