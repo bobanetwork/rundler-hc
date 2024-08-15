@@ -329,7 +329,7 @@ where
             return Ok(None);
         }
         let Some(&last_tx) = self.transactions.last() else {
-            println!("HC check_for_update_now no update");
+            //println!("HC check_for_update_now no update");
             // If there are no pending transactions, there's no update either.
             return Ok(None);
         };
