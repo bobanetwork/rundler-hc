@@ -299,30 +299,48 @@ where
         })
         .ok()?;
 	let hc_hash = op.uo.op_hc_hash();
+        let mut is_hc:bool = false;
+
 	if let Some(hc_pvg) = hybrid_compute::hc_get_pvg(hc_hash) {
 	    println!("HC pvg override for op_hash {:?} {:?} {:?}", hc_hash, required_pvg, hc_pvg);
-	    if hc_pvg > required_pvg {
+	    is_hc = true;
+            if hc_pvg > required_pvg {
 	        required_pvg = hc_pvg;
             }
 	} else {
-	    println!("HC no pvg override for op_hash {:?}", hc_hash);
+	    println!("HC no pvg override for op_hash {:?}, required_pvg {:?}", hc_hash, required_pvg);
 	}
 
         if op.uo.pre_verification_gas < required_pvg {
-            self.emit(BuilderEvent::skipped_op(
-                self.builder_index,
-                self.op_hash(&op.uo),
-                SkipReason::InsufficientPreVerificationGas {
-                    base_fee,
-                    op_fees: GasFees {
-                        max_fee_per_gas: op.uo.max_fee_per_gas,
-                        max_priority_fee_per_gas: op.uo.max_priority_fee_per_gas,
+            if is_hc {
+                // Workaround - reject op here instead of waiting indefinitely.
+                println!("HC WARN rejecting op_hash {:?}, pre_verifification_gas {:?} < {:?}", hc_hash, op.uo.pre_verification_gas, required_pvg);
+
+                self.emit(BuilderEvent::rejected_op(
+                    self.builder_index,
+                    hc_hash,
+                    OpRejectionReason::FailedInBundle {
+                        message: Arc::new("HC insufficient pre_verification_gas".to_owned()),
                     },
-                    required_pvg,
-                    actual_pvg: op.uo.pre_verification_gas,
-                },
-            ));
-            return None;
+                ));
+                let err_result = (op, Err(SimulationError{ violation_error: ViolationError::Violations(Vec::new()), entity_infos: None } ));
+                return Some(err_result);
+            } else {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_index,
+                    self.op_hash(&op.uo),
+                    SkipReason::InsufficientPreVerificationGas {
+                        base_fee,
+                        op_fees: GasFees {
+                            max_fee_per_gas: op.uo.max_fee_per_gas,
+                            max_priority_fee_per_gas: op.uo.max_priority_fee_per_gas,
+                        },
+                        required_pvg,
+                        actual_pvg: op.uo.pre_verification_gas,
+                    },
+                ));
+                return None;
+            }
         }
 
         // Simulate
