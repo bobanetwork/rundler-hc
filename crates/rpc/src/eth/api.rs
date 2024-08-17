@@ -110,6 +110,9 @@ where
 // hope for the best. Unused gas will be refunded.
 const VG_PAD:i32 = 20000;
 
+// FIXME - Workaround for another occasional failure.
+const PVG_PAD:i32 = 5000;
+
 #[derive(Debug)]
 pub(crate) struct EthApi<P, E, PS> where E: EntryPoint {
     contexts_by_entry_point: HashMap<Address, EntryPointContext<P, E>>,
@@ -429,7 +432,7 @@ where
             }
 
 	    return Ok(GasEstimate {
-	        pre_verification_gas: needed_pvg,
+	        pre_verification_gas: (needed_pvg + PVG_PAD),
 	        verification_gas_limit: r3.verification_gas_limit,
 	        call_gas_limit: r3.call_gas_limit,
 	    });
