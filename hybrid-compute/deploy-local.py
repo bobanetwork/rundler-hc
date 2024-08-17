@@ -13,33 +13,28 @@ import subprocess
 from eth_abi import abi as ethabi
 import socket
 
-boba_addr = Web3.to_checksum_address(
-    "0x4200000000000000000000000000000000000023")
+env_vars = dict()
 
-# The following addrs and keys are for local demo purposes. Do not deploy to public networks
+# local.env contains fixed configuration for the local devnet. Additional env variables are
+# generated dynamically when contracts are deployed. Do not use any of the local addr/privkey
+# accounts on public networks.
+print("Reading local.env")
+with open("local.env","r") as f:
+  for line in f.readlines():
+    k,v = line.strip().split('=')
+    env_vars[k] = v
+
 
 # Taken from .devnet/addresses.json
 boba_l1_addr = "0x84eA74d481Ee0A5332c457a4d796187F6Ba67fEB" # Boba L1
 bridge_addr = "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9" # L1 Standard Bridge
 
-deploy_addr = Web3.to_checksum_address(
-    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
-deploy_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+# Should get from devnet config
+boba_token = Web3.to_checksum_address(
+    "0x4200000000000000000000000000000000000023")
 
-bundler_addr = Web3.to_checksum_address(
-    "0xB834a876b7234eb5A45C0D5e693566e8842400bB")
-builder_privkey = "0xf91be07ef5a01328015cae4f2e5aefe3c4577a90abb8e2e913fe071b0e3732ed"
-
-client_owner = Web3.to_checksum_address("0x77Fe14A710E33De68855b0eA93Ed8128025328a9")
-client_privkey = "0x541b3e3b20b8bb0e5bae310b2d4db4c8b7912ba09750e6ff161b7e67a26a9bf7"
-
-ha0_owner = Web3.to_checksum_address("0x2A9099A58E0830A4Ab418c2a19710022466F1ce7")
-ha0_privkey = "0x75cd983f0f4714969b152baa258d849473732905e2301467303dacf5a09fdd57"
-
-# HC1 is used by the offchain JSON-RPC endpoint
-ha1_owner = Web3.to_checksum_address(
-    "0xE073fC0ff8122389F6e693DD94CcDc5AF637448e")
-ha1_privkey = "0x7c0c629efc797f8c5f658919b7efbae01275470d59d03fdeb0fca1e6bd11d7fa"
+deploy_addr = env_vars['DEPLOY_ADDR']
+deploy_key = env_vars['DEPLOY_PRIVKEY']
 
 # Get the local IP (not localhost) of this machine
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -51,12 +46,10 @@ l1 = Web3(Web3.HTTPProvider("http://127.0.0.1:8545"))
 assert (l1.is_connected)
 l1.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-l2 = Web3(Web3.HTTPProvider("http://127.0.0.1:9545"))
-assert (l2.is_connected)
-l2.middleware_onion.inject(geth_poa_middleware, layer=0)
+w3 = Web3(Web3.HTTPProvider(env_vars['NODE_HTTP']))
+assert (w3.is_connected)
 
-w3 = l2
-HC_CHAIN = 901
+HC_CHAIN = int(env_vars['CHAIN_ID'])
 
 solcx.install_solc("0.8.17")
 solcx.set_solc_version("0.8.17")
@@ -93,12 +86,12 @@ def permitCaller(acct, caller):
     if not acct.functions.PermittedCallers(caller).call():
         print("Permit caller {} on {}".format(caller, acct.address))
         tx = acct.functions.PermitCaller(caller, True).build_transaction({
-            'nonce': w3.eth.get_transaction_count(ha1_owner),
-            'from': ha1_owner,
+            'nonce': w3.eth.get_transaction_count(env_vars['OC_OWNER']),
+            'from': env_vars['OC_OWNER'],
             'gas': 210000,
             'chainId': HC_CHAIN,
         })
-        signAndSubmit(w3, tx, ha1_privkey)
+        signAndSubmit(w3, tx, env_vars['OC_PRIVKEY'])
 
 def buy_insurance(contract):
     trigger_rainfall = 50
@@ -109,13 +102,13 @@ def buy_insurance(contract):
         trigger_rainfall,
         city
     ).build_transaction({
-        'from': ha1_owner,
+        'from': env_vars['OC_OWNER'],
         'value': premium,
         'gas': 210000,
         'gasPrice': w3.to_wei('50', 'gwei'),
-        'nonce': w3.eth.get_transaction_count(ha1_owner),
+        'nonce': w3.eth.get_transaction_count(env_vars['OC_OWNER']),
     })
-    receipt = signAndSubmit(w3, transaction, ha1_privkey)
+    receipt = signAndSubmit(w3, transaction, env_vars['OC_PRIVKEY'])
 
     policy_created_event = RAINFALL_INSURANCE.events.PolicyCreated().process_receipt(receipt)
     policy_id = policy_created_event[0]['args']['policyId']
@@ -210,7 +203,7 @@ def deployBase():
   args.append("hc_scripts/LocalDeploy.s.sol")
   cmd_env = os.environ.copy()
   cmd_env['PRIVATE_KEY'] = deploy_key
-  cmd_env['HC_SYS_OWNER'] = ha0_owner
+  cmd_env['HC_SYS_OWNER'] = env_vars['HC_SYS_OWNER']
   cmd_env['DEPLOY_ADDR'] = deploy_addr
   cmd_env['DEPLOY_SALT'] = "0"  # Update to force redeployment
 
@@ -274,7 +267,7 @@ def approveToken(rpc, token, spender):
 
 def bobaBalance(addr):
   balCD = selector("balanceOf(address)") + ethabi.encode(['address'], [addr]);
-  bal = w3.eth.call({'to':boba_addr, 'data':balCD})
+  bal = w3.eth.call({'to':boba_token, 'data':balCD})
   return bal
 
 HH = loadContract(w3, "HCHelper",      path_prefix+"core/HCHelper.sol")
@@ -311,7 +304,7 @@ if w3.eth.get_balance(deploy_addr) == 0:
   signAndSubmit(l1, tx, deploy_key)
 
   print("Sleep...")
-  while l2.eth.get_balance(deploy_addr) == 0:
+  while w3.eth.get_balance(deploy_addr) == 0:
     time.sleep(2)
   print("Continuing")
 
@@ -321,7 +314,7 @@ if bobaBalance(deploy_addr) == 0 or True:
 
   depositCD = selector("depositERC20(address,address,uint256,uint32,bytes)") + ethabi.encode(
     ['address','address','uint256','uint32','bytes'],
-    [boba_l1_addr, boba_addr, Web3.to_wei(100,'ether'), 4000000, Web3.to_bytes(hexstr="0x")])
+    [boba_l1_addr, boba_token, Web3.to_wei(100,'ether'), 4000000, Web3.to_bytes(hexstr="0x")])
   tx = {
       'nonce': l1.eth.get_transaction_count(deploy_addr),
       'from': deploy_addr,
@@ -341,14 +334,14 @@ if bobaBalance(deploy_addr) == 0 or True:
 
 deployed = dict()
 
-fundAddr(bundler_addr)
+fundAddr(env_vars['BUNDLER_ADDR'])
 #fundAddr(client_owner)
 (ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr) = deployBase()
 
 EP = getContract('EntryPoint',ep_addr)
 HH = getContract('HCHelper',hh_addr)
 
-approveToken(w3, boba_addr, HH.address)
+approveToken(w3, boba_token, HH.address)
 
 tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
     'nonce': w3.eth.get_transaction_count(deploy_addr),
@@ -359,12 +352,12 @@ tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
 signAndSubmit(w3, tx, deploy_key)
 
 # FIXME - fix permitCaller() so that these don't need to be funded, only to sign.
-fundAddr(ha1_owner)
+fundAddr(env_vars['OC_OWNER'])
 
-client_addr = deployAccount(saf_addr, client_owner)
+client_addr = deployAccount(saf_addr, env_vars['CLIENT_OWNER'])
 fundAddr(client_addr)
 
-ha1_addr = deployAccount(haf_addr, ha1_owner)
+ha1_addr = deployAccount(haf_addr, env_vars['OC_OWNER'])
 fundAddrEP(EP, ha1_addr)
 HA = getContract('HybridAccount',ha1_addr)
 SA = getContract('SimpleAccount', client_addr)
@@ -387,38 +380,23 @@ registerUrl(ha1_addr, local_url)
 with open("./contracts.json", "w") as f:
   f.write(json.dumps(deployed))
 
+print("\Writing .env file")
 if os.path.exists(".env"):
-  print("\nUpdating .env file")
-  env_vars = dict()
-  os.rename(".env", ".env.old")
-  with open(".env.old","r") as f:
-    for line in f.readlines():
-      k,v = line.strip().split('=')
-      env_vars[k] = v
-
-  # Pre-generated accounts for local devnet.
-  env_vars['BUNDLER_ADDR'] = bundler_addr
-  env_vars['BUILDER_PRIVKEY'] = builder_privkey
-  env_vars['HC_SYS_OWNER'] = ha0_owner
-  env_vars['HC_SYS_PRIVKEY'] = ha0_privkey
-  env_vars['OC_OWNER'] = ha1_owner
-  env_vars['OC_PRIVKEY'] = ha1_privkey
-  env_vars['CLIENT_OWNER'] = client_owner
-  env_vars['CLIENT_PRIVKEY'] = client_privkey
-  
-  # Deployed addresses
-  env_vars['ENTRY_POINTS'] = EP.address
-  env_vars['HC_HELPER_ADDR'] = HH.address
-  env_vars['HC_SYS_ACCOUNT'] = ha0_addr
-  env_vars['OC_HYBRID_ACCOUNT'] = ha1_addr
-  env_vars['CLIENT_ADDR'] = client_addr
-  env_vars['SA_FACTORY_ADDR'] = saf_addr
-  env_vars['HA_FACTORY_ADDR'] = haf_addr
-
-  # Example contracts
-  env_vars['POLICY_ID'] = policy_id
-
-  with open(".env","w") as f:
-    for k in env_vars:
-      f.write("{}={}\n".format(k,env_vars[k]))
   # .env.old is left as a backup
+  os.rename(".env", ".env.old")
+
+# Deployed addresses
+env_vars['ENTRY_POINTS'] = EP.address
+env_vars['HC_HELPER_ADDR'] = HH.address
+env_vars['HC_SYS_ACCOUNT'] = ha0_addr
+env_vars['OC_HYBRID_ACCOUNT'] = ha1_addr
+env_vars['CLIENT_ADDR'] = client_addr
+env_vars['SA_FACTORY_ADDR'] = saf_addr
+env_vars['HA_FACTORY_ADDR'] = haf_addr
+
+# Example contracts
+env_vars['POLICY_ID'] = policy_id
+
+with open(".env","w") as f:
+  for k in env_vars:
+    f.write("{}={}\n".format(k,env_vars[k]))
