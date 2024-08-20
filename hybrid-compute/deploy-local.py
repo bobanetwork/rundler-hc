@@ -4,7 +4,6 @@ from web3 import Web3, exceptions
 import requests
 import json
 from web3.middleware import geth_poa_middleware
-
 from solcx import compile_source
 import solcx
 import time
@@ -12,8 +11,32 @@ import re
 import subprocess
 from eth_abi import abi as ethabi
 import socket
+import argparse
 
 env_vars = dict()
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--boba-path", required=True, help="Path to your local Boba/Optimism repository")
+parser.add_argument("--deploy-salt", required=False, help="Salt value for contract deployment", default="0")
+
+cli_args = parser.parse_args()
+
+op_path = "/home/enya/v3-boba/optimism"
+with open(cli_args.boba_path + "/.devnet/addresses.json","r") as f:
+  jj = json.load(f)
+  boba_l1_addr = Web3.to_checksum_address(jj['BOBA'])
+  bridge_addr  = Web3.to_checksum_address(jj['L1StandardBridgeProxy'])
+  portal_addr  = Web3.to_checksum_address(jj['OptimismPortalProxy'])
+
+with open(cli_args.boba_path + "/op-service/predeploys/addresses.go","r") as f:
+  for line in f.readlines():
+    if re.search("BobaL2 = ", line):
+      boba_token = Web3.to_checksum_address(line.split('"')[1])
+
+print("Loaded devnet config:")
+print("  BOBA L1", boba_l1_addr)
+print("  Bridge", bridge_addr)
+print("  BOBA L2", boba_token)
 
 # local.env contains fixed configuration for the local devnet. Additional env variables are
 # generated dynamically when contracts are deployed. Do not use any of the local addr/privkey
@@ -23,15 +46,6 @@ with open("local.env","r") as f:
   for line in f.readlines():
     k,v = line.strip().split('=')
     env_vars[k] = v
-
-
-# Taken from .devnet/addresses.json
-boba_l1_addr = "0x84eA74d481Ee0A5332c457a4d796187F6Ba67fEB" # Boba L1
-bridge_addr = "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9" # L1 Standard Bridge
-
-# Should get from devnet config
-boba_token = Web3.to_checksum_address(
-    "0x4200000000000000000000000000000000000023")
 
 deploy_addr = env_vars['DEPLOY_ADDR']
 deploy_key = env_vars['DEPLOY_PRIVKEY']
@@ -205,7 +219,7 @@ def deployBase():
   cmd_env['PRIVATE_KEY'] = deploy_key
   cmd_env['HC_SYS_OWNER'] = env_vars['HC_SYS_OWNER']
   cmd_env['DEPLOY_ADDR'] = deploy_addr
-  cmd_env['DEPLOY_SALT'] = "0"  # Update to force redeployment
+  cmd_env['DEPLOY_SALT'] = cli_args.deploy_salt  # Update to force redeployment
 
   out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env, capture_output=True)
 
@@ -294,7 +308,7 @@ if w3.eth.get_balance(deploy_addr) == 0:
       'nonce': l1.eth.get_transaction_count(deploy_addr),
       'from': deploy_addr,
       # Portal
-      'to': Web3.to_checksum_address("0x0165878a594ca255338adfa4d48449f69242eb8f"),
+      'to': Web3.to_checksum_address(portal_addr),
       'gas': 210000,
       'gasPrice': l1.eth.gas_price,
       'chainId': 900,
@@ -380,7 +394,7 @@ registerUrl(ha1_addr, local_url)
 with open("./contracts.json", "w") as f:
   f.write(json.dumps(deployed))
 
-print("\Writing .env file")
+print("Writing .env file")
 if os.path.exists(".env"):
   # .env.old is left as a backup
   os.rename(".env", ".env.old")
@@ -396,6 +410,10 @@ env_vars['HA_FACTORY_ADDR'] = haf_addr
 
 # Example contracts
 env_vars['POLICY_ID'] = policy_id
+env_vars['TEST_COUNTER'] = TC.address
+env_vars['TEST_AUCTION'] = TEST_AUCTION.address
+env_vars['TEST_RAINFALL_INSURANCE'] = RAINFALL_INSURANCE.address
+env_vars['TEST_SPORTS_BETTING'] = TEST_SPORTS_BETTING.address
 
 with open(".env","w") as f:
   for k in env_vars:
