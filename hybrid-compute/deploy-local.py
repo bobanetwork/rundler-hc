@@ -94,6 +94,8 @@ def signAndSubmit(w, tx, key):
   signed_txn = w.eth.account.sign_transaction(tx, key)
   ret = w.eth.send_raw_transaction(signed_txn.rawTransaction)
   rcpt = w.eth.wait_for_transaction_receipt(ret)
+  if (rcpt.status != 1):
+    print("Transaction failed, txhash =", Web3.to_hex(ret))
   assert (rcpt.status == 1)
   return rcpt
 def permitCaller(acct, caller):
@@ -220,6 +222,7 @@ def deployBase():
   cmd_env['HC_SYS_OWNER'] = env_vars['HC_SYS_OWNER']
   cmd_env['DEPLOY_ADDR'] = deploy_addr
   cmd_env['DEPLOY_SALT'] = cli_args.deploy_salt  # Update to force redeployment
+  cmd_env['BOBA_TOKEN'] = boba_token
 
   out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env, capture_output=True)
 
