@@ -200,9 +200,7 @@ def buy_insurance(contract):
     return Web3.to_int(hexstr=policy_id)
 
 def registerUrl(caller, url):
-    print("Credit balance=", HH.functions.RegisteredCallers(caller).call()[2])
-    # Temporary hack
-    if HH.functions.RegisteredCallers(caller).call()[1] != url or HH.functions.RegisteredCallers(caller).call()[2] == 0:
+    if HH.functions.RegisteredCallers(caller).call()[1] != url:
         print("Calling RegisterUrl()")
         tx = HH.functions.RegisterUrl(caller, url).build_transaction({
             'nonce': w3.eth.get_transaction_count(deploy_addr),
@@ -210,8 +208,10 @@ def registerUrl(caller, url):
             'gas': 210000,
             'chainId': HC_CHAIN,
         })
-
         signAndSubmit(w3, tx, deploy_key)
+
+    print("Credit balance =", HH.functions.RegisteredCallers(caller).call()[2])
+    if HH.functions.RegisteredCallers(caller).call()[2] == 0:
         print("Calling AddCredit()")
         tx = HH.functions.AddCredit(caller, 100).build_transaction({
             'nonce': w3.eth.get_transaction_count(deploy_addr),
@@ -302,7 +302,7 @@ def deployBase():
   addrs_raw = ret_json['returns']['0']['value']
   # Need to parse the 'internal_type': 'address[5]' value
   addrs = addrs_raw[1:-1].replace(' ','')
-  print("Deployed base contracts", addrs)
+  print("Deployed base contracts:", addrs)
   return addrs.split(',')
 
 
@@ -320,7 +320,7 @@ def deployExamples(ha1_addr):
   ret_json = json.loads(jstr)
   addrs_raw = ret_json['returns']['0']['value']
   addrs = addrs_raw[1:-1].replace(' ','')
-  print("Deployed example contracts")
+  print("Deployed example contracts:", addrs)
   return addrs.split(',')
 
 deployed = dict()
@@ -346,7 +346,7 @@ def approveToken(rpc, token, spender):
       'gasPrice': rpc.eth.gas_price,
       'chainId': rpc.eth.chain_id,
   }
-  print("Boba ERC20 approval")
+  print("ERC20 approval of", token, "for", spender)
   signAndSubmit(rpc, tx, deploy_key)
 
 def bobaBalance(addr):
@@ -371,7 +371,7 @@ SPORT_BET = loadContract(w3, "TestSportsBetting", path_prefix+"test/TestSportsBe
 
 assert (l1.eth.get_balance(deploy_addr) > Web3.to_wei(1000, 'ether'))
 
-print('balance', w3.eth.get_balance(deploy_addr))
+print("Deployer balance:", w3.eth.get_balance(deploy_addr))
 
 if w3.eth.get_balance(deploy_addr) == 0:
   tx = {
