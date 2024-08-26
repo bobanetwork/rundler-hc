@@ -105,6 +105,65 @@ def aa_nonce(addr):
   ret = w3.eth.call({'to':EP.address,'data':calldata})
   return Web3.to_hex(ret)
 
+# Wrapper to build and submit a UserOperation directly to the EntryPoint. We don't
+# have a Bundler to run gas estimation so the values are hard-coded. It might be
+# necessary to change these values e.g. if simulating different L1 prices on the local devnet
+
+def submitAsOp(addr, calldata, signer_key):
+  op = {
+      'sender':addr,
+      'nonce': aa_nonce(addr),
+      'initCode':"0x",
+      'callData': Web3.to_hex(calldata),
+      'callGasLimit': "0x40000",
+      'verificationGasLimit': "0x10000",
+      'preVerificationGas': "0x10000",
+      'maxFeePerGas': Web3.to_hex(0),
+      'maxPriorityFeePerGas': Web3.to_hex(0),
+      'paymasterAndData':"0x",
+      'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
+  }
+
+  pack1 = ethabi.encode(['address','uint256','bytes32','bytes32','uint256','uint256','uint256','uint256','uint256','bytes32'], \
+    [op['sender'],
+    Web3.to_int(hexstr=op['nonce']),
+    Web3.keccak(hexstr=op['initCode']),
+    Web3.keccak(hexstr=op['callData']),
+    Web3.to_int(hexstr=op['callGasLimit']),
+    Web3.to_int(hexstr=op['verificationGasLimit']),
+    Web3.to_int(hexstr=op['preVerificationGas']),
+    Web3.to_int(hexstr=op['maxFeePerGas']),
+    Web3.to_int(hexstr=op['maxPriorityFeePerGas']),
+    Web3.keccak(hexstr=op['paymasterAndData']),
+    ])
+
+  pack2 = ethabi.encode(['bytes32','address','uint256'], [Web3.keccak(pack1), EP.address, w3.eth.chain_id])
+  eMsg = eth_account.messages.encode_defunct(Web3.keccak(pack2))
+  sig = w3.eth.account.sign_message(eMsg, private_key=signer_key)
+  op['signature'] = Web3.to_hex(sig.signature)
+
+  # Because the bundler is not running yet we must call the EntryPoint directly.
+  ho = EP.functions.handleOps([(
+    op['sender'],
+    Web3.to_int(hexstr=op['nonce']),
+    op['initCode'],
+    op['callData'],
+    Web3.to_int(hexstr=op['callGasLimit']),
+    Web3.to_int(hexstr=op['verificationGasLimit']),
+    Web3.to_int(hexstr=op['preVerificationGas']),
+    Web3.to_int(hexstr=op['maxFeePerGas']),
+    Web3.to_int(hexstr=op['maxPriorityFeePerGas']),
+    op['paymasterAndData'],
+    op['signature'],
+  )], deploy_addr).build_transaction({
+    'from': deploy_addr,
+    'value': 0,
+    'nonce': w3.eth.get_transaction_count(deploy_addr),
+  })
+  ho['gas'] = int(w3.eth.estimate_gas(ho) * 1.2)
+
+  return signAndSubmit(w3, ho, deploy_key)
+
 # Whitelist a contract to call a HybridAccount. Now implemented as
 # a UserOperation rather than requiring the Owner to be an EOA.
 def permitCaller(acct, caller):
@@ -112,88 +171,33 @@ def permitCaller(acct, caller):
         print("Permit caller {} on {}".format(caller, acct.address))
 
         calldata = selector("PermitCaller(address,bool)") + \
-            ethabi.encode(['address','bool'], [caller, True])
+          ethabi.encode(['address','bool'], [caller, True])
 
-        exCall = selector("execute(address,uint256,bytes)") + \
-            ethabi.encode(['address', 'uint256', 'bytes'], [acct.address, 0, Web3.to_bytes(calldata)])
+        submitAsOp(acct.address, calldata, env_vars['OC_PRIVKEY'])
 
-        op = {
-            'sender':acct.address,
-            'nonce': aa_nonce(acct.address),
-            'initCode':"0x",
-            'callData': Web3.to_hex(calldata),
-            'callGasLimit': "0x10000",
-            'verificationGasLimit': "0x10000",
-            'preVerificationGas': "0x10000",
-            'maxFeePerGas': Web3.to_hex(0),
-            'maxPriorityFeePerGas': Web3.to_hex(0),
-            'paymasterAndData':"0x",
-            'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
-        }
-
-        pack1 = ethabi.encode(['address','uint256','bytes32','bytes32','uint256','uint256','uint256','uint256','uint256','bytes32'], \
-          [op['sender'],
-          Web3.to_int(hexstr=op['nonce']),
-          Web3.keccak(hexstr=op['initCode']),
-          Web3.keccak(hexstr=op['callData']),
-          Web3.to_int(hexstr=op['callGasLimit']),
-          Web3.to_int(hexstr=op['verificationGasLimit']),
-          Web3.to_int(hexstr=op['preVerificationGas']),
-          Web3.to_int(hexstr=op['maxFeePerGas']),
-          Web3.to_int(hexstr=op['maxPriorityFeePerGas']),
-          Web3.keccak(hexstr=op['paymasterAndData']),
-          ])
-
-        pack2 = ethabi.encode(['bytes32','address','uint256'], [Web3.keccak(pack1), EP.address, w3.eth.chain_id])
-        eMsg = eth_account.messages.encode_defunct(Web3.keccak(pack2))
-        sig = w3.eth.account.sign_message(eMsg, private_key=env_vars['OC_PRIVKEY'])
-        op['signature'] = Web3.to_hex(sig.signature)
-
-        # Because the bundler is not running yet we must call the EntryPoint directly.
-        ho = EP.functions.handleOps([(
-          op['sender'],
-          Web3.to_int(hexstr=op['nonce']),
-          op['initCode'],
-          op['callData'],
-          Web3.to_int(hexstr=op['callGasLimit']),
-          Web3.to_int(hexstr=op['verificationGasLimit']),
-          Web3.to_int(hexstr=op['preVerificationGas']),
-          Web3.to_int(hexstr=op['maxFeePerGas']),
-          Web3.to_int(hexstr=op['maxPriorityFeePerGas']),
-          op['paymasterAndData'],
-          op['signature'],
-        )], deploy_addr).build_transaction({
-          'from': deploy_addr,
-          'value': 0,
-          'nonce': w3.eth.get_transaction_count(deploy_addr),
-        })
-        ho['gas'] = int(w3.eth.estimate_gas(ho) * 1.2)
-
-        rcpt = signAndSubmit(w3, ho, deploy_key)
-        print(rcpt)
-
+# FIXME - this should be moved out of deploy-local and into the code which
+# runs the associcated test cases.
 def buy_insurance(contract):
     trigger_rainfall = 50
     city = "London"
-    premium = w3.to_wei(0.01, 'ether')
+    premium = w3.to_wei(0.0001, 'ether')
 
-    transaction = contract.functions.buyInsurance(
-        trigger_rainfall,
-        city
-    ).build_transaction({
-        'from': env_vars['OC_OWNER'],
-        'value': premium,
-        'gas': 210000,
-        'gasPrice': w3.to_wei('50', 'gwei'),
-        'nonce': w3.eth.get_transaction_count(env_vars['OC_OWNER']),
-    })
-    receipt = signAndSubmit(w3, transaction, env_vars['OC_PRIVKEY'])
+    calldata = selector("buyInsurance(uint256,string)") + \
+      ethabi.encode(['uint256','string'],[trigger_rainfall, city])
 
-    policy_created_event = RAINFALL_INSURANCE.events.PolicyCreated().process_receipt(receipt)
-    policy_id = policy_created_event[0]['args']['policyId']
-    print("Policy ID: ", policy_id)
+    exCall = selector("execute(address,uint256,bytes)") + \
+      ethabi.encode(['address', 'uint256', 'bytes'], [contract.address, premium, Web3.to_bytes(calldata)])
 
-    return policy_id
+    rcpt = submitAsOp(client_addr, exCall, env_vars['CLIENT_PRIVKEY'])
+    logs = rcpt['logs']
+    policy_id = 0
+    for i in range(len(logs)):
+      if logs[i].address == contract.address:
+        policy_id = Web3.to_hex(logs[i].topics[1])
+
+    # For compatibility, would probably be cleaner to represent the policy id as hex
+    print("buy_insurance policy id = ", policy_id)
+    return Web3.to_int(hexstr=policy_id)
 
 def registerUrl(caller, url):
     print("Credit balance=", HH.functions.RegisteredCallers(caller).call()[2])
@@ -450,7 +454,7 @@ TEST_SPORTS_BETTING = getContract('TestSportsBetting', example_addrs[4])
 for a in example_addrs:
   permitCaller(HA, a)
 
-# policy_id = buy_insurance(RAINFALL_INSURANCE) # Broken, needs to be re-implemented as a UserOperation
+policy_id = buy_insurance(RAINFALL_INSURANCE) # Broken
 local_url = "http://" + str(local_ip) + ":1234/hc"
 registerUrl(ha1_addr, local_url)
 
@@ -472,7 +476,7 @@ env_vars['SA_FACTORY_ADDR'] = saf_addr
 env_vars['HA_FACTORY_ADDR'] = haf_addr
 
 # Example contracts
-# env_vars['POLICY_ID'] = policy_id
+env_vars['POLICY_ID'] = policy_id
 env_vars['TEST_COUNTER'] = TC.address
 env_vars['TEST_AUCTION'] = TEST_AUCTION.address
 env_vars['TEST_RAINFALL_INSURANCE'] = RAINFALL_INSURANCE.address
