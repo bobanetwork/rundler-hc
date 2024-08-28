@@ -175,30 +175,6 @@ def permitCaller(acct, caller):
 
         submitAsOp(acct.address, calldata, env_vars['OC_PRIVKEY'])
 
-# FIXME - this should be moved out of deploy-local and into the code which
-# runs the associcated test cases.
-def buy_insurance(contract):
-    trigger_rainfall = 50
-    city = "London"
-    premium = w3.to_wei(0.0001, 'ether')
-
-    calldata = selector("buyInsurance(uint256,string)") + \
-      ethabi.encode(['uint256','string'],[trigger_rainfall, city])
-
-    exCall = selector("execute(address,uint256,bytes)") + \
-      ethabi.encode(['address', 'uint256', 'bytes'], [contract.address, premium, Web3.to_bytes(calldata)])
-
-    rcpt = submitAsOp(client_addr, exCall, env_vars['CLIENT_PRIVKEY'])
-    logs = rcpt['logs']
-    policy_id = 0
-    for i in range(len(logs)):
-      if logs[i].address == contract.address:
-        policy_id = Web3.to_hex(logs[i].topics[1])
-
-    # For compatibility, would probably be cleaner to represent the policy id as hex
-    print("buy_insurance policy id = ", policy_id)
-    return Web3.to_int(hexstr=policy_id)
-
 def registerUrl(caller, url):
     if HH.functions.RegisteredCallers(caller).call()[1] != url:
         print("Calling RegisterUrl()")
@@ -454,7 +430,6 @@ TEST_SPORTS_BETTING = getContract('TestSportsBetting', example_addrs[4])
 for a in example_addrs:
   permitCaller(HA, a)
 
-policy_id = buy_insurance(RAINFALL_INSURANCE) # Broken
 local_url = "http://" + str(local_ip) + ":1234/hc"
 registerUrl(ha1_addr, local_url)
 
@@ -476,7 +451,6 @@ env_vars['SA_FACTORY_ADDR'] = saf_addr
 env_vars['HA_FACTORY_ADDR'] = haf_addr
 
 # Example contracts
-env_vars['POLICY_ID'] = policy_id
 env_vars['TEST_COUNTER'] = TC.address
 env_vars['TEST_AUCTION'] = TEST_AUCTION.address
 env_vars['TEST_RAINFALL_INSURANCE'] = RAINFALL_INSURANCE.address
