@@ -39,14 +39,14 @@ TestWordGuess(2, True)
 
 TestAuction()
 
-TestSportsBetting()
+policy_id = test_rainfall_insurance_purchase()
+test_rainfall_insurance_payout(policy_id)
 
-#policy_id = test_rainfall_insurance_purchase()
-#test_rainfall_insurance_payout(policy_id)
+TestSportsBetting()
 
 #TestCaptcha("0x123")
 
-#TestTokenPrice("ETH")
+# TestTokenPrice("ETH") # Not currently deployed
 
 #TestKyc(True)  # Success
 #TestKyc(False)  # Fail

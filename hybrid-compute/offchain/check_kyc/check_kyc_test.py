@@ -20,13 +20,11 @@ def TestKyc(isValid: bool):
     kycCall = None
 
     if isValid:
-        kycCall = Web3.to_bytes(
-            hexstr="0x"+selector("openForKyced(string)")) + ethabi.encode(['string'], ["0x123"])
+        kycCall = selector("openForKyced(string)") + ethabi.encode(['string'], ["0x123"])
     else:
-        kycCall = Web3.to_bytes(
-            hexstr="0x"+selector("openForKyced(string)")) + ethabi.encode(['string'], [""])
+        kycCall = selector("openForKyced(string)") + ethabi.encode(['string'], [""])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + ethabi.encode(
+    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
         ['address', 'uint256', 'bytes'], [KYC.address, 0, kycCall])
 
     p = buildOp(SA, nKey, exCall)

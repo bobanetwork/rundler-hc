@@ -14,10 +14,9 @@ from userop_utils import *
 def TestAuction():
     print("\n  - - - - TestAuction() - - - -")
 
-    start_auction_call = Web3.to_bytes(
-        hexstr="0x"+selector("createAuction(uint256,address)")) + ethabi.encode(['uint256', 'address'], [300, SA.address])
+    start_auction_call = selector("createAuction(uint256,address)") + ethabi.encode(['uint256', 'address'], [300, SA.address])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + ethabi.encode(
+    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
         ['address', 'uint256', 'bytes'], [TEST_AUCTION.address, 0, start_auction_call])
 
     p = buildOp(SA, nKey, exCall)
@@ -45,10 +44,9 @@ def TestAuction():
 
 def bid():
     print("\n  - - - - bid() - - - -")
-    bid_call = Web3.to_bytes(
-        hexstr="0x"+selector("bid(uint256)")) + ethabi.encode(['uint256'], [7])
+    bid_call = selector("bid(uint256)") + ethabi.encode(['uint256'], [7])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + ethabi.encode(
+    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
         ['address', 'uint256', 'bytes'], [TEST_AUCTION.address, 6, bid_call])
 
     p = buildOp(SA, nKey, exCall)

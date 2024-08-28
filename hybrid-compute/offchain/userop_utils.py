@@ -15,6 +15,10 @@ from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv())
 
+import sys
+sys.path.append(".") # Workaround until aa_utils etc. can be packaged properly
+from aa_utils import *
+
 EP_ADDR = os.environ['ENTRY_POINTS']
 assert (len(EP_ADDR) == 42)
 ep_addr = Web3.to_checksum_address(EP_ADDR)
@@ -59,6 +63,8 @@ gasFees['l1Fees'] = 0   # Cumulative L1 fees
 w3 = Web3(Web3.HTTPProvider(node_http, request_kwargs={'timeout': 900}))
 assert (w3.is_connected)
 
+l2_util = eth_utils(w3)
+
 with open("./contracts.json", "r") as f:
     deployed = json.loads(f.read())
 
@@ -69,8 +75,6 @@ HH = w3.eth.contract(
 # This address is unique for each user, who deploys their own wallet account
 SA = w3.eth.contract(
     address=u_account, abi=deployed['SimpleAccount']['abi'])
-#BA = w3.eth.contract(address=deployed['HybridAccount.0']
-#                     ['address'], abi=deployed['HybridAccount.0']['abi'])
 HA = w3.eth.contract(address=deployed['HybridAccount']
                      ['address'], abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
@@ -98,8 +102,6 @@ def showBalances():
         bundler_addr).call(), w3.eth.get_balance(bundler_addr))
     print("SA ", EP.functions.getDepositInfo(
         SA.address).call(), w3.eth.get_balance(SA.address))
-#    print("BA ", EP.functions.getDepositInfo(
-#        BA.address).call(), w3.eth.get_balance(BA.address))
     print("HA ", EP.functions.getDepositInfo(
         HA.address).call(), w3.eth.get_balance(HA.address))
     print("TC ", EP.functions.getDepositInfo(
@@ -116,20 +118,6 @@ def showBalances():
 
 # -------------------------------------------------------------
 
-
-def selector(name):
-    nameHash = Web3.to_hex(Web3.keccak(text=name))
-    return nameHash[2:10]
-
-
-def signAndSubmit(tx, key):
-    signed_txn = w3.eth.account.sign_transaction(tx, key)
-    ret = w3.eth.send_raw_transaction(signed_txn.rawTransaction)
-    rcpt = w3.eth.wait_for_transaction_receipt(ret)
-    assert (rcpt.status == 1)
-    return rcpt
-
-
 def buildAndSubmit(f, addr, key):
     tx = f.build_transaction({
         'nonce': w3.eth.get_transaction_count(addr),
@@ -137,7 +125,7 @@ def buildAndSubmit(f, addr, key):
         'gas': 210000,
         'chainId': HC_CHAIN,
     })
-    return signAndSubmit(tx, key)
+    return l2_util.signAndSubmit(tx, key)
 
 
 def buildOp(A, nKey, payload):

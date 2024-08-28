@@ -24,10 +24,10 @@ def test_rainfall_insurance_purchase():
     city = "London"
     premium = w3.to_wei(0.0001, 'ether')
 
-    calldata =  w3.to_bytes(hexstr="0x"+selector("buyInsurance(uint256,string)")) + \
+    calldata =  selector("buyInsurance(uint256,string)") + \
       ethabi.encode(['uint256','string'],[trigger_rainfall, city])
 
-    exCall = w3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + \
+    exCall = selector("execute(address,uint256,bytes)") + \
       ethabi.encode(['address', 'uint256', 'bytes'], [TEST_RAINFALL_INSURANCE.address, premium, Web3.to_bytes(calldata)])
 
     p = buildOp(SA, nKey, exCall)
@@ -78,10 +78,10 @@ def test_rainfall_insurance_purchase():
 def test_rainfall_insurance_payout(policy_id):
     global estGas
     print("\n  - - - - TestRainfallInsurance({}) - - - -".format(policy_id))
-    payout_call = w3.to_bytes(hexstr="0x"+selector("checkAndPayout(uint256)")) + \
+    payout_call = selector("checkAndPayout(uint256)") + \
         ethabi.encode(['uint256'], [policy_id])
 
-    exCall = w3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + \
+    exCall = selector("execute(address,uint256,bytes)") + \
         ethabi.encode(['address', 'uint256', 'bytes'], [
                       TEST_RAINFALL_INSURANCE.address, 0, payout_call])
     p = buildOp(SA, nKey, exCall)

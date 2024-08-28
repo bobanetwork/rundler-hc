@@ -13,8 +13,10 @@ from eth_abi import abi as ethabi
 import socket
 import argparse
 import eth_account
+from aa_utils import *
 
 env_vars = dict()
+aa = None
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--boba-path", required=True, help="Path to your local Boba/Optimism repository")
@@ -64,7 +66,11 @@ l1.middleware_onion.inject(geth_poa_middleware, layer=0)
 w3 = Web3(Web3.HTTPProvider(env_vars['NODE_HTTP']))
 assert (w3.is_connected)
 
-HC_CHAIN = int(env_vars['CHAIN_ID'])
+l1_util = eth_utils(l1)
+l2_util = eth_utils(w3)
+
+HC_CHAIN = int(env_vars['CHAIN_ID']) # FIXME - Would be better to remove and always autodetect
+assert(HC_CHAIN == w3.eth.chain_id)
 
 solcx.install_solc("0.8.17")
 solcx.set_solc_version("0.8.17")
@@ -91,19 +97,6 @@ def loadContract(w3, name, files):
   contract_info[name]['bin'] = compiled[k]['bin']
   return w3.eth.contract(abi=contract_info[name]['abi'], bytecode=contract_info[name]['bin'])
 
-def signAndSubmit(w, tx, key):
-  signed_txn = w.eth.account.sign_transaction(tx, key)
-  ret = w.eth.send_raw_transaction(signed_txn.rawTransaction)
-  rcpt = w.eth.wait_for_transaction_receipt(ret)
-  if (rcpt.status != 1):
-    print("Transaction failed, txhash =", Web3.to_hex(ret))
-  assert (rcpt.status == 1)
-  return rcpt
-
-def aa_nonce(addr):
-  calldata = selector("getNonce(address,uint192)") + ethabi.encode(['address','uint192'],[addr, 1235])
-  ret = w3.eth.call({'to':EP.address,'data':calldata})
-  return Web3.to_hex(ret)
 
 # Wrapper to build and submit a UserOperation directly to the EntryPoint. We don't
 # have a Bundler to run gas estimation so the values are hard-coded. It might be
@@ -112,7 +105,7 @@ def aa_nonce(addr):
 def submitAsOp(addr, calldata, signer_key):
   op = {
       'sender':addr,
-      'nonce': aa_nonce(addr),
+      'nonce': aa.aa_nonce(addr, 1235),
       'initCode':"0x",
       'callData': Web3.to_hex(calldata),
       'callGasLimit': "0x40000",
@@ -124,23 +117,7 @@ def submitAsOp(addr, calldata, signer_key):
       'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
   }
 
-  pack1 = ethabi.encode(['address','uint256','bytes32','bytes32','uint256','uint256','uint256','uint256','uint256','bytes32'], \
-    [op['sender'],
-    Web3.to_int(hexstr=op['nonce']),
-    Web3.keccak(hexstr=op['initCode']),
-    Web3.keccak(hexstr=op['callData']),
-    Web3.to_int(hexstr=op['callGasLimit']),
-    Web3.to_int(hexstr=op['verificationGasLimit']),
-    Web3.to_int(hexstr=op['preVerificationGas']),
-    Web3.to_int(hexstr=op['maxFeePerGas']),
-    Web3.to_int(hexstr=op['maxPriorityFeePerGas']),
-    Web3.keccak(hexstr=op['paymasterAndData']),
-    ])
-
-  pack2 = ethabi.encode(['bytes32','address','uint256'], [Web3.keccak(pack1), EP.address, w3.eth.chain_id])
-  eMsg = eth_account.messages.encode_defunct(Web3.keccak(pack2))
-  sig = w3.eth.account.sign_message(eMsg, private_key=signer_key)
-  op['signature'] = Web3.to_hex(sig.signature)
+  op = aa.signOp(op, signer_key)
 
   # Because the bundler is not running yet we must call the EntryPoint directly.
   ho = EP.functions.handleOps([(
@@ -162,7 +139,7 @@ def submitAsOp(addr, calldata, signer_key):
   })
   ho['gas'] = int(w3.eth.estimate_gas(ho) * 1.2)
 
-  return signAndSubmit(w3, ho, deploy_key)
+  return l2_util.signAndSubmit(ho, deploy_key)
 
 # Whitelist a contract to call a HybridAccount. Now implemented as
 # a UserOperation rather than requiring the Owner to be an EOA.
@@ -184,7 +161,7 @@ def registerUrl(caller, url):
             'gas': 210000,
             'chainId': HC_CHAIN,
         })
-        signAndSubmit(w3, tx, deploy_key)
+        l2_util.signAndSubmit(tx, deploy_key)
 
     print("Credit balance =", HH.functions.RegisteredCallers(caller).call()[2])
     if HH.functions.RegisteredCallers(caller).call()[2] == 0:
@@ -195,7 +172,7 @@ def registerUrl(caller, url):
             'gas': 210000,
             'chainId': HC_CHAIN,
         })
-        signAndSubmit(w3, tx, deploy_key)
+        l2_util.signAndSubmit(tx, deploy_key)
 
 def fundAddr(addr):
     if w3.eth.get_balance(addr) == 0:
@@ -215,7 +192,7 @@ def fundAddr(addr):
             tx['gasPrice'] = w3.eth.gas_price
         else:
             tx['gasPrice'] = Web3.to_wei(1, 'gwei')
-        signAndSubmit(w3, tx, deploy_key)
+        l2_util.signAndSubmit(tx, deploy_key)
 
 def fundAddrEP(EP, addr):
     if EP.functions.deposits(addr).call()[0] < Web3.to_wei(0.005, 'ether'):
@@ -227,13 +204,9 @@ def fundAddrEP(EP, addr):
             'chainId': HC_CHAIN,
             'value': Web3.to_wei(0.01, "ether")
         })
-        signAndSubmit(w3, tx, deploy_key)
+        l2_util.signAndSubmit(tx, deploy_key)
     print("Balances for", addr, Web3.from_wei(w3.eth.get_balance(addr), 'ether'),
           Web3.from_wei(EP.functions.deposits(addr).call()[0], 'ether'))
-
-def selector(name):
-    nameHash = Web3.to_hex(Web3.keccak(text=name))
-    return Web3.to_bytes(hexstr=nameHash[:10])
 
 def deployAccount(factory, owner):
   calldata = selector("createAccount(address,uint256)") + ethabi.encode(['address','uint256'],[owner,0])
@@ -250,7 +223,8 @@ def deployAccount(factory, owner):
         'gasPrice': w3.eth.gas_price,
         'chainId': HC_CHAIN,
     }
-    rcpt = signAndSubmit(w3, tx, deploy_key)
+    rcpt = l2_util.signAndSubmit(tx, deploy_key)
+    print(rcpt)
     assert(rcpt.status == 1)
 
   return acct_addr
@@ -270,7 +244,7 @@ def deployBase():
   out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env, capture_output=True)
 
   # Subprocess will fail if contracts were previously deployed but those addresses were
-  # not passed in as env variables. Retry on a cleanly deployed devnet or change salt_val in the contract.
+  # not passed in as env variables. Retry on a cleanly deployed devnet or change deploy_salt.
   assert(out.returncode == 0)
 
   jstr = out.stdout.split(b'\n')[0].decode('ascii')
@@ -280,7 +254,6 @@ def deployBase():
   addrs = addrs_raw[1:-1].replace(' ','')
   print("Deployed base contracts:", addrs)
   return addrs.split(',')
-
 
 def deployExamples(ha1_addr):
   args = ["forge", "script", "--json", "--broadcast", "--silent"]
@@ -307,23 +280,6 @@ def getContract(cname, deployed_addr):
   deployed[cname]['abi'] = contract_info[cname]['abi']
   deployed[cname]['address'] = deployed_addr
   return C
-
-def approveToken(rpc, token, spender):
-  approveCD = selector("approve(address,uint256)") + ethabi.encode(
-    ['address','uint256'],
-    [spender, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
-
-  tx = {
-      'nonce': rpc.eth.get_transaction_count(deploy_addr),
-      'from': deploy_addr,
-      'data': approveCD,
-      'to': token,
-      'gas': 210000,
-      'gasPrice': rpc.eth.gas_price,
-      'chainId': rpc.eth.chain_id,
-  }
-  print("ERC20 approval of", token, "for", spender)
-  signAndSubmit(rpc, tx, deploy_key)
 
 def bobaBalance(addr):
   balCD = selector("balanceOf(address)") + ethabi.encode(['address'], [addr]);
@@ -361,7 +317,7 @@ if w3.eth.get_balance(deploy_addr) == 0:
       'value': Web3.to_wei(1000, 'ether')
   }
   print("Funding L2 deploy_addr (ETH)")
-  signAndSubmit(l1, tx, deploy_key)
+  l1_util.signAndSubmit(tx, deploy_key)
 
   print("Sleep...")
   while w3.eth.get_balance(deploy_addr) == 0:
@@ -370,7 +326,7 @@ if w3.eth.get_balance(deploy_addr) == 0:
 
 
 if bobaBalance(deploy_addr) == 0 or True:
-  approveToken(l1, boba_l1_addr, bridge_addr)
+  l1_util.approveToken(boba_l1_addr, bridge_addr, deploy_addr, deploy_key)
 
   depositCD = selector("depositERC20(address,address,uint256,uint32,bytes)") + ethabi.encode(
     ['address','address','uint256','uint32','bytes'],
@@ -385,7 +341,7 @@ if bobaBalance(deploy_addr) == 0 or True:
   tx['gas'] = int(l1.eth.estimate_gas(tx) * 1.5)
   tx['gasPrice'] = l1.eth.gas_price
   print("Funding L2 deploy_addr (BOBA)")
-  signAndSubmit(l1, tx, deploy_key)
+  l1_util.signAndSubmit(tx, deploy_key)
 
   print("Sleep...")
   while bobaBalance(deploy_addr) == 0:
@@ -398,10 +354,12 @@ fundAddr(env_vars['BUNDLER_ADDR'])
 #fundAddr(client_owner)
 (ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr) = deployBase()
 
+aa = aa_rpc(ep_addr, w3, None)
+
 EP = getContract('EntryPoint',ep_addr)
 HH = getContract('HCHelper',hh_addr)
 
-approveToken(w3, boba_token, HH.address)
+l2_util.approveToken(boba_token, HH.address, deploy_addr, deploy_key)
 
 tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
     'nonce': w3.eth.get_transaction_count(deploy_addr),
@@ -409,7 +367,7 @@ tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
     'gas': 210000,
     'chainId': HC_CHAIN,
 })
-signAndSubmit(w3, tx, deploy_key)
+l2_util.signAndSubmit(tx, deploy_key)
 
 client_addr = deployAccount(saf_addr, env_vars['CLIENT_OWNER'])
 fundAddr(client_addr)

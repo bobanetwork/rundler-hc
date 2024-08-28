@@ -3,6 +3,10 @@ from web3 import Web3
 from eth_abi import abi as ethabi
 import eth_account
 
+import sys
+sys.path.append(".") # Workaround until aa_utils etc. can be packaged properly
+from aa_utils import *
+
 HC_CHAIN = int(os.environ['CHAIN_ID'])
 assert (HC_CHAIN != 0)
 
@@ -27,23 +31,15 @@ hc1_addr = Web3.to_checksum_address(HA_OWNER)
 hc1_key = os.environ['OC_PRIVKEY']
 assert (len(hc1_key) == 66)
 
-
-def selector(name):
-    nameHash = Web3.to_hex(Web3.keccak(text=name))
-    return nameHash[2:10]
-
-
 def gen_response(req, err_code, resp_payload):
     resp2 = ethabi.encode(['address', 'uint256', 'uint32', 'bytes'], [
                           req['srcAddr'], req['srcNonce'], err_code, resp_payload])
-    enc1 = ethabi.encode(['bytes32', 'bytes'], [req['skey'], resp2])
-    p_enc1 = "0x" + selector("PutResponse(bytes32,bytes)") + \
-        Web3.to_hex(enc1)[2:]  # dfc98ae8
+    p_enc1 = selector("PutResponse(bytes32,bytes)") + \
+        ethabi.encode(['bytes32', 'bytes'], [req['skey'], resp2])  # dfc98ae8
 
-    enc2 = ethabi.encode(['address', 'uint256', 'bytes'], [
-                         Web3.to_checksum_address(HelperAddr), 0, Web3.to_bytes(hexstr=p_enc1)])
-    p_enc2 = "0x" + selector("execute(address,uint256,bytes)") + \
-        Web3.to_hex(enc2)[2:]  # b61d27f6
+    p_enc2 = selector("execute(address,uint256,bytes)") + \
+        ethabi.encode(['address', 'uint256', 'bytes'], [
+             Web3.to_checksum_address(HelperAddr), 0, p_enc1]) # b61d27f6
 
     limits = {
         'verificationGasLimit': "0x10000",
@@ -51,7 +47,7 @@ def gen_response(req, err_code, resp_payload):
     }
     callGas = 705*len(resp_payload) + 170000
 
-    print("callGas calculation", len(resp_payload), 4+len(enc2), callGas)
+    print("callGas calculation", len(resp_payload), 4+len(p_enc2), callGas)
     p = ethabi.encode([
         'address',
         'uint256',
@@ -67,7 +63,7 @@ def gen_response(req, err_code, resp_payload):
         HybridAcctAddr,
         req['opNonce'],
         Web3.keccak(Web3.to_bytes(hexstr='0x')),  # initCode
-        Web3.keccak(Web3.to_bytes(hexstr=p_enc2)),
+        Web3.keccak(p_enc2),
         callGas,
         Web3.to_int(hexstr=limits['verificationGasLimit']),
         Web3.to_int(hexstr=limits['preVerificationGas']),

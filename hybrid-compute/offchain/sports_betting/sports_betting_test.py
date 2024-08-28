@@ -31,10 +31,9 @@ def TestSportsBetting():
 
 def create_bet(game_id):
     print("--------------------Create Bet--------------------")
-    create_call = Web3.to_bytes(
-        hexstr="0x"+selector("createGame(uint256)")) + ethabi.encode(['uint256'], [game_id])
+    create_call = selector("createGame(uint256)") + ethabi.encode(['uint256'], [game_id])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + ethabi.encode(
+    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
         ['address', 'uint256', 'bytes'], [TEST_SPORTS_BETTING.address, 0, create_call])
 
     p = buildOp(SA, nKey, exCall)
@@ -61,12 +60,11 @@ def create_bet(game_id):
 def place_bet(game_id):
     print("--------------------Place Bet--------------------")
     outcome = 1
-    place_bet = Web3.to_bytes(
-        hexstr="0x"+selector("placeBet(uint256,uint256)")) + ethabi.encode(['uint256', 'uint256'],
+    place_bet = selector("placeBet(uint256,uint256)") + ethabi.encode(['uint256', 'uint256'],
                                                                             [game_id, outcome])
 
     amount_to_bet = 2
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + ethabi.encode(
+    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
         ['address', 'uint256', 'bytes'], [TEST_SPORTS_BETTING.address, amount_to_bet, place_bet])
 
     p = buildOp(SA, nKey, exCall)
@@ -92,10 +90,9 @@ def place_bet(game_id):
 
 def settle_bet(game_id):
     print("--------------------Settle Bet--------------------")
-    settle_bet = Web3.to_bytes(
-        hexstr="0x"+selector("settleBet(uint256)")) + ethabi.encode(['uint256'], [game_id])
+    settle_bet = selector("settleBet(uint256)") + ethabi.encode(['uint256'], [game_id])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + ethabi.encode(
+    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
         ['address', 'uint256', 'bytes'], [TEST_SPORTS_BETTING.address, 0, settle_bet])
 
     p = buildOp(SA, nKey, exCall)

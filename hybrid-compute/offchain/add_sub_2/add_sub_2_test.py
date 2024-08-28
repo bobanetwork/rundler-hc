@@ -16,10 +16,10 @@ def TestAddSub2(a, b):
     print("\n  - - - - TestAddSub2({},{}) - - - -".format(a, b))
     print("TestCount(begin)=", TC.functions.counters(SA.address).call())
 
-    countCall = Web3.to_bytes(hexstr="0x"+selector("count(uint32,uint32)")
-                              ) + ethabi.encode(['uint32', 'uint32'], [a, b])
+    countCall = selector("count(uint32,uint32)") + \
+        ethabi.encode(['uint32', 'uint32'], [a, b])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + \
+    exCall = selector("execute(address,uint256,bytes)") + \
         ethabi.encode(['address', 'uint256', 'bytes'],
                       [TC.address, 0, countCall])
 

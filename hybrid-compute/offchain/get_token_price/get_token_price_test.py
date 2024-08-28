@@ -15,10 +15,10 @@ from userop_utils import *
 def TestTokenPrice(tokenSymbol):
     print("\n  - - - - TestTokenPrice({}) - - - -".format(tokenSymbol))
 
-    gameCall = Web3.to_bytes(hexstr="0x"+selector("fetchPrice(string)")) + \
+    gameCall = selector("fetchPrice(string)") + \
         ethabi.encode(['string'], [tokenSymbol])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + \
+    exCall = selector("execute(address,uint256,bytes)") + \
         ethabi.encode(['address', 'uint256', 'bytes'], [
                       TFP.address, 0, gameCall])
     p = buildOp(SA, nKey, exCall)
