@@ -3,7 +3,6 @@ import time
 from random import *
 import requests
 import json
-from web3.middleware import geth_poa_middleware
 import os
 import re
 
@@ -15,6 +14,10 @@ import eth_account
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv())
+
+EP_ADDR = os.environ['ENTRY_POINTS']
+assert (len(EP_ADDR) == 42)
+ep_addr = Web3.to_checksum_address(EP_ADDR)
 
 BUNDLER_ADDR = os.environ['BUNDLER_ADDR']
 assert (len(BUNDLER_ADDR) == 42)
@@ -41,6 +44,10 @@ U_ACCT = os.environ['CLIENT_ADDR']
 assert (len(U_ACCT) == 42)
 u_account = Web3.to_checksum_address(U_ACCT)
 
+TEST_COUNTER = os.environ['TEST_COUNTER']
+assert (len(TEST_COUNTER) == 42)
+test_counter = Web3.to_checksum_address(TEST_COUNTER)
+
 # -------------------------------------------------------------
 
 gasFees = dict()
@@ -51,13 +58,12 @@ gasFees['l1Fees'] = 0   # Cumulative L1 fees
 
 w3 = Web3(Web3.HTTPProvider(node_http, request_kwargs={'timeout': 900}))
 assert (w3.is_connected)
-w3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
 with open("./contracts.json", "r") as f:
     deployed = json.loads(f.read())
 
 EP = w3.eth.contract(
-    address=deployed['EntryPoint']['address'], abi=deployed['EntryPoint']['abi'])
+    address=ep_addr, abi=deployed['EntryPoint']['abi'])
 HH = w3.eth.contract(
     address=deployed['HCHelper']['address'], abi=deployed['HCHelper']['abi'])
 # This address is unique for each user, who deploys their own wallet account
@@ -68,7 +74,7 @@ SA = w3.eth.contract(
 HA = w3.eth.contract(address=deployed['HybridAccount']
                      ['address'], abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
-    address=deployed['TestCounter']['address'], abi=deployed['TestCounter']['abi'])
+    address=test_counter, abi=deployed['TestCounter']['abi'])
 #KYC = w3.eth.contract(
 #    address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
 #TFP = w3.eth.contract(
@@ -297,3 +303,4 @@ def submitOp(p):
     if timeout:
         print("*** Previous operation timed out")
         exit(1)
+    return opReceipt
