@@ -69,9 +69,6 @@ assert (w3.is_connected)
 l1_util = eth_utils(l1)
 l2_util = eth_utils(w3)
 
-HC_CHAIN = int(env_vars['CHAIN_ID']) # FIXME - Would be better to remove and always autodetect
-assert(HC_CHAIN == w3.eth.chain_id)
-
 solcx.install_solc("0.8.17")
 solcx.set_solc_version("0.8.17")
 contract_info = dict()
@@ -135,7 +132,6 @@ def submitAsOp(addr, calldata, signer_key):
   )], deploy_addr).build_transaction({
     'from': deploy_addr,
     'value': 0,
-    'nonce': w3.eth.get_transaction_count(deploy_addr),
   })
   ho['gas'] = int(w3.eth.estimate_gas(ho) * 1.2)
 
@@ -156,10 +152,7 @@ def registerUrl(caller, url):
     if HH.functions.RegisteredCallers(caller).call()[1] != url:
         print("Calling RegisterUrl()")
         tx = HH.functions.RegisterUrl(caller, url).build_transaction({
-            'nonce': w3.eth.get_transaction_count(deploy_addr),
             'from': deploy_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
         })
         l2_util.signAndSubmit(tx, deploy_key)
 
@@ -167,26 +160,17 @@ def registerUrl(caller, url):
     if HH.functions.RegisteredCallers(caller).call()[2] == 0:
         print("Calling AddCredit()")
         tx = HH.functions.AddCredit(caller, 100).build_transaction({
-            'nonce': w3.eth.get_transaction_count(deploy_addr),
             'from': deploy_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
         })
         l2_util.signAndSubmit(tx, deploy_key)
 
 def fundAddr(addr):
     if w3.eth.get_balance(addr) == 0:
         print("Funding acct (direct)", addr)
-        n = w3.eth.get_transaction_count(deploy_addr)
-        v = Web3.to_wei(1.001, 'ether')
-        # v += Web3.to_wei(n, 'wei')
         tx = {
-            'nonce': n,
             'from': deploy_addr,
             'to': addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
-            'value': v
+            'value': Web3.to_wei(1.001, 'ether')
         }
         if w3.eth.gas_price > 1000000:
             tx['gasPrice'] = w3.eth.gas_price
@@ -198,10 +182,7 @@ def fundAddrEP(EP, addr):
     if EP.functions.deposits(addr).call()[0] < Web3.to_wei(0.005, 'ether'):
         print("Funding acct (depositTo)", addr)
         tx = EP.functions.depositTo(addr).build_transaction({
-            'nonce': w3.eth.get_transaction_count(deploy_addr),
             'from': deploy_addr,
-            'gas': 210000,
-            'chainId': HC_CHAIN,
             'value': Web3.to_wei(0.01, "ether")
         })
         l2_util.signAndSubmit(tx, deploy_key)
@@ -217,16 +198,9 @@ def deployAccount(factory, owner):
     tx = {
         'to': factory,
         'data': calldata,
-        'nonce': w3.eth.get_transaction_count(deploy_addr),
         'from': deploy_addr,
-        'gas': 210000,
-        'gasPrice': w3.eth.gas_price,
-        'chainId': HC_CHAIN,
     }
     rcpt = l2_util.signAndSubmit(tx, deploy_key)
-    print(rcpt)
-    assert(rcpt.status == 1)
-
   return acct_addr
 
 # Deploy the basic contracts needed for the local system
@@ -234,7 +208,9 @@ def deployBase():
   args = ["forge", "script", "--json", "--broadcast", "--silent"]
   args.append ("--rpc-url=http://127.0.0.1:9545")
   args.append("hc_scripts/LocalDeploy.s.sol")
-  cmd_env = os.environ.copy()
+  sys_env = os.environ.copy()
+  cmd_env = dict()
+  cmd_env['PATH'] = sys_env['PATH']
   cmd_env['PRIVATE_KEY'] = deploy_key
   cmd_env['HC_SYS_OWNER'] = env_vars['HC_SYS_OWNER']
   cmd_env['DEPLOY_ADDR'] = deploy_addr
@@ -284,7 +260,7 @@ def getContract(cname, deployed_addr):
 def bobaBalance(addr):
   balCD = selector("balanceOf(address)") + ethabi.encode(['address'], [addr]);
   bal = w3.eth.call({'to':boba_token, 'data':balCD})
-  return bal
+  return Web3.to_int(bal)
 
 HH = loadContract(w3, "HCHelper",      path_prefix+"core/HCHelper.sol")
 KYC = loadContract(w3, "TestKyc",          path_prefix+"test/TestKyc.sol")
@@ -305,16 +281,13 @@ assert (l1.eth.get_balance(deploy_addr) > Web3.to_wei(1000, 'ether'))
 
 print("Deployer balance:", w3.eth.get_balance(deploy_addr))
 
-if w3.eth.get_balance(deploy_addr) == 0:
+FUND_MIN = 50
+
+if w3.eth.get_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
   tx = {
-      'nonce': l1.eth.get_transaction_count(deploy_addr),
       'from': deploy_addr,
-      # Portal
       'to': Web3.to_checksum_address(portal_addr),
-      'gas': 210000,
-      'gasPrice': l1.eth.gas_price,
-      'chainId': 900,
-      'value': Web3.to_wei(1000, 'ether')
+      'value': Web3.to_wei(2 * FUND_MIN, 'ether')
   }
   print("Funding L2 deploy_addr (ETH)")
   l1_util.signAndSubmit(tx, deploy_key)
@@ -325,21 +298,23 @@ if w3.eth.get_balance(deploy_addr) == 0:
   print("Continuing")
 
 
-if bobaBalance(deploy_addr) == 0 or True:
+if bobaBalance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
   l1_util.approveToken(boba_l1_addr, bridge_addr, deploy_addr, deploy_key)
 
   depositCD = selector("depositERC20(address,address,uint256,uint32,bytes)") + ethabi.encode(
-    ['address','address','uint256','uint32','bytes'],
-    [boba_l1_addr, boba_token, Web3.to_wei(100,'ether'), 4000000, Web3.to_bytes(hexstr="0x")])
+    ['address','address','uint256','uint32','bytes'], [
+      boba_l1_addr,
+      boba_token,
+      Web3.to_wei(2 * FUND_MIN,'ether'),
+      4000000,
+      Web3.to_bytes(hexstr="0x")
+    ])
   tx = {
-      'nonce': l1.eth.get_transaction_count(deploy_addr),
       'from': deploy_addr,
       'data': Web3.to_hex(depositCD),
       'to': bridge_addr,
-      'chainId': 900,
   }
   tx['gas'] = int(l1.eth.estimate_gas(tx) * 1.5)
-  tx['gasPrice'] = l1.eth.gas_price
   print("Funding L2 deploy_addr (BOBA)")
   l1_util.signAndSubmit(tx, deploy_key)
 
@@ -351,7 +326,7 @@ if bobaBalance(deploy_addr) == 0 or True:
 deployed = dict()
 
 fundAddr(env_vars['BUNDLER_ADDR'])
-#fundAddr(client_owner)
+
 (ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr) = deployBase()
 
 aa = aa_rpc(ep_addr, w3, None)
@@ -362,10 +337,7 @@ HH = getContract('HCHelper',hh_addr)
 l2_util.approveToken(boba_token, HH.address, deploy_addr, deploy_key)
 
 tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
-    'nonce': w3.eth.get_transaction_count(deploy_addr),
     'from': deploy_addr,
-    'gas': 210000,
-    'chainId': HC_CHAIN,
 })
 l2_util.signAndSubmit(tx, deploy_key)
 

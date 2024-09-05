@@ -118,16 +118,6 @@ def showBalances():
 
 # -------------------------------------------------------------
 
-def buildAndSubmit(f, addr, key):
-    tx = f.build_transaction({
-        'nonce': w3.eth.get_transaction_count(addr),
-        'from': addr,
-        'gas': 210000,
-        'chainId': HC_CHAIN,
-    })
-    return l2_util.signAndSubmit(tx, key)
-
-
 def buildOp(A, nKey, payload):
     sender_nonce = EP.functions.getNonce(A.address, nKey).call()
 
