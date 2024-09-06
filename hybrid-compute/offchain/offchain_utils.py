@@ -1,35 +1,35 @@
 import os
+import sys
 from web3 import Web3
 from eth_abi import abi as ethabi
 import eth_account
 
-import sys
 sys.path.append(".") # Workaround until aa_utils etc. can be packaged properly
 from aa_utils import *
 
 HC_CHAIN = int(os.environ['CHAIN_ID'])
-assert (HC_CHAIN != 0)
+assert HC_CHAIN != 0
 
 # This var is named "ENTRY_POINTS" to match rundler-hc, however the current
 # implementation only supports a single entrypoint.
 EP_ADDR = os.environ['ENTRY_POINTS']
-assert (len(EP_ADDR) == 42)
+assert len(EP_ADDR) == 42
 EntryPointAddr = Web3.to_checksum_address(EP_ADDR)
 
 HH_ADDR = os.environ['HC_HELPER_ADDR']
-assert (len(HH_ADDR) == 42)
+assert len(HH_ADDR) == 42
 HelperAddr = Web3.to_checksum_address(HH_ADDR)
 
 HA_ADDR = os.environ['OC_HYBRID_ACCOUNT']
-assert (len(HA_ADDR) == 42)
+assert len(HA_ADDR) == 42
 HybridAcctAddr = Web3.to_checksum_address(HA_ADDR)
 
 HA_OWNER = os.environ['OC_OWNER']
-assert (len(HA_OWNER) == 42)
+assert len(HA_OWNER) == 42
 hc1_addr = Web3.to_checksum_address(HA_OWNER)
 
 hc1_key = os.environ['OC_PRIVKEY']
-assert (len(hc1_key) == 66)
+assert len(hc1_key) == 66
 
 def gen_response(req, err_code, resp_payload):
     resp2 = ethabi.encode(['address', 'uint256', 'uint32', 'bytes'], [
@@ -45,9 +45,9 @@ def gen_response(req, err_code, resp_payload):
         'verificationGasLimit': "0x10000",
         'preVerificationGas': "0x10000",
     }
-    callGas = 705*len(resp_payload) + 170000
+    call_gas = 705*len(resp_payload) + 170000
 
-    print("callGas calculation", len(resp_payload), 4+len(p_enc2), callGas)
+    print("call_gas calculation", len(resp_payload), 4+len(p_enc2), call_gas)
     p = ethabi.encode([
         'address',
         'uint256',
@@ -64,7 +64,7 @@ def gen_response(req, err_code, resp_payload):
         req['opNonce'],
         Web3.keccak(Web3.to_bytes(hexstr='0x')),  # initCode
         Web3.keccak(p_enc2),
-        callGas,
+        call_gas,
         Web3.to_int(hexstr=limits['verificationGasLimit']),
         Web3.to_int(hexstr=limits['preVerificationGas']),
         0,  # maxFeePerGas
@@ -86,11 +86,8 @@ def gen_response(req, err_code, resp_payload):
         "signature": Web3.to_hex(sig.signature)
     })
 
-    return response
-
-
 def parse_req(sk, src_addr, src_nonce, oo_nonce, payload):
-    req = dict()
+    req = {}
     req['skey'] = Web3.to_bytes(hexstr=sk)
     req['srcAddr'] = Web3.to_checksum_address(src_addr)
     req['srcNonce'] = Web3.to_int(hexstr=src_nonce)

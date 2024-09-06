@@ -8,11 +8,9 @@ class aa_utils:
     def __init__(self, _EP_addr, _chain_id):
         self.EP_addr = _EP_addr
         self.chain_id = _chain_id
-        print("AA INIT", _EP_addr, self.chain_id)
-        pass
 
-    # Signs a UserOperation, returning a modified op containing a 'signature' field.
-    def signOp(self, op, signer_key):
+    def sign_op(self, op, signer_key):
+        """Signs a UserOperation, returning a modified op containing a 'signature' field."""
         pack1 = ethabi.encode(['address','uint256','bytes32','bytes32','uint256','uint256','uint256','uint256','uint256','bytes32'], \
               [op['sender'],
               Web3.to_int(hexstr=op['nonce']),
@@ -26,33 +24,34 @@ class aa_utils:
               Web3.keccak(hexstr=op['paymasterAndData']),
               ])
         pack2 = ethabi.encode(['bytes32','address','uint256'], [Web3.keccak(pack1), self.EP_addr, self.chain_id])
-        eMsg = eth_account.messages.encode_defunct(Web3.keccak(pack2))
-        signAcct = eth_account.account.Account.from_key(signer_key)
-        sig = signAcct.sign_message(eMsg)
+        e_msg = eth_account.messages.encode_defunct(Web3.keccak(pack2))
+        signer_acct = eth_account.account.Account.from_key(signer_key)
+        sig = signer_acct.sign_message(e_msg)
         op['signature'] = Web3.to_hex(sig.signature)
         return op
 
-# Provides AA helper methods which talk to an ETH node and/or a Bundler
 class aa_rpc(aa_utils):
+    """Provides AA helper methods which talk to an ETH node and/or a Bundler"""
     def __init__(self, _EP_addr, _eth_rpc, _bundler_url):
-      self.w3 = _eth_rpc
-      self.bundler_url = _bundler_url
-      aa_utils.__init__(self, _EP_addr, self.w3.eth.chain_id)
+        self.w3 = _eth_rpc
+        self.bundler_url = _bundler_url
+        aa_utils.__init__(self, _EP_addr, self.w3.eth.chain_id)
 
     def aa_nonce(self, addr, key):
-      calldata = selector("getNonce(address,uint192)") + ethabi.encode(['address','uint192'],[addr, key])
-      ret = self.w3.eth.call({'to':self.EP_addr,'data':calldata})
-      return Web3.to_hex(ret)
+        """Returns the keyed AA nonce for an address"""
+        calldata = selector("getNonce(address,uint192)") + ethabi.encode(['address','uint192'],[addr, key])
+        ret = self.w3.eth.call({'to':self.EP_addr,'data':calldata})
+        return Web3.to_hex(ret)
 
-# Provides some helper functions for EOA transactions and general utilities
 class eth_utils:
+    """Provides some helper functions for EOA transactions and general utilities"""
     def __init__(self, _w3):
         self.w3 = _w3
         self.chain_id = self.w3.eth.chain_id
 
-    # Wrapper to sign and submit an Eth transaction from an EOA (e.g. the deployer account)
-    # Will populate some fields automatically while allowing the original Tx to override.
-    def signAndSubmit(self, tx, key):
+    def sign_and_submit(self, tx, key):
+        """Wrapper to sign and submit an Eth transaction from an EOA (e.g. the deployer account)
+           Will populate some fields automatically while allowing the original Tx to override."""
         if 'nonce' not in tx:
             tx['nonce'] = self.w3.eth.get_transaction_count(tx['from'])
         if 'chainId' not in tx:
@@ -66,28 +65,28 @@ class eth_utils:
         signed_txn = self.w3.eth.account.sign_transaction(tx, key)
         ret = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         rcpt = self.w3.eth.wait_for_transaction_receipt(ret)
-        if (rcpt.status != 1):
+        if rcpt.status != 1:
             print("Transaction failed, txhash =", Web3.to_hex(ret))
-        assert (rcpt.status == 1)
+        assert rcpt.status == 1
         return rcpt
 
-    # Perform an unlimited ERC20 token approval
-    def approveToken(self, token, spender, deploy_addr, deploy_key):
-      approveCD = selector("approve(address,uint256)") + ethabi.encode(
-        ['address','uint256'],
-        [spender, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
+    def approve_token(self, token, spender, deploy_addr, deploy_key):
+        """Perform an unlimited ERC20 token approval"""
+        approveCD = selector("approve(address,uint256)") + ethabi.encode(
+            ['address','uint256'],
+            [spender, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
 
-      tx = {
-          'from': deploy_addr,
-          'data': approveCD,
-          'to': token,
-      }
-      print("ERC20 approval of", token, "for", spender)
-      self.signAndSubmit(tx, deploy_key)
+        tx = {
+            'from': deploy_addr,
+            'data': approveCD,
+            'to': token,
+        }
+        print("ERC20 approval of", token, "for", spender)
+        self.sign_and_submit(tx, deploy_key)
 
 # Utility functions which don't need an RPC or Endpoint context
 
-# Return a Solidity-style function selector, e.g. 0x1234abcd = keccak256("something(uint,bool")
 def selector(name):
-    nameHash = Web3.to_hex(Web3.keccak(text=name))
-    return Web3.to_bytes(hexstr=nameHash[:10])
+    """Return a Solidity-style function selector, e.g. 0x1234abcd = keccak256("something(uint,bool")"""
+    name_hash = Web3.to_hex(Web3.keccak(text=name))
+    return Web3.to_bytes(hexstr=str(name_hash)[:10])
