@@ -45,6 +45,10 @@ def gen_response(req, err_code, resp_payload):
         'verificationGasLimit': "0x10000",
         'preVerificationGas': "0x10000",
     }
+
+    # This call_gas formula is a "close enough" estimate for the initial implementation.
+    # A more accurate model, or a protocol enhancement to run an actual simulation, may
+    # be required in the future.
     call_gas = 705*len(resp_payload) + 170000
 
     print("call_gas calculation", len(resp_payload), 4+len(p_enc2), call_gas)
@@ -69,13 +73,13 @@ def gen_response(req, err_code, resp_payload):
         Web3.to_int(hexstr=limits['preVerificationGas']),
         0,  # maxFeePerGas
         0,  # maxPriorityFeePerGas
-        Web3.keccak(Web3.to_bytes(hexstr='0x')),  # paymasterANdData
+        Web3.keccak(Web3.to_bytes(hexstr='0x')),  # paymasterAndData
     ])
-    ooHash = Web3.keccak(ethabi.encode(['bytes32', 'address', 'uint256'], [
+    oo_hash = Web3.keccak(ethabi.encode(['bytes32', 'address', 'uint256'], [
                          Web3.keccak(p), EntryPointAddr, HC_CHAIN]))
-    signAcct = eth_account.account.Account.from_key(hc1_key)
-    eMsg = eth_account.messages.encode_defunct(ooHash)
-    sig = signAcct.sign_message(eMsg)
+    signer_acct = eth_account.account.Account.from_key(hc1_key)
+    e_msg = eth_account.messages.encode_defunct(oo_hash)
+    sig = signer_acct.sign_message(e_msg)
 
     success = (err_code == 0)
     print("Method returning success={} response={} signature={}".format(

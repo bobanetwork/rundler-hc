@@ -11,29 +11,20 @@ import eth_account
 
 from userop_utils import *
 
-
-def TestAddSub2(a, b):
+def TestAddSub2(aa, a, b):
     print("\n  - - - - TestAddSub2({},{}) - - - -".format(a, b))
     print("TestCount(begin)=", TC.functions.counters(SA.address).call())
 
-    countCall = selector("count(uint32,uint32)") + \
+    count_call = selector("count(uint32,uint32)") + \
         ethabi.encode(['uint32', 'uint32'], [a, b])
 
-    exCall = selector("execute(address,uint256,bytes)") + \
-        ethabi.encode(['address', 'uint256', 'bytes'],
-                      [TC.address, 0, countCall])
-
-    p = buildOp(SA, nKey, exCall)
-
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
+    p = aa.build_op(SA.address, TC.address, 0, count_call, nKey)
 
     p, est = estimateOp(p)
     if est == 0: # Estimation failed.
         return
 
     print("-----")
-    submitOp(p)
+    rcpt = aa.sign_submit_op(p, u_key)
+    ParseReceipt(rcpt)
     print("TestCount(end)=", TC.functions.counters(SA.address).call())

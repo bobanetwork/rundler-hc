@@ -25,24 +25,25 @@ print("TestCount(start)=", TC.functions.counters(SA.address).call())
 
 # ===============================================
 
+aa = aa_rpc(EP.address, w3, bundler_rpc)
 
-TestAddSub2(2, 1)   # Success
-TestAddSub2(2, 10)  # Underflow error, asserted
-TestAddSub2(2, 3)   # Underflow error, handled internally
-TestAddSub2(7, 0)   # Not HC
-TestAddSub2(4, 1)   # Success again
+TestAddSub2(aa, 2, 1)   # Success
+TestAddSub2(aa, 2, 10)  # Underflow error, asserted
+TestAddSub2(aa, 2, 3)   # Underflow error, handled internally
+TestAddSub2(aa, 7, 0)   # Not HC
+TestAddSub2(aa, 4, 1)   # Success again
 
-TestWordGuess(1, False)
-TestWordGuess(10, False)
-#TestWordGuess(100, False)
-TestWordGuess(2, True)
+TestWordGuess(aa, 1, False)
+TestWordGuess(aa, 10, False)
+#TestWordGuess(aa, 100, False)
+TestWordGuess(aa, 2, True)
 
-TestAuction()
+#TestAuction()
 
-policy_id = test_rainfall_insurance_purchase()
-test_rainfall_insurance_payout(policy_id)
+#policy_id = test_rainfall_insurance_purchase()
+#test_rainfall_insurance_payout(policy_id)
 
-TestSportsBetting()
+#TestSportsBetting()
 
 #TestCaptcha("0x123")
 

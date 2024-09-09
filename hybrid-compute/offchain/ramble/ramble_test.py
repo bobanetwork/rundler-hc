@@ -11,31 +11,23 @@ import eth_account
 
 from userop_utils import *
 
-
-def TestWordGuess(n, cheat):
+def TestWordGuess(aa, n, cheat):
     print("\n  - - - - TestWordGuess({},{}) - - - -".format(n, cheat))
-    gameCall = selector("wordGuess(string,bool)") + \
+    game_call = selector("wordGuess(string,bool)") + \
         ethabi.encode(['string', 'bool'], ["frog", cheat])
 
-    perEntry = TC.functions.EntryCost().call()
+    per_entry = TC.functions.EntryCost().call()
     print("Pool balance before playing =", Web3.from_wei(
         TC.functions.Pool().call(), 'gwei'))
 
-    exCall = selector("execute(address,uint256,bytes)") + \
-        ethabi.encode(['address', 'uint256', 'bytes'], [
-                      TC.address, n * perEntry, gameCall])
-    p = buildOp(SA, nKey, exCall)
-
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
+    p = aa.build_op(SA.address, TC.address, n * per_entry, game_call, nKey)
 
     p, est = estimateOp(p)
-    if est == 0: # Estimation failed.
-        return
+    assert est != 0
 
     print("-----")
-    submitOp(p)
+    rcpt = aa.sign_submit_op(p, u_key)
+    ParseReceipt(rcpt)
+
     print("Pool balance after playing =", Web3.from_wei(
         TC.functions.Pool().call(), 'gwei'))

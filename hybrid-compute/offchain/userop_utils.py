@@ -118,60 +118,6 @@ def showBalances():
 
 # -------------------------------------------------------------
 
-def buildOp(A, nKey, payload):
-    sender_nonce = EP.functions.getNonce(A.address, nKey).call()
-
-    # Note - currently Tip affects the preVerificationGas estimate due to
-    # the mechanism for offsetting the L1 storage fee. If tip is too low
-    # the required L2 gas can exceed the block gas limit.
-    tip = max(w3.eth.max_priority_fee, Web3.to_wei(0.5, 'gwei'))
-    baseFee = w3.eth.gas_price - w3.eth.max_priority_fee
-    print("tip", tip, "baseFee", baseFee)
-    assert (baseFee > 0)
-    fee = max(w3.eth.gas_price, 2 * baseFee + tip)
-    print("Using gas prices", fee, tip, "detected",
-          w3.eth.gas_price, w3.eth.max_priority_fee)
-
-    p = {
-        'sender': A.address,
-        'nonce': Web3.to_hex(sender_nonce),  # A.functions.getNonce().call()),
-        'initCode': '0x',
-        'callData': Web3.to_hex(payload),
-        'callGasLimit': "0x0",
-        'verificationGasLimit': Web3.to_hex(0),
-        'preVerificationGas': "0x0",
-        'maxFeePerGas': Web3.to_hex(fee),
-        'maxPriorityFeePerGas': Web3.to_hex(tip),
-        'paymasterAndData': '0x',
-        # Dummy signature, per Alchemy AA documentation
-        # A future update may require a valid signature on gas estimation ops. This should be safe because the gas
-        # limits in the signed request are set to zero, therefore it would be rejected if a third party attempted to
-        # submit it as a real transaction.
-        'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
-    }
-    print(p)
-    return p
-
-
-def packOp(op):
-    ret = (
-        op['sender'],
-        Web3.to_int(hexstr=op['nonce']),
-        op['initCode'],
-        Web3.to_bytes(hexstr=op['callData']),
-        Web3.to_int(hexstr=op['callGasLimit']),
-        Web3.to_int(hexstr=op['verificationGasLimit']),
-        Web3.to_int(hexstr=op['preVerificationGas']),
-        Web3.to_int(hexstr=op['maxFeePerGas']),
-        Web3.to_int(hexstr=op['maxPriorityFeePerGas']),
-        op['paymasterAndData'],
-        Web3.to_bytes(hexstr=op['signature'])
-    )
-    return ret
-
-# -------------------------------------------------------------
-
-
 def estimateOp(p):
     global gasFees
 
@@ -214,7 +160,6 @@ nKey = int(1200 + (w3.eth.get_transaction_count(u_addr) % 7))
 # nKey = 0
 # print("nKey", nKey)
 
-
 def ParseReceipt(opReceipt):
     global gasFees
     txRcpt = opReceipt['receipt']
@@ -235,50 +180,3 @@ def ParseReceipt(opReceipt):
     gasFees['l2Fees'] += Web3.to_int(hexstr=txRcpt['gasUsed']) * egPrice
     gasFees['l1Fees'] += Web3.to_int(hexstr=txRcpt['l1Fee'])
     # exit(0)
-
-
-def submitOp(p):
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
-    while True:
-        response = requests.post(bundler_rpc, json=request(
-            "eth_sendUserOperation", params=[p, EP.address]))
-        if 'result' in response.json():
-            break
-        elif 'error' in response.json():
-            emsg = response.json()['error']['message']
-            # Workaround for sending debug_traceCall to unsynced node
-            if not re.search(r'message: block 0x.{64} not found', emsg):
-                break
-        print("*** Retrying eth_sendUserOperation")
-        time.sleep(5)
-
-    print("sendOperation response", response.json())
-    if 'error' in response.json():
-        print("*** eth_sendUserOperation failed")
-        exit(1)
-
-    opHash = {}
-    opHash['hash'] = response.json()['result']
-    timeout = True
-    for i in range(100):
-        print("Waiting for receipt...")
-        time.sleep(10)
-        opReceipt = requests.post(bundler_rpc, json=request(
-            "eth_getUserOperationReceipt", params=opHash))
-        opReceipt = opReceipt.json()['result']
-        if opReceipt is not None:
-            # print("opReceipt", opReceipt)
-            assert (opReceipt['receipt']['status'] == "0x1")
-            print("operation success", opReceipt['success'],
-                  "txHash=", opReceipt['receipt']['transactionHash'])
-            ParseReceipt(opReceipt)
-            timeout = False
-            assert (opReceipt['success'])
-            break
-    if timeout:
-        print("*** Previous operation timed out")
-        exit(1)
-    return opReceipt

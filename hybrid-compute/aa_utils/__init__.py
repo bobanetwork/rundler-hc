@@ -1,4 +1,9 @@
 # Some common functions for working with UserOperations and Transactions
+import re
+import sys
+import time
+import requests
+from jsonrpcclient import request
 from web3 import Web3
 from eth_abi import abi as ethabi
 import eth_account
@@ -42,6 +47,88 @@ class aa_rpc(aa_utils):
         calldata = selector("getNonce(address,uint192)") + ethabi.encode(['address','uint192'],[addr, key])
         ret = self.w3.eth.call({'to':self.EP_addr,'data':calldata})
         return Web3.to_hex(ret)
+
+    def build_op(self, sender, target, value, calldata, nonce_key=0):
+        """Builds a UserOperation to call an account's Execute method, passing specified parameters."""
+
+        # Note - currently Tip affects the preVerificationGas estimate due to
+        # the mechanism for offsetting the L1 storage fee. If tip is too low
+        # the required L2 gas can exceed the block gas limit.
+        tip = max(self.w3.eth.max_priority_fee, Web3.to_wei(0.5, 'gwei'))
+        base_fee = self.w3.eth.gas_price - self.w3.eth.max_priority_fee
+        print("tip", tip, "base_fee", base_fee)
+        assert base_fee > 0
+        fee = max(self.w3.eth.gas_price, 2 * base_fee + tip)
+        print("Using gas prices", fee, tip, "detected",
+              self.w3.eth.gas_price, self.w3.eth.max_priority_fee)
+
+        ex_calldata = selector("execute(address,uint256,bytes)") + \
+            ethabi.encode(['address', 'uint256', 'bytes'],
+                          [target, value, calldata])
+
+        op = {
+           'sender': sender,
+           'nonce': self.aa_nonce(sender,nonce_key),
+           'initCode': '0x',
+           'callData': Web3.to_hex(ex_calldata),
+           'callGasLimit': "0x0",
+           'verificationGasLimit': Web3.to_hex(0),
+           'preVerificationGas': "0x0",
+           'maxFeePerGas': Web3.to_hex(fee),
+           'maxPriorityFeePerGas': Web3.to_hex(tip),
+           'paymasterAndData': '0x',
+           # Dummy signature, per Alchemy AA documentation
+           # A future update may require a valid signature on gas estimation ops. This should be safe because the gas
+           # limits in the signed request are set to zero, therefore it would be rejected if a third party attempted to
+           # submit it as a real transaction.
+           'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
+        }
+        print(op)
+        return op
+
+    def sign_submit_op(self, op, owner_key):
+        """Sign and submit a UserOperation to the Bundler"""
+
+        op = self.sign_op(op, owner_key)
+        while True:
+            response = requests.post(self.bundler_url, json=request(
+                "eth_sendUserOperation", params=[op, self.EP_addr]))
+            if 'result' in response.json():
+                break
+            if 'error' in response.json():
+                emsg = response.json()['error']['message']
+                # Workaround for sending debug_traceCall to unsynced node
+                if not re.search(r'message: block 0x.{64} not found', emsg):
+                    break
+            print("*** Retrying eth_sendUserOperation")
+            time.sleep(5)
+
+        print("sendOperation response", response.json())
+        if 'error' in response.json():
+            print("*** eth_sendUserOperation failed")
+            sys.exit(1)
+
+        op_hash = {}
+        op_hash['hash'] = response.json()['result']
+        timeout = True
+        for _ in range(100):
+            print("Waiting for receipt...")
+            time.sleep(10)
+            op_receipt = requests.post(self.bundler_url, json=request(
+                "eth_getUserOperationReceipt", params=op_hash))
+            op_receipt = op_receipt.json()['result']
+            if op_receipt is not None:
+                # print("op_receipt", op_receipt)
+                assert op_receipt['receipt']['status'] == "0x1"
+                print("operation success", op_receipt['success'],
+                      "txHash=", op_receipt['receipt']['transactionHash'])
+                timeout = False
+                assert op_receipt['success']
+                break
+        if timeout:
+            print("*** Previous operation timed out")
+            sys.exit(1)
+        return op_receipt
 
 class eth_utils:
     """Provides some helper functions for EOA transactions and general utilities"""
