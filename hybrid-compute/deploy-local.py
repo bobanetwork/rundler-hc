@@ -132,7 +132,7 @@ def submit_as_op(addr, calldata, signer_key):
     })
     ho['gas'] = int(w3.eth.estimate_gas(ho) * 1.2)
 
-    return l2_util.sign_and_submit_tx(ho, deploy_key)
+    return l2_util.sign_and_submit(ho, deploy_key)
 
 def permit_caller(acct, caller):
     """Whitelist a contract to call a HybridAccount. Now implemented as
@@ -152,7 +152,7 @@ def register_url(caller, url):
         tx = HH.functions.RegisterUrl(caller, url).build_transaction({
             'from': deploy_addr,
         })
-        l2_util.sign_and_submit_tx(tx, deploy_key)
+        l2_util.sign_and_submit(tx, deploy_key)
 
     print("Credit balance =", HH.functions.RegisteredCallers(caller).call()[2])
     if HH.functions.RegisteredCallers(caller).call()[2] == 0:
@@ -160,7 +160,7 @@ def register_url(caller, url):
         tx = HH.functions.AddCredit(caller, 100).build_transaction({
             'from': deploy_addr,
         })
-        l2_util.sign_and_submit_tx(tx, deploy_key)
+        l2_util.sign_and_submit(tx, deploy_key)
 
 def fund_addr(addr):
     """Transfer funds to an address directly"""
@@ -175,7 +175,7 @@ def fund_addr(addr):
             tx['gasPrice'] = w3.eth.gas_price
         else:
             tx['gasPrice'] = Web3.to_wei(1, 'gwei')
-        l2_util.sign_and_submit_tx(tx, deploy_key)
+        l2_util.sign_and_submit(tx, deploy_key)
 
 def fund_addr_ep(EP, addr):
     """Deposit funds for an address into the EntryPoint"""
@@ -185,7 +185,7 @@ def fund_addr_ep(EP, addr):
             'from': deploy_addr,
             'value': Web3.to_wei(0.01, "ether")
         })
-        l2_util.sign_and_submit_tx(tx, deploy_key)
+        l2_util.sign_and_submit(tx, deploy_key)
     print("Balances for", addr, Web3.from_wei(w3.eth.get_balance(addr), 'ether'),
           Web3.from_wei(EP.functions.deposits(addr).call()[0], 'ether'))
 
@@ -201,7 +201,7 @@ def deploy_account(factory, owner):
             'data': calldata,
             'from': deploy_addr,
         }
-        l2_util.sign_and_submit_tx(tx, deploy_key)
+        l2_util.sign_and_submit(tx, deploy_key)
     return acct_addr
 
 def deploy_base():
@@ -296,7 +296,7 @@ if w3.eth.get_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
         'value': Web3.to_wei(2 * FUND_MIN, 'ether')
     }
     print("Funding L2 deploy_addr (ETH)")
-    l1_util.sign_and_submit_tx(tx, deploy_key)
+    l1_util.sign_and_submit(tx, deploy_key)
 
     print("Sleep...")
     while w3.eth.get_balance(deploy_addr) == 0:
@@ -322,7 +322,7 @@ if boba_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
     }
     tx['gas'] = int(l1.eth.estimate_gas(tx) * 1.5)
     print("Funding L2 deploy_addr (BOBA)")
-    l1_util.sign_and_submit_tx(tx, deploy_key)
+    l1_util.sign_and_submit(tx, deploy_key)
 
     print("Sleep...")
     while boba_balance(deploy_addr) == 0:
@@ -345,7 +345,7 @@ l2_util.approve_token(boba_token, HH.address, deploy_addr, deploy_key)
 tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
     'from': deploy_addr,
 })
-l2_util.sign_and_submit_tx(tx, deploy_key)
+l2_util.sign_and_submit(tx, deploy_key)
 
 client_addr = deploy_account(saf_addr, env_vars['CLIENT_OWNER'])
 fund_addr(client_addr)
