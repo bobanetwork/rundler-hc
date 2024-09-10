@@ -1,62 +1,55 @@
-from web3 import Web3
-import time
 from random import *
-import requests
 import json
 import os
-import re
-
-from jsonrpcclient import request
-import requests
-
-import eth_account
-
 from dotenv import load_dotenv, find_dotenv
+import sys
+
+from web3 import Web3
+import eth_account
 
 load_dotenv(find_dotenv())
 
-import sys
 sys.path.append(".") # Workaround until aa_utils etc. can be packaged properly
 from aa_utils import *
 
 EP_ADDR = os.environ['ENTRY_POINTS']
-assert (len(EP_ADDR) == 42)
+assert len(EP_ADDR) == 42
 ep_addr = Web3.to_checksum_address(EP_ADDR)
 
 BUNDLER_ADDR = os.environ['BUNDLER_ADDR']
-assert (len(BUNDLER_ADDR) == 42)
+assert len(BUNDLER_ADDR) == 42
 bundler_addr = Web3.to_checksum_address(BUNDLER_ADDR)
 
 bundler_rpc = os.environ['BUNDLER_RPC']
-assert (len(bundler_rpc) > 0)
+assert len(bundler_rpc) > 0
 
 node_http = os.environ['NODE_HTTP']
-assert (len(node_http) > 0)
+assert len(node_http) > 0
 
 HC_CHAIN = int(os.environ['CHAIN_ID'])
-assert (HC_CHAIN > 0)
+assert HC_CHAIN > 0
 
 # Owner of the user account used to submit client requests
 U_OWNER = os.environ['CLIENT_OWNER']
-assert (len(U_OWNER) == 42)
+assert len(U_OWNER) == 42
 u_addr = Web3.to_checksum_address(U_OWNER)
 
 u_key = os.environ['CLIENT_PRIVKEY']
-assert (len(u_key) == 66)
+assert len(u_key) == 66
 
 U_ACCT = os.environ['CLIENT_ADDR']
-assert (len(U_ACCT) == 42)
+assert len(U_ACCT) == 42
 u_account = Web3.to_checksum_address(U_ACCT)
 
 TEST_COUNTER = os.environ['TEST_COUNTER']
-assert (len(TEST_COUNTER) == 42)
+assert len(TEST_COUNTER) == 42
 test_counter = Web3.to_checksum_address(TEST_COUNTER)
 
 # -------------------------------------------------------------
 
-gasFees = dict()
+gasFees = {}
 # Tracks gas between estimate and receipt; should refactor
-gasFees['estGas'] = 123
+gasFees['estGas'] = 0
 gasFees['l2Fees'] = 0   # Cumulative L2 fees
 gasFees['l1Fees'] = 0   # Cumulative L1 fees
 
@@ -118,42 +111,20 @@ def showBalances():
 
 # -------------------------------------------------------------
 
-def estimateOp(p):
+def estimateOp(aa, p):
     global gasFees
 
-    est_params = [p, EP.address]
-    print("estimation params {}".format(est_params))
+    (success, p) = aa.estimate_op_gas(p)
+    if not success:
+        return False, p
 
-    response = requests.post(
-        bundler_rpc, json=request("eth_estimateUserOperationGas", params=est_params))
-    print("estimateGas response", response.json())
-
-    if 'error' in response.json():
-        print("*** eth_estimateUserOperationGas failed")
-        time.sleep(2)
-        if True:
-            return p, 0
-        print("*** Continuing after failure")
-        p['preVerificationGas'] = "0xffff"
-        p['verificationGasLimit'] = "0xffff"
-        p['callGasLimit'] = "0x40000"
-    else:
-        est_result = response.json()['result']
-
-        p['preVerificationGas'] = Web3.to_hex(Web3.to_int(
-            hexstr=est_result['preVerificationGas']) + 0)
-        p['verificationGasLimit'] = Web3.to_hex(Web3.to_int(
-            hexstr=est_result['verificationGasLimit']) + 0)
-        p['callGasLimit'] = Web3.to_hex(Web3.to_int(
-            hexstr=est_result['callGasLimit']) + 0)
-
-        gasFees['estGas'] = Web3.to_int(hexstr=est_result['preVerificationGas']) + Web3.to_int(
-            hexstr=est_result['verificationGasLimit']) + Web3.to_int(hexstr=est_result['callGasLimit'])
-        print("estimateGas total =", gasFees['estGas'])
-    return p, gasFees['estGas']
+    gasFees['estGas'] = Web3.to_int(hexstr=p['preVerificationGas']) \
+        + Web3.to_int(hexstr=p['verificationGasLimit']) \
+        + Web3.to_int(hexstr=p['callGasLimit'])
+    print("estimateGas total =", gasFees['estGas'])
+    return True, p
 
 # ===============================================
-
 
 # Generates an AA-style nonce (each key has its own associated sequence count)
 nKey = int(1200 + (w3.eth.get_transaction_count(u_addr) % 7))

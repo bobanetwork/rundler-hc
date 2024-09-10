@@ -85,6 +85,32 @@ class aa_rpc(aa_utils):
         }
         print(op)
         return op
+    def estimate_op_gas(self, op, extra_pvg=0, extra_vg=0, extra_cg=0):
+        """ Wrapper to call eth_estimateUserOperationGas() and update the op.
+            Allows limits to be increased in cases where a bundler is
+            providing insufficient estimates. Returns success flag + new op"""
+        
+        est_params = [op, self.EP_addr]
+        print(f"estimation params {est_params}")
+
+        response = requests.post(
+            self.bundler_url, json=request("eth_estimateUserOperationGas", params=est_params))
+        print("estimateGas response", response.json())
+
+        if 'error' in response.json():
+            print("*** eth_estimateUserOperationGas failed")
+            time.sleep(2)
+            return False, op
+        else:
+            est_result = response.json()['result']
+
+            op['preVerificationGas'] = Web3.to_hex(Web3.to_int(
+                hexstr=est_result['preVerificationGas']) + extra_pvg)
+            op['verificationGasLimit'] = Web3.to_hex(Web3.to_int(
+                hexstr=est_result['verificationGasLimit']) + extra_vg)
+            op['callGasLimit'] = Web3.to_hex(Web3.to_int(
+                hexstr=est_result['callGasLimit']) + extra_cg)
+        return True, op
 
     def sign_submit_op(self, op, owner_key):
         """Sign and submit a UserOperation to the Bundler"""
