@@ -26,6 +26,9 @@ print("TestCount(start)=", TC.functions.counters(SA.address).call())
 # ===============================================
 
 aa = aa_rpc(EP.address, w3, bundler_rpc)
+TestKyc(aa,True)
+TestKyc(aa,False)
+exit(0)
 
 TestAddSub2(aa, 2, 1)   # Success
 TestAddSub2(aa, 2, 10)  # Underflow error, asserted
@@ -43,7 +46,7 @@ TestWordGuess(aa, 2, True)
 #policy_id = test_rainfall_insurance_purchase()
 #test_rainfall_insurance_payout(policy_id)
 
-#TestSportsBetting()
+TestSportsBetting(aa)
 
 #TestCaptcha("0x123")
 

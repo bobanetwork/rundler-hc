@@ -1,25 +1,14 @@
-from web3 import Web3
-import time
-from random import *
-import requests
-
-from jsonrpcclient import request
-import requests
-
 from eth_abi import abi as ethabi
-import eth_account
-
 from userop_utils import *
-
-
-def TestSportsBetting():
+import time
+def TestSportsBetting(aa):
     print("\n  - - - - SportBetting() - - - -")
     print("SA ADDRESS {}".format(SA.address))
 
     game_id = 456
-    create_bet(game_id)
-    place_bet(game_id)
-    settle_bet(game_id)
+    create_bet(aa, game_id)
+    place_bet(aa, game_id)
+    settle_bet(aa, game_id)
     bets = TEST_SPORTS_BETTING.functions.bets(game_id, 0).call()
     game = TEST_SPORTS_BETTING.functions.games(game_id).call()
     score = TEST_SPORTS_BETTING.functions.gameScores(game_id).call()
@@ -28,89 +17,47 @@ def TestSportsBetting():
     print("Score: ", score)
     print("Test Sports Betting end")
 
-
-def create_bet(game_id):
+def create_bet(aa, game_id):
     print("--------------------Create Bet--------------------")
     create_call = selector("createGame(uint256)") + ethabi.encode(['uint256'], [game_id])
 
-    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
-        ['address', 'uint256', 'bytes'], [TEST_SPORTS_BETTING.address, 0, create_call])
+    op = aa.build_op(SA.address, TEST_SPORTS_BETTING.address, 0, create_call, nKey)
 
-    p = buildOp(SA, nKey, exCall)
+    (success, op) = estimateOp(aa, op)
+    assert success
 
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
+    rcpt = aa.sign_submit_op(op, u_key)
+    ParseReceipt(rcpt)
 
-    p, est = estimateOp(p)
-    if est == 0:  # Estimation failed.
-        return
-
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
-
-    print("-----")
-    submitOp(p)
     print("Create Bet end")
 
-
-def place_bet(game_id):
+def place_bet(aa, game_id):
     print("--------------------Place Bet--------------------")
     outcome = 1
     place_bet = selector("placeBet(uint256,uint256)") + ethabi.encode(['uint256', 'uint256'],
                                                                             [game_id, outcome])
-
     amount_to_bet = 2
-    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
-        ['address', 'uint256', 'bytes'], [TEST_SPORTS_BETTING.address, amount_to_bet, place_bet])
 
-    p = buildOp(SA, nKey, exCall)
+    op = aa.build_op(SA.address, TEST_SPORTS_BETTING.address, amount_to_bet, place_bet, nKey)
 
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
+    (success, op) = estimateOp(aa, op)
+    assert success
 
-    p, est = estimateOp(p)
-    if est == 0:  # Estimation failed.
-        return
+    rcpt = aa.sign_submit_op(op, u_key)
+    ParseReceipt(rcpt)
 
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
-
-    print("-----")
-    submitOp(p)
     print("Place Bet end")
 
-
-def settle_bet(game_id):
+def settle_bet(aa, game_id):
     print("--------------------Settle Bet--------------------")
     settle_bet = selector("settleBet(uint256)") + ethabi.encode(['uint256'], [game_id])
 
-    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
-        ['address', 'uint256', 'bytes'], [TEST_SPORTS_BETTING.address, 0, settle_bet])
+    op = aa.build_op(SA.address, TEST_SPORTS_BETTING.address, 0, settle_bet, nKey)
+    time.sleep(5)
+    (success, op) = estimateOp(aa, op)
+    assert success
 
-    p = buildOp(SA, nKey, exCall)
+    rcpt = aa.sign_submit_op(op, u_key)
+    ParseReceipt(rcpt)
 
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
-
-    p, est = estimateOp(p)
-    if est == 0:  # Estimation failed.
-        return
-
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
-
-    print("-----")
-    submitOp(p)
     print("Settle Bet end")

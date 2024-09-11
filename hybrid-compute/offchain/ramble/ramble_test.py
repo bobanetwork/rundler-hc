@@ -16,7 +16,6 @@ def TestWordGuess(aa, n, cheat):
     (success, op) = estimateOp(aa, op)
     assert success
 
-    print("-----")
     rcpt = aa.sign_submit_op(op, u_key)
     ParseReceipt(rcpt)
 

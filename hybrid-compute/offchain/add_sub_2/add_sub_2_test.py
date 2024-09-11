@@ -14,7 +14,7 @@ def TestAddSub2(aa, a, b):
     if not success:
         return
 
-    print("-----")
     rcpt = aa.sign_submit_op(op, u_key)
     ParseReceipt(rcpt)
+
     print("TestCount(end)=", TC.functions.counters(SA.address).call())

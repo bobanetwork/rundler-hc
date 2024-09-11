@@ -72,8 +72,8 @@ HA = w3.eth.contract(address=deployed['HybridAccount']
                      ['address'], abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
     address=test_counter, abi=deployed['TestCounter']['abi'])
-#KYC = w3.eth.contract(
-#    address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
+KYC = w3.eth.contract(
+    address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
 #TFP = w3.eth.contract(
 #    address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
 #TCAPTCHA = w3.eth.contract(
@@ -122,6 +122,7 @@ def estimateOp(aa, p):
         + Web3.to_int(hexstr=p['verificationGasLimit']) \
         + Web3.to_int(hexstr=p['callGasLimit'])
     print("estimateGas total =", gasFees['estGas'])
+    print("-----")
     return True, p
 
 # ===============================================
@@ -131,13 +132,19 @@ nKey = int(1200 + (w3.eth.get_transaction_count(u_addr) % 7))
 # nKey = 0
 # print("nKey", nKey)
 
-def ParseReceipt(opReceipt):
+def ParseReceipt(opReceipt, logTopic=None):
+    """Parses an operation receipt to extract gas information. Can optionally look
+       for one specified log topic and return a matching entry. Sufficient for the
+       current examples but not intended as a general solution."""
     global gasFees
     txRcpt = opReceipt['receipt']
+    log_ret = None
 
     n = 0
     for i in txRcpt['logs']:
         print("log", n, i['topics'][0], i['data'])
+        if logTopic and Web3.to_hex(logTopic) == i['topics'][0]:
+            log_ret = (i['topics'], i['data'])
         n += 1
     print("Total tx gas stats:",
           "gasUsed", Web3.to_int(hexstr=txRcpt['gasUsed']),
@@ -150,4 +157,5 @@ def ParseReceipt(opReceipt):
     egPrice = Web3.to_int(hexstr=txRcpt['effectiveGasPrice'])
     gasFees['l2Fees'] += Web3.to_int(hexstr=txRcpt['gasUsed']) * egPrice
     gasFees['l1Fees'] += Web3.to_int(hexstr=txRcpt['l1Fee'])
-    # exit(0)
+
+    return log_ret
