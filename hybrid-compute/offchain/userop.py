@@ -26,9 +26,6 @@ print("TestCount(start)=", TC.functions.counters(SA.address).call())
 # ===============================================
 
 aa = aa_rpc(EP.address, w3, bundler_rpc)
-TestKyc(aa,True)
-TestKyc(aa,False)
-exit(0)
 
 TestAddSub2(aa, 2, 1)   # Success
 TestAddSub2(aa, 2, 10)  # Underflow error, asserted
@@ -41,10 +38,10 @@ TestWordGuess(aa, 10, False)
 #TestWordGuess(aa, 100, False)
 TestWordGuess(aa, 2, True)
 
-#TestAuction()
+TestAuction(aa)
 
-#policy_id = test_rainfall_insurance_purchase()
-#test_rainfall_insurance_payout(policy_id)
+#policy_id = test_rainfall_insurance_purchase(aa)
+#test_rainfall_insurance_payout(aa, policy_id)  # Needs an API key; disabled by default
 
 TestSportsBetting(aa)
 
@@ -52,8 +49,8 @@ TestSportsBetting(aa)
 
 # TestTokenPrice("ETH") # Not currently deployed
 
-#TestKyc(True)  # Success
-#TestKyc(False)  # Fail
+TestKyc(aa,True)  # Success
+TestKyc(aa,False)  # Fail
 # ===============================================
 
 print("TestCount(final)=", TC.functions.counters(SA.address).call())
