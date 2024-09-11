@@ -15,7 +15,6 @@ def test_rainfall_insurance_purchase(aa):
     calldata =  selector("buyInsurance(uint256,string)") + \
       ethabi.encode(['uint256','string'],[trigger_rainfall, city])
 
-
     op = aa.build_op(SA.address, TEST_RAINFALL_INSURANCE.address, premium, calldata, nKey)
 
     (success, op) = estimateOp(aa, op)

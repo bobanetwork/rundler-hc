@@ -83,7 +83,7 @@ class aa_rpc(aa_utils):
            # submit it as a real transaction.
            'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
         }
-        print(op)
+        print("Built userOperation", op)
         return op
     def estimate_op_gas(self, op, extra_pvg=0, extra_vg=0, extra_cg=0):
         """ Wrapper to call eth_estimateUserOperationGas() and update the op.
@@ -91,7 +91,6 @@ class aa_rpc(aa_utils):
             providing insufficient estimates. Returns success flag + new op"""
         
         est_params = [op, self.EP_addr]
-        print(f"estimation params {est_params}")
 
         response = requests.post(
             self.bundler_url, json=request("eth_estimateUserOperationGas", params=est_params))

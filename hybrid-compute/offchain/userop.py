@@ -41,16 +41,17 @@ TestWordGuess(aa, 2, True)
 TestAuction(aa)
 
 #policy_id = test_rainfall_insurance_purchase(aa)
-#test_rainfall_insurance_payout(aa, policy_id)  # Needs an API key; disabled by default
+#test_rainfall_insurance_payout(aa, policy_id)  # Calls external API; disabled by default
 
 TestSportsBetting(aa)
 
 #TestCaptcha("0x123")
 
-# TestTokenPrice("ETH") # Not currently deployed
+# TestTokenPrice(aa, "ETH") # Calls external API; disabled by default
 
-TestKyc(aa,True)  # Success
-TestKyc(aa,False)  # Fail
+TestKyc(aa,True)
+TestKyc(aa,False)
+
 # ===============================================
 
 print("TestCount(final)=", TC.functions.counters(SA.address).call())

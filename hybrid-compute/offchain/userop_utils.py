@@ -41,10 +41,6 @@ U_ACCT = os.environ['CLIENT_ADDR']
 assert len(U_ACCT) == 42
 u_account = Web3.to_checksum_address(U_ACCT)
 
-TEST_COUNTER = os.environ['TEST_COUNTER']
-assert len(TEST_COUNTER) == 42
-test_counter = Web3.to_checksum_address(TEST_COUNTER)
-
 # -------------------------------------------------------------
 
 gasFees = {}
@@ -71,11 +67,11 @@ SA = w3.eth.contract(
 HA = w3.eth.contract(address=deployed['HybridAccount']
                      ['address'], abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
-    address=test_counter, abi=deployed['TestCounter']['abi'])
+    address=deployed['TestCounter']['address'], abi=deployed['TestCounter']['abi'])
 KYC = w3.eth.contract(
     address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
-#TFP = w3.eth.contract(
-#    address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
+TFP = w3.eth.contract(
+    address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
 #TCAPTCHA = w3.eth.contract(
 #    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
 TEST_AUCTION = w3.eth.contract(
@@ -99,8 +95,8 @@ def showBalances():
         HA.address).call(), w3.eth.get_balance(HA.address))
     print("TC ", EP.functions.getDepositInfo(
         TC.address).call(), w3.eth.get_balance(TC.address))
-#    print("TFP", EP.functions.getDepositInfo(
-#        TFP.address).call(), w3.eth.get_balance(TFP.address))
+    print("TFP", EP.functions.getDepositInfo(
+        TFP.address).call(), w3.eth.get_balance(TFP.address))
     print("AUCTION_SYSTEM", EP.functions.getDepositInfo(TEST_AUCTION.address).call(), w3.eth.get_balance(TEST_AUCTION.address))
 #    print("TCAPTCHA", EP.functions.getDepositInfo(
 #        TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
