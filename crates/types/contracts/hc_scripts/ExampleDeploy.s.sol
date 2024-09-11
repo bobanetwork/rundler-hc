@@ -8,16 +8,17 @@ import "lib/account-abstraction/contracts/test/TestCaptcha.sol";
 import "lib/account-abstraction/contracts/test/TestCounter.sol";
 import "lib/account-abstraction/contracts/test/TestRainfallInsurance.sol";
 import "lib/account-abstraction/contracts/test/TestSportsBetting.sol";
+import "lib/account-abstraction/contracts/test/TestKyc.sol";
 
 contract LocalDeploy is Script {
     function run() external 
-        returns (address[5] memory) {
+        returns (address[6] memory) {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
 
         address payable ha1Addr = payable(vm.envAddress("OC_HYBRID_ACCOUNT"));
         HybridAccount ha1;
 
-        address[5] memory ret;
+        address[6] memory ret;
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -26,6 +27,7 @@ contract LocalDeploy is Script {
         ret[2] = address(new TestCounter(ha1Addr));
         ret[3] = address(new RainfallInsurance(ha1Addr));
         ret[4] = address(new SportsBetting(ha1Addr));
+        ret[5] = address(new TestKyc(ha1Addr));
 
         vm.stopBroadcast();
         return ret;

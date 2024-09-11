@@ -362,6 +362,7 @@ CAPTCHA = get_contract('TestCaptcha', example_addrs[1])
 TC = get_contract('TestCounter', example_addrs[2])
 RAINFALL_INSURANCE = get_contract('TestRainfallInsurance', example_addrs[3])
 TEST_SPORTS_BETTING = get_contract('TestSportsBetting', example_addrs[4])
+KYC = get_contract('TestKyc', example_addrs[5])
 
 for a in example_addrs:
     permit_caller(HA, a)
@@ -391,6 +392,7 @@ env_vars['TEST_COUNTER'] = TC.address
 env_vars['TEST_AUCTION'] = TEST_AUCTION.address
 env_vars['TEST_RAINFALL_INSURANCE'] = RAINFALL_INSURANCE.address
 env_vars['TEST_SPORTS_BETTING'] = TEST_SPORTS_BETTING.address
+env_vars['TEST_KYC'] = KYC.address
 
 with open(".env", "w", encoding="ascii") as f:
     for k in env_vars.items():

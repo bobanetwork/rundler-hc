@@ -27,9 +27,11 @@ def TestKyc(aa, isValid: bool):
     op = aa.build_op(SA.address, KYC.address, 0, kycCall, nKey)
 
     (success, op) = estimateOp(aa, op)
-    assert success
+    assert success == isValid
 
-    rcpt = aa.sign_submit_op(op, u_key)
-    ParseReceipt(rcpt)
+    if success:
+        rcpt = aa.sign_submit_op(op, u_key)
+        ParseReceipt(rcpt)
 
-    print("TestKyc end")
+    print(f"TestKyc end (success {success})")
+
