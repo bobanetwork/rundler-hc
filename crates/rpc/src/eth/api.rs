@@ -476,6 +476,8 @@ where
 	        result = self.hc_simulate_response(context, op, state_override, revert_data).await;
 	      } else {
 	        println!("HC did not get expected _HC_VRFY");
+                let msg = "HC04: Failed to verify trigger event".to_owned();
+                return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
 	      }
 	    }
 	  }

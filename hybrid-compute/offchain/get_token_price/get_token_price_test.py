@@ -12,27 +12,19 @@ import eth_account
 from userop_utils import *
 
 
-def TestTokenPrice(tokenSymbol):
+def TestTokenPrice(aa, tokenSymbol):
     print("\n  - - - - TestTokenPrice({}) - - - -".format(tokenSymbol))
 
-    gameCall = Web3.to_bytes(hexstr="0x"+selector("fetchPrice(string)")) + \
+    calldata = selector("fetchPrice(string)") + \
         ethabi.encode(['string'], [tokenSymbol])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + \
-        ethabi.encode(['address', 'uint256', 'bytes'], [
-                      TFP.address, 0, gameCall])
-    p = buildOp(SA, nKey, exCall)
+    op = aa.build_op(SA.address, TFP.address, 0, calldata, nKey)
 
-    opHash = EP.functions.getUserOpHash(packOp(p)).call()
-    eMsg = eth_account.messages.encode_defunct(opHash)
-    sig = w3.eth.account.sign_message(eMsg, private_key=u_key)
-    p['signature'] = Web3.to_hex(sig.signature)
-    p, est = estimateOp(p)
+    (success, op) = estimateOp(aa, op)
+    assert success
 
-    if est == 0: # Estimation failed.
-        return
-
-    print("-----")
-    submitOp(p)
-    print("Pool balance after playing =", Web3.from_wei(
-        TC.functions.Pool().call(), 'gwei'))
+    rcpt = aa.sign_submit_op(op, u_key)
+    topic = Web3.keccak(text="PriceQuote(string,string)")
+    event = ParseReceipt(rcpt, topic)
+    (token, price) = ethabi.decode(['string', 'string'], Web3.to_bytes(hexstr=event[1]))
+    print(f"TestTokenPrice result: {token} = {price}")

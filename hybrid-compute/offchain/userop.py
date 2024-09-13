@@ -25,31 +25,33 @@ print("TestCount(start)=", TC.functions.counters(SA.address).call())
 
 # ===============================================
 
+aa = aa_rpc(EP.address, w3, bundler_rpc)
 
-TestAddSub2(2, 1)   # Success
-TestAddSub2(2, 10)  # Underflow error, asserted
-TestAddSub2(2, 3)   # Underflow error, handled internally
-TestAddSub2(7, 0)   # Not HC
-TestAddSub2(4, 1)   # Success again
+TestAddSub2(aa, 2, 1)   # Success
+TestAddSub2(aa, 2, 10)  # Underflow error, asserted
+TestAddSub2(aa, 2, 3)   # Underflow error, handled internally
+TestAddSub2(aa, 7, 0)   # Not HC
+TestAddSub2(aa, 4, 1)   # Success again
 
-TestWordGuess(1, False)
-TestWordGuess(10, False)
-#TestWordGuess(100, False)
-TestWordGuess(2, True)
+TestWordGuess(aa, 1, False)
+TestWordGuess(aa, 10, False)
+#TestWordGuess(aa, 100, False)
+TestWordGuess(aa, 2, True)
 
-TestAuction()
+TestAuction(aa)
 
-TestSportsBetting()
+#policy_id = test_rainfall_insurance_purchase(aa)
+#test_rainfall_insurance_payout(aa, policy_id)  # Calls external API; disabled by default
 
-#policy_id = test_rainfall_insurance_purchase()
-#test_rainfall_insurance_payout(policy_id)
+TestSportsBetting(aa)
 
 #TestCaptcha("0x123")
 
-#TestTokenPrice("ETH")
+# TestTokenPrice(aa, "ETH") # Calls external API; disabled by default
 
-#TestKyc(True)  # Success
-#TestKyc(False)  # Fail
+TestKyc(aa,True)
+TestKyc(aa,False)
+
 # ===============================================
 
 print("TestCount(final)=", TC.functions.counters(SA.address).call())

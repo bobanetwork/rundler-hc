@@ -282,7 +282,6 @@ pub async fn external_op(
     ha_owner: Address,
     nn: U256,
 ) -> HcErr {
-    //println!("HC hybrid_compute external_op op_key {:?} response_payload {:?}", op_key, response_payload);
     let mut new_op = make_external_op(src_addr,nonce,op_success,response_payload,sub_key,ep_addr,sig_hex.clone(),oo_nonce,cfg);
 
     let check_hash = new_op.op_hash(cfg.entry_point, cfg.chain_id);
@@ -315,14 +314,14 @@ fn make_err_op(
     let response_payload:Bytes = AbiEncode::encode((src_addr, nn, err_hc.code, err_hc.message)).into();
 
     let call_data = make_err_calldata(cfg.helper_addr, sub_key, Bytes::from(response_payload.to_vec()));
-    println!("HC external_op call_data {:?}", call_data);
+    println!("HC err_op call_data {:?}", call_data);
 
     let new_op:UserOperation = UserOperation{
         sender: cfg.sys_account,
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
 	call_data: call_data.clone(),
-	call_gas_limit:U256::from(0x30000),
+	call_gas_limit:U256::from(0x40000),
 	verification_gas_limit: U256::from(0x10000),
 	pre_verification_gas: U256::from(0x10000),
 	max_fee_per_gas: U256::zero(),
@@ -330,7 +329,6 @@ fn make_err_op(
 	paymaster_and_data: Bytes::new(),
 	signature: Bytes::new(),
     };
-
 
     new_op
 }
@@ -354,7 +352,6 @@ pub async fn err_op(
     let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
     let hh = new_op.op_hash(entry_point, cfg.chain_id);
-    //println!("HC pre_sign hash {:?}", hh);
 
     let signature = wallet.sign_message(hh).await;
     new_op.signature = signature.as_ref().unwrap().to_vec().into();
@@ -439,7 +436,6 @@ pub fn get_hc_op_statediff(op_hash: H256, mut s2: ethers::types::spoof::State) -
 
     // Store an encoded length for the response bytes
     let val = H256::from_low_u64_be((payload.len() * 2 + 1).try_into().unwrap());
-    //println!("HC Store1 {:?} {:?}", key, val);
 
     s2.account(cfg.helper_addr).store(key, val);
     key = keccak256(key).into();
@@ -447,7 +443,6 @@ pub fn get_hc_op_statediff(op_hash: H256, mut s2: ethers::types::spoof::State) -
     let mut i = 0;
     while i < payload.len() {
 	let next_chunk:H256 = H256::from_slice(&payload[i..32+i]);
-	//println!("HC Store_next {:?} {:?}", key , next_chunk);
 	s2.account(cfg.helper_addr).store(key, next_chunk);
 	let u_key:U256 = key.into_uint()+1;
 	key = H256::from_uint(&u_key);

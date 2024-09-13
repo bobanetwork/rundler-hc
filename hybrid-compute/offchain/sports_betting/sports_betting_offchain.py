@@ -1,8 +1,6 @@
-
 from web3 import Web3
 from eth_abi import abi as ethabi
 from offchain_utils import gen_response, parse_req
-
 
 def offchain_sports_betting(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     print("  -> offchain_sport_betting handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
@@ -24,7 +22,7 @@ def offchain_sports_betting(ver, sk, src_addr, src_nonce, oo_nonce, payload, *ar
             end_result = 2
         else:
             end_result = 3
-        
+
         print("End result: ", end_result)
         resp = ethabi.encode(['uint256'], [end_result])
     except Exception as e:
@@ -33,7 +31,6 @@ def offchain_sports_betting(ver, sk, src_addr, src_nonce, oo_nonce, payload, *ar
         print("DECODE FAILED", e)
 
     return gen_response(req, err_code, resp)
-
 
 def get_game_score(game_id):
     # This is a dummy function to simulate the offchain data retrieval

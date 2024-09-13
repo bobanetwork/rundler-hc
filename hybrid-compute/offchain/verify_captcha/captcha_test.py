@@ -31,11 +31,10 @@ def TestCaptcha(user_addr):
     print("==================")
 
     # user_addr, uuid, input
-    captchaCall = Web3.to_bytes(
-        hexstr="0x"+selector("verifycaptcha(string,string,string)")) + ethabi.encode(['string', 'string', 'string'],
+    captchaCall = selector("verifycaptcha(string,string,string)") + ethabi.encode(['string', 'string', 'string'],
                                                                                        [user_addr, captcha.uuid_bytes, captcha.image_str])
 
-    exCall = Web3.to_bytes(hexstr="0x"+selector("execute(address,uint256,bytes)")) + ethabi.encode(
+    exCall = selector("execute(address,uint256,bytes)") + ethabi.encode(
         ['address', 'uint256', 'bytes'], [TCAPTCHA.address, 0, captchaCall])
 
     p = buildOp(SA, nKey, exCall)

@@ -4,8 +4,8 @@ from web3 import Web3
 from eth_abi import abi as ethabi
 from offchain_utils import gen_response, parse_req
 
-
 def load_words():
+    """Loads a list of dictionary words, assumes a standard file path"""
     wordlist = []
     with open("/usr/share/dict/words", "r") as f:
         p = re.compile('^[a-z]{4}$')
@@ -15,17 +15,16 @@ def load_words():
                 wordlist.append(line)
     return wordlist
 
-
 wordlist = load_words()
 
-
 def offchain_ramble(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
+    """Generates a random list of words, cheating if requested to do so"""
     global wordlist
     print("  -> offchain_ramble handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
           src_addr, src_nonce, oo_nonce, payload, args))
     err_code = 1
     resp = Web3.to_bytes(text="unknown error")
-    assert(ver == "0.2")
+    assert ver == "0.2"
 
     try:
         req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
