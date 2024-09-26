@@ -2,10 +2,10 @@
 pragma solidity ^0.8.13;
 
 import "forge-std/Script.sol";
-import "lib/account-abstraction/contracts/core/EntryPoint.sol";
-import "lib/account-abstraction/contracts/core/HCHelper.sol";
-import "lib/account-abstraction/contracts/samples/HybridAccountFactory.sol";
-import "lib/account-abstraction/contracts/samples/SimpleAccountFactory.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/core/EntryPoint.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/core/HCHelper.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/samples/HybridAccountFactory.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/samples/SimpleAccountFactory.sol";
 
 contract LocalDeploy is Script {
     function run() external

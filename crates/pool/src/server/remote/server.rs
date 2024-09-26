@@ -23,45 +23,50 @@ use async_trait::async_trait;
 use ethers::types::{Address, H256};
 use futures_util::StreamExt;
 use rundler_task::grpc::{metrics::GrpcMetricsLayer, protos::from_bytes};
-use rundler_types::EntityUpdate;
+use rundler_types::{
+    chain::ChainSpec,
+    pool::{Pool, Reputation},
+    EntityUpdate, UserOperationId, UserOperationVariant,
+};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Request, Response, Result, Status};
 
 use super::protos::{
-    add_op_response, debug_clear_state_response, debug_dump_mempool_response,
+    add_op_response, admin_set_tracking_response, debug_clear_state_response,
+    debug_dump_mempool_response, debug_dump_paymaster_balances_response,
     debug_dump_reputation_response, debug_set_reputation_response, get_op_by_hash_response,
     get_ops_response, get_reputation_status_response, get_stake_status_response,
     op_pool_server::{OpPool, OpPoolServer},
-    remove_ops_response, update_entities_response, AddOpRequest, AddOpResponse, AddOpSuccess,
-    DebugClearStateRequest, DebugClearStateResponse, DebugClearStateSuccess,
-    DebugDumpMempoolRequest, DebugDumpMempoolResponse, DebugDumpMempoolSuccess,
-    DebugDumpReputationRequest, DebugDumpReputationResponse, DebugDumpReputationSuccess,
-    DebugSetReputationRequest, DebugSetReputationResponse, DebugSetReputationSuccess,
-    GetOpByHashRequest, GetOpByHashResponse, GetOpByHashSuccess, GetOpsRequest, GetOpsResponse,
-    GetOpsSuccess, GetReputationStatusRequest, GetReputationStatusResponse,
-    GetReputationStatusSuccess, GetStakeStatusRequest, GetStakeStatusResponse,
-    GetStakeStatusSuccess, GetSupportedEntryPointsRequest, GetSupportedEntryPointsResponse,
-    MempoolOp, RemoveOpsRequest, RemoveOpsResponse, RemoveOpsSuccess, SubscribeNewHeadsRequest,
-    SubscribeNewHeadsResponse, UpdateEntitiesRequest, UpdateEntitiesResponse,
-    UpdateEntitiesSuccess, OP_POOL_FILE_DESCRIPTOR_SET,
+    remove_op_by_id_response, remove_ops_response, update_entities_response, AddOpRequest,
+    AddOpResponse, AddOpSuccess, AdminSetTrackingRequest, AdminSetTrackingResponse,
+    AdminSetTrackingSuccess, DebugClearStateRequest, DebugClearStateResponse,
+    DebugClearStateSuccess, DebugDumpMempoolRequest, DebugDumpMempoolResponse,
+    DebugDumpMempoolSuccess, DebugDumpPaymasterBalancesRequest, DebugDumpPaymasterBalancesResponse,
+    DebugDumpPaymasterBalancesSuccess, DebugDumpReputationRequest, DebugDumpReputationResponse,
+    DebugDumpReputationSuccess, DebugSetReputationRequest, DebugSetReputationResponse,
+    DebugSetReputationSuccess, GetOpByHashRequest, GetOpByHashResponse, GetOpByHashSuccess,
+    GetOpsRequest, GetOpsResponse, GetOpsSuccess, GetReputationStatusRequest,
+    GetReputationStatusResponse, GetReputationStatusSuccess, GetStakeStatusRequest,
+    GetStakeStatusResponse, GetStakeStatusSuccess, GetSupportedEntryPointsRequest,
+    GetSupportedEntryPointsResponse, MempoolOp, RemoveOpByIdRequest, RemoveOpByIdResponse,
+    RemoveOpByIdSuccess, RemoveOpsRequest, RemoveOpsResponse, RemoveOpsSuccess, ReputationStatus,
+    SubscribeNewHeadsRequest, SubscribeNewHeadsResponse, TryUoFromProto, UpdateEntitiesRequest,
+    UpdateEntitiesResponse, UpdateEntitiesSuccess, OP_POOL_FILE_DESCRIPTOR_SET,
 };
-use crate::{
-    mempool::Reputation,
-    server::{local::LocalPoolHandle, PoolServer},
-};
+use crate::server::local::LocalPoolHandle;
 
 const MAX_REMOTE_BLOCK_SUBSCRIPTIONS: usize = 32;
 
 pub(crate) async fn spawn_remote_mempool_server(
-    chain_id: u64,
+    chain_spec: ChainSpec,
     local_pool: LocalPoolHandle,
     addr: SocketAddr,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     // gRPC server
-    let pool_impl = OpPoolImpl::new(chain_id, local_pool);
+    let pool_impl = OpPoolImpl::new(chain_spec, local_pool);
     let op_pool_server = OpPoolServer::new(pool_impl);
     let reflection_service = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(OP_POOL_FILE_DESCRIPTOR_SET)
@@ -89,15 +94,15 @@ pub(crate) async fn spawn_remote_mempool_server(
 }
 
 struct OpPoolImpl {
-    chain_id: u64,
+    chain_spec: ChainSpec,
     local_pool: LocalPoolHandle,
     num_block_subscriptions: Arc<AtomicUsize>,
 }
 
 impl OpPoolImpl {
-    pub(crate) fn new(chain_id: u64, local_pool: LocalPoolHandle) -> Self {
+    pub(crate) fn new(chain_spec: ChainSpec, local_pool: LocalPoolHandle) -> Self {
         Self {
-            chain_id,
+            chain_spec,
             local_pool,
             num_block_subscriptions: Arc::new(AtomicUsize::new(0)),
         }
@@ -121,7 +126,7 @@ impl OpPool for OpPoolImpl {
     ) -> Result<Response<GetSupportedEntryPointsResponse>> {
         let resp = match self.local_pool.get_supported_entry_points().await {
             Ok(entry_points) => GetSupportedEntryPointsResponse {
-                chain_id: self.chain_id,
+                chain_id: self.chain_spec.id,
                 entry_points: entry_points
                     .into_iter()
                     .map(|ep| ep.as_bytes().to_vec())
@@ -142,9 +147,10 @@ impl OpPool for OpPoolImpl {
         let proto_op = req
             .op
             .ok_or_else(|| Status::invalid_argument("Operation is required in AddOpRequest"))?;
-        let uo = proto_op.try_into().map_err(|e| {
-            Status::invalid_argument(format!("Failed to convert to UserOperation: {e}"))
-        })?;
+        let uo =
+            UserOperationVariant::try_uo_from_proto(proto_op, &self.chain_spec).map_err(|e| {
+                Status::invalid_argument(format!("Failed to convert to UserOperation: {e}"))
+            })?;
 
         let resp = match self.local_pool.add_op(ep, uo).await {
             Ok(hash) => AddOpResponse {
@@ -238,6 +244,41 @@ impl OpPool for OpPoolImpl {
         Ok(Response::new(resp))
     }
 
+    async fn remove_op_by_id(
+        &self,
+        request: Request<RemoveOpByIdRequest>,
+    ) -> Result<Response<RemoveOpByIdResponse>> {
+        let req = request.into_inner();
+        let ep = self.get_entry_point(&req.entry_point)?;
+
+        let resp = match self
+            .local_pool
+            .remove_op_by_id(
+                ep,
+                UserOperationId {
+                    sender: from_bytes(&req.sender)
+                        .map_err(|e| Status::invalid_argument(format!("Invalid sender: {e}")))?,
+                    nonce: from_bytes(&req.nonce)
+                        .map_err(|e| Status::invalid_argument(format!("Invalid nonce: {e}")))?,
+                },
+            )
+            .await
+        {
+            Ok(hash) => RemoveOpByIdResponse {
+                result: Some(remove_op_by_id_response::Result::Success(
+                    RemoveOpByIdSuccess {
+                        hash: hash.map_or(vec![], |h| h.as_bytes().to_vec()),
+                    },
+                )),
+            },
+            Err(error) => RemoveOpByIdResponse {
+                result: Some(remove_op_by_id_response::Result::Failure(error.into())),
+            },
+        };
+
+        Ok(Response::new(resp))
+    }
+
     async fn update_entities(
         &self,
         request: Request<UpdateEntitiesRequest>,
@@ -274,7 +315,7 @@ impl OpPool for OpPoolImpl {
         let req = request.into_inner();
         let resp = match self
             .local_pool
-            .debug_clear_state(req.clear_mempool, req.clear_reputation)
+            .debug_clear_state(req.clear_mempool, req.clear_paymaster, req.clear_reputation)
             .await
         {
             Ok(_) => DebugClearStateResponse {
@@ -284,6 +325,30 @@ impl OpPool for OpPoolImpl {
             },
             Err(error) => DebugClearStateResponse {
                 result: Some(debug_clear_state_response::Result::Failure(error.into())),
+            },
+        };
+
+        Ok(Response::new(resp))
+    }
+
+    async fn admin_set_tracking(
+        &self,
+        request: Request<AdminSetTrackingRequest>,
+    ) -> Result<Response<AdminSetTrackingResponse>> {
+        let req = request.into_inner();
+        let ep = self.get_entry_point(&req.entry_point)?;
+        let resp = match self
+            .local_pool
+            .admin_set_tracking(ep, req.paymaster, req.reputation)
+            .await
+        {
+            Ok(_) => AdminSetTrackingResponse {
+                result: Some(admin_set_tracking_response::Result::Success(
+                    AdminSetTrackingSuccess {},
+                )),
+            },
+            Err(error) => AdminSetTrackingResponse {
+                result: Some(admin_set_tracking_response::Result::Failure(error.into())),
             },
         };
 
@@ -367,7 +432,7 @@ impl OpPool for OpPoolImpl {
             Ok(status) => GetReputationStatusResponse {
                 result: Some(get_reputation_status_response::Result::Success(
                     GetReputationStatusSuccess {
-                        status: status as i32,
+                        status: ReputationStatus::from(status).into(),
                     },
                 )),
             },
@@ -423,6 +488,31 @@ impl OpPool for OpPoolImpl {
             },
             Err(error) => DebugDumpReputationResponse {
                 result: Some(debug_dump_reputation_response::Result::Failure(
+                    error.into(),
+                )),
+            },
+        };
+
+        Ok(Response::new(resp))
+    }
+
+    async fn debug_dump_paymaster_balances(
+        &self,
+        request: Request<DebugDumpPaymasterBalancesRequest>,
+    ) -> Result<Response<DebugDumpPaymasterBalancesResponse>> {
+        let req = request.into_inner();
+        let ep = self.get_entry_point(&req.entry_point)?;
+
+        let resp = match self.local_pool.debug_dump_paymaster_balances(ep).await {
+            Ok(balances) => DebugDumpPaymasterBalancesResponse {
+                result: Some(debug_dump_paymaster_balances_response::Result::Success(
+                    DebugDumpPaymasterBalancesSuccess {
+                        balances: balances.into_iter().map(Into::into).collect(),
+                    },
+                )),
+            },
+            Err(error) => DebugDumpPaymasterBalancesResponse {
+                result: Some(debug_dump_paymaster_balances_response::Result::Failure(
                     error.into(),
                 )),
             },

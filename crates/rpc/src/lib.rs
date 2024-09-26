@@ -22,6 +22,9 @@
 mod debug;
 pub use debug::DebugApiClient;
 
+mod admin;
+pub use admin::AdminApiClient;
+
 mod error;
 
 mod eth;
@@ -31,10 +34,10 @@ mod health;
 mod metrics;
 
 mod rundler;
-pub use rundler::RundlerApiClient;
+pub use rundler::{RundlerApiClient, Settings as RundlerApiSettings};
 
 mod task;
 pub use task::{Args as RpcTaskArgs, RpcTask};
 
 mod types;
-pub use types::{RichUserOperation, RpcUserOperation, UserOperationReceipt};
+mod utils;

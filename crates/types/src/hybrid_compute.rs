@@ -22,7 +22,8 @@ use ethers::{
     signers::{LocalWallet, Signer},
 };
 
-use crate::contracts::shared_types::UserOperation;
+use crate::v0_6::UserOperation as UserOperationV0_6;
+use crate::user_operation::{UserOperation};
 
 use std::{sync::Mutex, collections::HashMap, str::FromStr};
 
@@ -48,7 +49,7 @@ pub struct HcEntry {
     /// Extracted calldata
     //pub call_data: Bytes,
     /// Full operation
-    pub user_op: UserOperation,
+    pub user_op: UserOperationV0_6,
     /// Creation timestamp, used to prune expired entries
     pub ts: SystemTime,
     /// The total computed offchain gas (all 3 phases)
@@ -235,7 +236,7 @@ fn make_external_op(
     sig_hex: String,
     oo_nonce: U256,
     cfg: &HcCfg,
-) -> UserOperation {
+) -> UserOperationV0_6 {
 
     let tmp_bytes:Bytes = Bytes::from(response_payload.to_vec());
 
@@ -247,7 +248,7 @@ fn make_external_op(
 
     println!("HC external_op call_data len {:?} {:?} gas {:?} {:?}", response_payload.len(), call_data.len(), call_gas, call_data);
 
-    let mut new_op:UserOperation = UserOperation{
+    let mut new_op:UserOperationV0_6 = UserOperationV0_6{
         sender: ep_addr,
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
@@ -284,7 +285,7 @@ pub async fn external_op(
 ) -> HcErr {
     let mut new_op = make_external_op(src_addr,nonce,op_success,response_payload,sub_key,ep_addr,sig_hex.clone(),oo_nonce,cfg);
 
-    let check_hash = new_op.op_hash(cfg.entry_point, cfg.chain_id);
+    let check_hash = new_op.hash(cfg.entry_point, cfg.chain_id);
     let check_sig: ethers::types::Signature = ethers::types::Signature::from_str(&sig_hex).expect("Signature decode");
     let check_msg: ethers::types::RecoveryMessage =  Data(check_hash.to_fixed_bytes().to_vec());
 
@@ -309,14 +310,14 @@ fn make_err_op(
     nn: U256,
     oo_nonce: U256,
     cfg: &HcCfg,
-) -> UserOperation {
+) -> UserOperationV0_6 {
 
     let response_payload:Bytes = AbiEncode::encode((src_addr, nn, err_hc.code, err_hc.message)).into();
 
     let call_data = make_err_calldata(cfg.helper_addr, sub_key, Bytes::from(response_payload.to_vec()));
     println!("HC err_op call_data {:?}", call_data);
 
-    let new_op:UserOperation = UserOperation{
+    let new_op:UserOperationV0_6 = UserOperationV0_6{
         sender: cfg.sys_account,
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
@@ -351,7 +352,7 @@ pub async fn err_op(
     let key_bytes: Bytes  = cfg.sys_privkey.as_fixed_bytes().into();
     let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
-    let hh = new_op.op_hash(entry_point, cfg.chain_id);
+    let hh = new_op.hash(entry_point, cfg.chain_id);
 
     let signature = wallet.sign_message(hh).await;
     new_op.signature = signature.as_ref().unwrap().to_vec().into();
@@ -366,11 +367,11 @@ pub async fn rr_op(
     cfg: &HcCfg,
     oo_nonce: U256,
     keys: Vec<H256>,
-) -> UserOperation {
+) -> UserOperationV0_6 {
     let call_data = make_rr_calldata(keys);
     println!("HC rr_op call_data {:?}", call_data);
 
-    let mut new_op:UserOperation = UserOperation{
+    let mut new_op:UserOperationV0_6 = UserOperationV0_6{
         sender: cfg.sys_account,
 	nonce: oo_nonce.into(),
 	init_code: Bytes::new(),
@@ -387,7 +388,7 @@ pub async fn rr_op(
     let key_bytes: Bytes  = cfg.sys_privkey.as_fixed_bytes().into();
     let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
-    let hh = new_op.op_hash(cfg.entry_point, cfg.chain_id);
+    let hh = new_op.hash(cfg.entry_point, cfg.chain_id);
     println!("HC pre_sign hash {:?}", hh);
 
     let signature = wallet.sign_message(hh).await;
@@ -558,7 +559,7 @@ mod test {
         );
 
         let e_calldata = "0xb61d27f60000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000124dfc98ae82222222222222222222222222222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000010000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
-        let expected:UserOperation = UserOperation{
+        let expected:UserOperationV0_6 = UserOperationV0_6{
             sender: "0x2000000000000000000000000000000000000002".parse::<Address>().unwrap(),
             nonce: U256::from(222),
             init_code: Bytes::new(),
@@ -597,12 +598,12 @@ mod test {
         );
 
         let e_calldata = "0xb61d27f60000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000124fde89b642222222222222222222222222222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000020000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000009756e69742074657374000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
-        let expected:UserOperation = UserOperation{
+        let expected:UserOperationV0_6 = UserOperationV0_6{
             sender: "0x0000000000000000000000000000000000000002".parse::<Address>().unwrap(),
             nonce: U256::from(222),
             init_code: Bytes::new(),
             call_data: e_calldata,
-            call_gas_limit: U256::from(196608),
+            call_gas_limit: U256::from(262144),
             verification_gas_limit: U256::from(65536),
             pre_verification_gas: U256::from(65536),
             max_fee_per_gas: U256::from(0),

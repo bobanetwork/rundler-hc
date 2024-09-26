@@ -11,41 +11,32 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use ethers::{
-    contract::ContractError,
+    abi::{AbiDecode, AbiEncode},
     prelude::ContractError as EthersContractError,
     providers::{
-        JsonRpcClient, Middleware, Provider as EthersProvider,
-        ProviderError as EthersProviderError, RawCall,
+        Http, HttpRateLimitRetryPolicy, JsonRpcClient, Middleware, Provider as EthersProvider,
+        ProviderError as EthersProviderError, RawCall, RetryClient, RetryClientBuilder,
     },
     types::{
         spoof, transaction::eip2718::TypedTransaction, Address, Block, BlockId, BlockNumber, Bytes,
         Eip1559TransactionRequest, FeeHistory, Filter, GethDebugTracingCallOptions,
-        GethDebugTracingOptions, GethTrace, Log, Transaction, TransactionReceipt, TxHash, H160,
-        H256, U256, U64,
+        GethDebugTracingOptions, GethTrace, Log, Transaction, TransactionReceipt, TxHash, H256,
+        U256, U64,
     },
 };
-use rundler_types::{
-    contracts::{
-        gas_price_oracle::GasPriceOracle, i_aggregator::IAggregator, i_entry_point::IEntryPoint,
-        node_interface::NodeInterface,
-    },
-    UserOperation,
+use reqwest::Url;
+use rundler_types::contracts::utils::{
+    get_gas_used::{GasUsedResult, GetGasUsed, GETGASUSED_DEPLOYED_BYTECODE},
+    storage_loader::STORAGELOADER_DEPLOYED_BYTECODE,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::{AggregatorOut, AggregatorSimOut, Provider, ProviderError, ProviderResult};
-
-const ARBITRUM_NITRO_NODE_INTERFACE_ADDRESS: Address = H160([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xc8,
-]);
-
-const OPTIMISM_BEDROCK_GAS_ORACLE_ADDRESS: Address = H160([
-    0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0F,
-]);
+use super::metrics_middleware::MetricsMiddleware;
+use crate::{Provider, ProviderError, ProviderResult};
 
 #[async_trait::async_trait]
 impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
@@ -73,6 +64,30 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
             call = call.block(block);
         }
         Ok(call.await?)
+    }
+
+    async fn call_constructor<A, R>(
+        &self,
+        bytecode: &Bytes,
+        args: A,
+        block_id: Option<BlockId>,
+        state_overrides: &spoof::State,
+    ) -> anyhow::Result<R>
+    where
+        A: AbiEncode + Send + Sync + 'static,
+        R: AbiDecode + Send + Sync + 'static,
+    {
+        let mut data = bytecode.to_vec();
+        data.extend(AbiEncode::encode(args));
+        let tx = Eip1559TransactionRequest {
+            data: Some(data.into()),
+            ..Default::default()
+        };
+        let error = Provider::call(self, &tx.into(), block_id, state_overrides)
+            .await
+            .err()
+            .context("called constructor should revert")?;
+        get_revert_data(error).context("should decode revert data from called constructor")
     }
 
     async fn fee_history<T: Into<U256> + Send + Sync + Serialize + 'static>(
@@ -117,7 +132,6 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         tx_hash: TxHash,
         trace_options: GethDebugTracingOptions,
     ) -> ProviderResult<GethTrace> {
-        //println!("HC debug_trace_transaction");
         Ok(Middleware::debug_trace_transaction(self, tx_hash, trace_options).await?)
     }
 
@@ -131,7 +145,7 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         println!("HC will use BlockNumber::Latest instead of {:?}", block_id);
         let ret = Middleware::debug_trace_call(self, tx, Some(ethers::types::BlockId::Number(BlockNumber::Latest)), trace_options).await;
         println!("HC debug_trace_call ret {:?}", ret);
-	Ok(ret?)
+        Ok(ret?)
     }
 
     async fn get_balance(&self, address: Address, block: Option<BlockId>) -> ProviderResult<U256> {
@@ -170,44 +184,6 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         Ok(Middleware::get_logs(self, filter).await?)
     }
 
-    async fn aggregate_signatures(
-        self: Arc<Self>,
-        aggregator_address: Address,
-        ops: Vec<UserOperation>,
-    ) -> ProviderResult<Option<Bytes>> {
-        let aggregator = IAggregator::new(aggregator_address, self);
-        // TODO: Cap the gas here.
-        let result = aggregator.aggregate_signatures(ops).call().await;
-        match result {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(ContractError::Revert(_)) => Ok(None),
-            Err(error) => Err(error).context("aggregator contract should aggregate signatures")?,
-        }
-    }
-
-    async fn validate_user_op_signature(
-        self: Arc<Self>,
-        aggregator_address: Address,
-        user_op: UserOperation,
-        gas_cap: u64,
-    ) -> ProviderResult<AggregatorOut> {
-        let aggregator = IAggregator::new(aggregator_address, self);
-        let result = aggregator
-            .validate_user_op_signature(user_op)
-            .gas(gas_cap)
-            .call()
-            .await;
-
-        match result {
-            Ok(sig) => Ok(AggregatorOut::SuccessWithInfo(AggregatorSimOut {
-                address: aggregator_address,
-                signature: sig,
-            })),
-            Err(ContractError::Revert(_)) => Ok(AggregatorOut::ValidationReverted),
-            Err(error) => Err(error).context("should call aggregator to validate signature")?,
-        }
-    }
-
     async fn get_code(&self, address: Address, block_hash: Option<H256>) -> ProviderResult<Bytes> {
         Ok(Middleware::get_code(self, address, block_hash.map(|b| b.into())).await?)
     }
@@ -216,55 +192,67 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         Ok(Middleware::get_transaction_count(self, address, None).await?)
     }
 
-    async fn calc_arbitrum_l1_gas(
-        self: Arc<Self>,
-        entry_point_address: Address,
-        op: UserOperation,
-    ) -> ProviderResult<U256> {
-        let entry_point = IEntryPoint::new(entry_point_address, Arc::clone(&self));
-        let data = entry_point
-            .handle_ops(vec![op], Address::random())
-            .calldata()
-            .context("should get calldata for entry point handle ops")?;
+    async fn get_gas_used(
+        self: &Arc<Self>,
+        target: Address,
+        value: U256,
+        data: Bytes,
+        mut state_overrides: spoof::State,
+    ) -> ProviderResult<GasUsedResult> {
+        let helper_addr = Address::random();
+        let helper = GetGasUsed::new(helper_addr, Arc::clone(self));
 
-        let arb_node = NodeInterface::new(ARBITRUM_NITRO_NODE_INTERFACE_ADDRESS, self);
-        let gas = arb_node
-            .gas_estimate_l1_component(entry_point_address, false, data)
-            .call()
-            .await?;
-        Ok(U256::from(gas.0))
+        state_overrides
+            .account(helper_addr)
+            .code(GETGASUSED_DEPLOYED_BYTECODE.clone());
+
+        Ok(helper
+            .get_gas(target, value, data)
+            .call_raw()
+            .state(&state_overrides)
+            .await
+            .context("should get gas used")?)
     }
 
-    async fn calc_optimism_l1_gas(
-        self: Arc<Self>,
-        entry_point_address: Address,
-        op: UserOperation,
-        gas_price: U256,
-    ) -> ProviderResult<U256> {
-        let entry_point = IEntryPoint::new(entry_point_address, Arc::clone(&self));
-        let data = entry_point
-            .handle_ops(vec![op], Address::random())
-            .calldata()
-            .context("should get calldata for entry point handle ops")?;
+    async fn batch_get_storage_at(
+        &self,
+        address: Address,
+        slots: Vec<H256>,
+    ) -> ProviderResult<Vec<H256>> {
+        let mut state_overrides = spoof::State::default();
+        state_overrides
+            .account(address)
+            .code(STORAGELOADER_DEPLOYED_BYTECODE.clone());
 
-        // construct an unsigned transaction with default values just for L1 gas estimation
-        let tx = Eip1559TransactionRequest::new()
-            .from(Address::random())
-            .to(entry_point_address)
-            .gas(U256::from(1_000_000))
-            .max_priority_fee_per_gas(U256::from(100_000_000))
-            .max_fee_per_gas(U256::from(100_000_000))
-            .value(U256::from(0))
-            .data(data)
-            .nonce(U256::from(100_000))
-            .chain_id(U64::from(100_000))
-            .rlp();
+        let expected_ret_size = slots.len() * 32;
+        let slot_data = slots
+            .into_iter()
+            .flat_map(|slot| slot.to_fixed_bytes())
+            .collect::<Vec<_>>();
 
-        let gas_oracle =
-            GasPriceOracle::new(OPTIMISM_BEDROCK_GAS_ORACLE_ADDRESS, Arc::clone(&self));
+        let tx: TypedTransaction = Eip1559TransactionRequest {
+            to: Some(address.into()),
+            data: Some(slot_data.into()),
+            ..Default::default()
+        }
+        .into();
 
-        let l1_fee = gas_oracle.get_l1_fee(tx).call().await?;
-        Ok(l1_fee.checked_div(gas_price).unwrap_or(U256::MAX))
+        let result_bytes = self
+            .call_raw(&tx)
+            .state(&state_overrides)
+            .await
+            .context("should call storage loader")?;
+
+        if result_bytes.len() != expected_ret_size {
+            return Err(anyhow::anyhow!(
+                "expected {} bytes, got {}",
+                expected_ret_size,
+                result_bytes.len()
+            )
+            .into());
+        }
+
+        Ok(result_bytes.chunks(32).map(H256::from_slice).collect())
     }
 }
 
@@ -287,4 +275,50 @@ impl<M: Middleware> From<EthersContractError<M>> for ProviderError {
     fn from(e: EthersContractError<M>) -> Self {
         ProviderError::ContractError(e.to_string())
     }
+}
+
+// Gets and decodes the revert data from a provider error, if it is a revert error.
+fn get_revert_data<D: AbiDecode>(error: ProviderError) -> Result<D, ProviderError> {
+    let ProviderError::JsonRpcError(jsonrpc_error) = &error else {
+        return Err(error);
+    };
+    if !jsonrpc_error.is_revert() {
+        return Err(error);
+    }
+    match jsonrpc_error.decode_revert_data() {
+        Some(ret) => Ok(ret),
+        None => Err(error),
+    }
+}
+
+/// Construct a new Ethers provider from a URL and a poll interval.
+///
+/// Creates a provider with a retry client that retries 10 times, with an initial backoff of 500ms.
+pub fn new_provider(
+    url: &str,
+    poll_interval: Option<Duration>,
+) -> anyhow::Result<Arc<EthersProvider<RetryClient<MetricsMiddleware<Http>>>>> {
+    let parsed_url = Url::parse(url).context("provider url should be valid")?;
+
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(1))
+        .build()
+        .context("failed to build reqwest client")?;
+    let http = MetricsMiddleware::new(Http::new_with_client(parsed_url, http_client));
+
+    let client = RetryClientBuilder::default()
+        // these retries are if the server returns a 429
+        .rate_limit_retries(10)
+        // these retries are if the connection is dubious
+        .timeout_retries(3)
+        .initial_backoff(Duration::from_millis(500))
+        .build(http, Box::<HttpRateLimitRetryPolicy>::default());
+
+    let mut provider = EthersProvider::new(client);
+
+    if let Some(poll_interval) = poll_interval {
+        provider = provider.interval(poll_interval);
+    }
+
+    Ok(Arc::new(provider))
 }

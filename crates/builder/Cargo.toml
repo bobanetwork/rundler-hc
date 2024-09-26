@@ -7,7 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-rundler-pool = { path = "../pool" }
 rundler-provider = { path = "../provider" }
 rundler-sim = { path = "../sim" }
 rundler-task = { path = "../task" }
@@ -29,7 +28,7 @@ pin-project.workspace = true
 prost.workspace = true
 parse-display.workspace = true
 reqwest.workspace = true
-rslock = "0.2.2"
+rslock = "0.3.0"
 rusoto_core = { version = "0.48.0", default-features = false, features = ["rustls"] }
 rusoto_kms = { version = "0.48.0", default-features = false, features = ["rustls"] }
 thiserror.workspace = true
@@ -41,12 +40,13 @@ tonic-reflection.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+strum.workspace = true
 
 mockall = {workspace = true, optional = true }
 
 [dev-dependencies]
 mockall.workspace = true
-rundler-pool = { path = "../pool", features = ["test-utils"] }
+rundler-types = { path = "../types", features = ["test-utils"] }
 rundler-provider = { path = "../provider", features = ["test-utils"] }
 rundler-sim = { path = "../sim", features = ["test-utils"] }
 

@@ -11,58 +11,84 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use async_trait::async_trait;
 use ethers::types::{spoof, Address, H256, U64};
 use jsonrpsee::core::RpcResult;
-use rundler_pool::PoolServer;
-use rundler_provider::{EntryPoint, Provider};
-use rundler_sim::{GasEstimate, UserOperationOptionalGas};
+use rundler_types::{pool::Pool, UserOperationVariant};
 
 use super::{api::EthApi, EthApiServer};
-use crate::types::{RichUserOperation, RpcUserOperation, UserOperationReceipt};
+use crate::{
+    types::{
+        FromRpc, RpcGasEstimate, RpcUserOperation, RpcUserOperationByHash,
+        RpcUserOperationOptionalGas, RpcUserOperationReceipt,
+    },
+    utils,
+};
 
-#[async_trait]
-impl<P, E, PS> EthApiServer for EthApi<P, E, PS>
+#[async_trait::async_trait]
+impl<P> EthApiServer for EthApi<P>
 where
-    P: Provider,
-    E: EntryPoint,
-    PS: PoolServer,
+    P: Pool,
 {
     async fn send_user_operation(
         &self,
         op: RpcUserOperation,
         entry_point: Address,
     ) -> RpcResult<H256> {
-        Ok(EthApi::send_user_operation(self, op, entry_point).await?)
+        utils::safe_call_rpc_handler(
+            "eth_sendUserOperation",
+            EthApi::send_user_operation(
+                self,
+                UserOperationVariant::from_rpc(op, &self.chain_spec),
+                entry_point,
+            ),
+        )
+        .await
     }
 
     async fn estimate_user_operation_gas(
         &self,
-        op: UserOperationOptionalGas,
+        op: RpcUserOperationOptionalGas,
         entry_point: Address,
         state_override: Option<spoof::State>,
-    ) -> RpcResult<GasEstimate> {
-        //println!("HC server.rs est_userOp_gas state {:?}", state_override);
-
-        Ok(EthApi::estimate_user_operation_gas(self, op, entry_point, state_override).await?)
+    ) -> RpcResult<RpcGasEstimate> {
+        utils::safe_call_rpc_handler(
+            "eth_estimateUserOperationGas",
+            EthApi::estimate_user_operation_gas(self, op.into(), entry_point, state_override),
+        )
+        .await
     }
 
-    async fn get_user_operation_by_hash(&self, hash: H256) -> RpcResult<Option<RichUserOperation>> {
-        Ok(EthApi::get_user_operation_by_hash(self, hash).await?)
+    async fn get_user_operation_by_hash(
+        &self,
+        hash: H256,
+    ) -> RpcResult<Option<RpcUserOperationByHash>> {
+        utils::safe_call_rpc_handler(
+            "eth_getUserOperationByHash",
+            EthApi::get_user_operation_by_hash(self, hash),
+        )
+        .await
     }
 
     async fn get_user_operation_receipt(
         &self,
         hash: H256,
-    ) -> RpcResult<Option<UserOperationReceipt>> {
-        Ok(EthApi::get_user_operation_receipt(self, hash).await?)
+    ) -> RpcResult<Option<RpcUserOperationReceipt>> {
+        utils::safe_call_rpc_handler(
+            "eth_getUserOperationReceipt",
+            EthApi::get_user_operation_receipt(self, hash),
+        )
+        .await
     }
 
     async fn supported_entry_points(&self) -> RpcResult<Vec<String>> {
-        Ok(EthApi::supported_entry_points(self).await?)
+        utils::safe_call_rpc_handler(
+            "eth_supportedEntryPoints",
+            EthApi::supported_entry_points(self),
+        )
+        .await
     }
 
     async fn chain_id(&self) -> RpcResult<U64> {
-        Ok(EthApi::chain_id(self).await?)
+        utils::safe_call_rpc_handler("eth_chainId", EthApi::chain_id(self)).await
     }
 }

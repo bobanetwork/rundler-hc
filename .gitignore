@@ -17,11 +17,11 @@
 .DS_Store
 .helix
 
-/venv
+# Release artifacts
+dist/
 
+# Hybrid Compute
 __pycache__
-hybrid-compute/__pycache__/
-hybrid-compute/addresses.txt
-hybrid-compute/contracts.json
 hybrid-compute/.env.old
-crates/types/contracts/broadcast
+hybrid-compute/contracts.json
+crates/types/contracts/broadcast/

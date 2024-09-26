@@ -13,19 +13,17 @@
 
 use anyhow::{anyhow, Context};
 use ethers::types::{Address, H256};
-use rundler_task::grpc::protos::{from_bytes, to_le_bytes, ConversionError};
+use rundler_task::grpc::protos::{from_bytes, ConversionError, ToProtoBytes};
 use rundler_types::{
-    Entity as RundlerEntity, EntityType as RundlerEntityType, EntityUpdate as RundlerEntityUpdate,
-    EntityUpdateType as RundlerEntityUpdateType, UserOperation as RundlerUserOperation,
-    ValidTimeRange,
-};
-
-use crate::{
-    mempool::{
-        PoolOperation, Reputation as PoolReputation, ReputationStatus as PoolReputationStatus,
-        StakeInfo as RundlerStakeInfo, StakeStatus as RundlerStakeStatus,
+    chain::ChainSpec,
+    pool::{
+        NewHead as PoolNewHead, PaymasterMetadata as PoolPaymasterMetadata, PoolOperation,
+        Reputation as PoolReputation, ReputationStatus as PoolReputationStatus,
+        StakeStatus as RundlerStakeStatus,
     },
-    server::NewHead as PoolNewHead,
+    v0_6, v0_7, Entity as RundlerEntity, EntityInfos, EntityType as RundlerEntityType,
+    EntityUpdate as RundlerEntityUpdate, EntityUpdateType as RundlerEntityUpdateType,
+    StakeInfo as RundlerStakeInfo, UserOperationVariant, ValidTimeRange,
 };
 
 tonic::include_proto!("op_pool");
@@ -33,29 +31,46 @@ tonic::include_proto!("op_pool");
 pub const OP_POOL_FILE_DESCRIPTOR_SET: &[u8] =
     tonic::include_file_descriptor_set!("op_pool_descriptor");
 
-impl From<&RundlerUserOperation> for UserOperation {
-    fn from(op: &RundlerUserOperation) -> Self {
-        UserOperation {
-            sender: op.sender.0.to_vec(),
-            nonce: to_le_bytes(op.nonce),
-            init_code: op.init_code.to_vec(),
-            call_data: op.call_data.to_vec(),
-            call_gas_limit: to_le_bytes(op.call_gas_limit),
-            verification_gas_limit: to_le_bytes(op.verification_gas_limit),
-            pre_verification_gas: to_le_bytes(op.pre_verification_gas),
-            max_fee_per_gas: to_le_bytes(op.max_fee_per_gas),
-            max_priority_fee_per_gas: to_le_bytes(op.max_priority_fee_per_gas),
-            paymaster_and_data: op.paymaster_and_data.to_vec(),
-            signature: op.signature.to_vec(),
+impl From<&UserOperationVariant> for UserOperation {
+    fn from(op: &UserOperationVariant) -> Self {
+        match op {
+            UserOperationVariant::V0_6(op) => op.into(),
+            UserOperationVariant::V0_7(op) => op.into(),
         }
     }
 }
 
-impl TryFrom<UserOperation> for RundlerUserOperation {
-    type Error = ConversionError;
+impl From<&v0_6::UserOperation> for UserOperation {
+    fn from(op: &v0_6::UserOperation) -> Self {
+        let op = UserOperationV06 {
+            sender: op.sender.to_proto_bytes(),
+            nonce: op.nonce.to_proto_bytes(),
+            init_code: op.init_code.to_proto_bytes(),
+            call_data: op.call_data.to_proto_bytes(),
+            call_gas_limit: op.call_gas_limit.to_proto_bytes(),
+            verification_gas_limit: op.verification_gas_limit.to_proto_bytes(),
+            pre_verification_gas: op.pre_verification_gas.to_proto_bytes(),
+            max_fee_per_gas: op.max_fee_per_gas.to_proto_bytes(),
+            max_priority_fee_per_gas: op.max_priority_fee_per_gas.to_proto_bytes(),
+            paymaster_and_data: op.paymaster_and_data.to_proto_bytes(),
+            signature: op.signature.to_proto_bytes(),
+        };
+        UserOperation {
+            uo: Some(user_operation::Uo::V06(op)),
+        }
+    }
+}
 
-    fn try_from(op: UserOperation) -> Result<Self, Self::Error> {
-        Ok(RundlerUserOperation {
+pub trait TryUoFromProto<T>: Sized {
+    fn try_uo_from_proto(value: T, chain_spec: &ChainSpec) -> Result<Self, ConversionError>;
+}
+
+impl TryUoFromProto<UserOperationV06> for v0_6::UserOperation {
+    fn try_uo_from_proto(
+        op: UserOperationV06,
+        _chain_spec: &ChainSpec,
+    ) -> Result<Self, ConversionError> {
+        Ok(v0_6::UserOperation {
             sender: from_bytes(&op.sender)?,
             nonce: from_bytes(&op.nonce)?,
             init_code: op.init_code.into(),
@@ -68,6 +83,90 @@ impl TryFrom<UserOperation> for RundlerUserOperation {
             paymaster_and_data: op.paymaster_and_data.into(),
             signature: op.signature.into(),
         })
+    }
+}
+
+impl From<&v0_7::UserOperation> for UserOperation {
+    fn from(op: &v0_7::UserOperation) -> Self {
+        let op = UserOperationV07 {
+            sender: op.sender.to_proto_bytes(),
+            nonce: op.nonce.to_proto_bytes(),
+            call_data: op.call_data.to_proto_bytes(),
+            call_gas_limit: op.call_gas_limit.to_proto_bytes(),
+            verification_gas_limit: op.verification_gas_limit.to_proto_bytes(),
+            pre_verification_gas: op.pre_verification_gas.to_proto_bytes(),
+            max_fee_per_gas: op.max_fee_per_gas.to_proto_bytes(),
+            max_priority_fee_per_gas: op.max_priority_fee_per_gas.to_proto_bytes(),
+            signature: op.signature.to_proto_bytes(),
+            paymaster: op.paymaster.map(|p| p.to_proto_bytes()).unwrap_or_default(),
+            paymaster_data: op.paymaster_data.to_proto_bytes(),
+            paymaster_verification_gas_limit: op.paymaster_verification_gas_limit.to_proto_bytes(),
+            paymaster_post_op_gas_limit: op.paymaster_post_op_gas_limit.to_proto_bytes(),
+            factory: op.factory.map(|f| f.to_proto_bytes()).unwrap_or_default(),
+            factory_data: op.factory_data.to_proto_bytes(),
+            entry_point: op.entry_point.to_proto_bytes(),
+            chain_id: op.chain_id,
+        };
+        UserOperation {
+            uo: Some(user_operation::Uo::V07(op)),
+        }
+    }
+}
+
+impl TryUoFromProto<UserOperationV07> for v0_7::UserOperation {
+    fn try_uo_from_proto(
+        op: UserOperationV07,
+        chain_spec: &ChainSpec,
+    ) -> Result<Self, ConversionError> {
+        let mut builder = v0_7::UserOperationBuilder::new(
+            chain_spec,
+            v0_7::UserOperationRequiredFields {
+                sender: from_bytes(&op.sender)?,
+                nonce: from_bytes(&op.nonce)?,
+                call_data: op.call_data.into(),
+                call_gas_limit: from_bytes(&op.call_gas_limit)?,
+                verification_gas_limit: from_bytes(&op.verification_gas_limit)?,
+                pre_verification_gas: from_bytes(&op.pre_verification_gas)?,
+                max_priority_fee_per_gas: from_bytes(&op.max_priority_fee_per_gas)?,
+                max_fee_per_gas: from_bytes(&op.max_fee_per_gas)?,
+                signature: op.signature.into(),
+            },
+        );
+
+        if !op.paymaster.is_empty() {
+            builder = builder.paymaster(
+                from_bytes(&op.paymaster)?,
+                from_bytes(&op.paymaster_verification_gas_limit)?,
+                from_bytes(&op.paymaster_post_op_gas_limit)?,
+                op.paymaster_data.into(),
+            );
+        }
+
+        if !op.factory.is_empty() {
+            builder = builder.factory(from_bytes(&op.factory)?, op.factory_data.into());
+        }
+
+        Ok(builder.build())
+    }
+}
+
+impl TryUoFromProto<UserOperation> for UserOperationVariant {
+    fn try_uo_from_proto(
+        op: UserOperation,
+        chain_spec: &ChainSpec,
+    ) -> Result<Self, ConversionError> {
+        let op = op
+            .uo
+            .expect("User operation should contain user operation oneof");
+
+        match op {
+            user_operation::Uo::V06(op) => Ok(UserOperationVariant::V0_6(
+                v0_6::UserOperation::try_uo_from_proto(op, chain_spec)?,
+            )),
+            user_operation::Uo::V07(op) => Ok(UserOperationVariant::V0_7(
+                v0_7::UserOperation::try_uo_from_proto(op, chain_spec)?,
+            )),
+        }
     }
 }
 
@@ -147,7 +246,7 @@ impl From<&RundlerEntity> for Entity {
     fn from(entity: &RundlerEntity) -> Self {
         Entity {
             kind: EntityType::from(entity.kind).into(),
-            address: entity.address.as_bytes().to_vec(),
+            address: entity.address.to_proto_bytes(),
         }
     }
 }
@@ -180,25 +279,25 @@ impl From<PoolReputationStatus> for ReputationStatus {
     }
 }
 
-impl From<PoolReputation> for Reputation {
-    fn from(rep: PoolReputation) -> Self {
-        Reputation {
-            address: rep.address.as_bytes().to_vec(),
-            ops_seen: rep.ops_seen,
-            ops_included: rep.ops_included,
+impl TryFrom<ReputationStatus> for PoolReputationStatus {
+    type Error = ConversionError;
+
+    fn try_from(status: ReputationStatus) -> Result<Self, Self::Error> {
+        match status {
+            ReputationStatus::Ok => Ok(PoolReputationStatus::Ok),
+            ReputationStatus::Throttled => Ok(PoolReputationStatus::Throttled),
+            ReputationStatus::Banned => Ok(PoolReputationStatus::Banned),
+            ReputationStatus::Unspecified => Err(ConversionError::InvalidEnumValue(status as i32)),
         }
     }
 }
 
-impl TryFrom<i32> for PoolReputationStatus {
-    type Error = ConversionError;
-
-    fn try_from(status: i32) -> Result<Self, Self::Error> {
-        match status {
-            x if x == ReputationStatus::Ok as i32 => Ok(Self::Ok),
-            x if x == ReputationStatus::Throttled as i32 => Ok(Self::Throttled),
-            x if x == ReputationStatus::Banned as i32 => Ok(Self::Banned),
-            _ => Err(ConversionError::InvalidEnumValue(status)),
+impl From<PoolReputation> for Reputation {
+    fn from(rep: PoolReputation) -> Self {
+        Reputation {
+            address: rep.address.to_proto_bytes(),
+            ops_seen: rep.ops_seen,
+            ops_included: rep.ops_included,
         }
     }
 }
@@ -224,7 +323,7 @@ impl TryFrom<StakeStatus> for RundlerStakeStatus {
                 is_staked: stake_status.is_staked,
                 stake_info: RundlerStakeInfo {
                     stake: stake_info.stake.into(),
-                    unstake_delay_sec: stake_info.unstake_delay_sec,
+                    unstake_delay_sec: stake_info.unstake_delay_sec.into(),
                 },
             });
         }
@@ -238,8 +337,8 @@ impl From<RundlerStakeStatus> for StakeStatus {
         StakeStatus {
             is_staked: stake_status.is_staked,
             stake_info: Some(StakeInfo {
-                stake: stake_status.stake_info.stake as u64,
-                unstake_delay_sec: stake_status.stake_info.unstake_delay_sec,
+                stake: stake_status.stake_info.stake.as_u64(),
+                unstake_delay_sec: stake_status.stake_info.unstake_delay_sec.as_u32(),
             }),
         }
     }
@@ -249,28 +348,24 @@ impl From<&PoolOperation> for MempoolOp {
     fn from(op: &PoolOperation) -> Self {
         MempoolOp {
             uo: Some(UserOperation::from(&op.uo)),
-            entry_point: op.entry_point.as_bytes().to_vec(),
-            aggregator: op.aggregator.map_or(vec![], |a| a.as_bytes().to_vec()),
+            entry_point: op.entry_point.to_proto_bytes(),
+            aggregator: op.aggregator.map_or(vec![], |a| a.to_proto_bytes()),
             valid_after: op.valid_time_range.valid_after.seconds_since_epoch(),
             valid_until: op.valid_time_range.valid_until.seconds_since_epoch(),
-            expected_code_hash: op.expected_code_hash.as_bytes().to_vec(),
-            sim_block_hash: op.sim_block_hash.as_bytes().to_vec(),
-            entities_needing_stake: op
-                .entities_needing_stake
-                .iter()
-                .map(|e| EntityType::from(*e).into())
-                .collect(),
+            expected_code_hash: op.expected_code_hash.to_proto_bytes(),
+            sim_block_hash: op.sim_block_hash.to_proto_bytes(),
             account_is_staked: op.account_is_staked,
         }
     }
 }
 
 pub const MISSING_USER_OP_ERR_STR: &str = "Mempool op should contain user operation";
-impl TryFrom<MempoolOp> for PoolOperation {
-    type Error = anyhow::Error;
-
-    fn try_from(op: MempoolOp) -> Result<Self, Self::Error> {
-        let uo = op.uo.context(MISSING_USER_OP_ERR_STR)?.try_into()?;
+impl TryUoFromProto<MempoolOp> for PoolOperation {
+    fn try_uo_from_proto(op: MempoolOp, chain_spec: &ChainSpec) -> Result<Self, ConversionError> {
+        let uo = UserOperationVariant::try_uo_from_proto(
+            op.uo.context(MISSING_USER_OP_ERR_STR)?,
+            chain_spec,
+        )?;
 
         let entry_point = from_bytes(&op.entry_point)?;
 
@@ -284,15 +379,6 @@ impl TryFrom<MempoolOp> for PoolOperation {
 
         let expected_code_hash = H256::from_slice(&op.expected_code_hash);
         let sim_block_hash = H256::from_slice(&op.sim_block_hash);
-        let entities_needing_stake = op
-            .entities_needing_stake
-            .into_iter()
-            .map(|e| {
-                let pe =
-                    EntityType::try_from(e).map_err(|_| ConversionError::InvalidEnumValue(e))?;
-                pe.try_into()
-            })
-            .collect::<Result<Vec<_>, ConversionError>>()?;
 
         Ok(PoolOperation {
             uo,
@@ -300,11 +386,10 @@ impl TryFrom<MempoolOp> for PoolOperation {
             aggregator,
             valid_time_range,
             expected_code_hash,
-            entities_needing_stake,
             sim_block_hash,
             sim_block_number: 0,
             account_is_staked: op.account_is_staked,
-            entity_infos: rundler_sim::EntityInfos::default(),
+            entity_infos: EntityInfos::default(),
         })
     }
 }
@@ -323,8 +408,30 @@ impl TryFrom<NewHead> for PoolNewHead {
 impl From<PoolNewHead> for NewHead {
     fn from(head: PoolNewHead) -> Self {
         Self {
-            block_hash: head.block_hash.as_bytes().to_vec(),
+            block_hash: head.block_hash.to_proto_bytes(),
             block_number: head.block_number,
+        }
+    }
+}
+
+impl TryFrom<PaymasterBalance> for PoolPaymasterMetadata {
+    type Error = ConversionError;
+
+    fn try_from(paymaster_balance: PaymasterBalance) -> Result<Self, Self::Error> {
+        Ok(Self {
+            address: from_bytes(&paymaster_balance.address)?,
+            confirmed_balance: from_bytes(&paymaster_balance.confirmed_balance)?,
+            pending_balance: from_bytes(&paymaster_balance.pending_balance)?,
+        })
+    }
+}
+
+impl From<PoolPaymasterMetadata> for PaymasterBalance {
+    fn from(paymaster_metadata: PoolPaymasterMetadata) -> Self {
+        Self {
+            address: paymaster_metadata.address.as_bytes().to_vec(),
+            confirmed_balance: paymaster_metadata.confirmed_balance.to_proto_bytes(),
+            pending_balance: paymaster_metadata.pending_balance.to_proto_bytes(),
         }
     }
 }

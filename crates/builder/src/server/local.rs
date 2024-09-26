@@ -11,24 +11,17 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-
 use async_trait::async_trait;
 use ethers::types::{Address, H256};
 use rundler_task::server::{HealthCheck, ServerStatus};
+use rundler_types::builder::{Builder, BuilderError, BuilderResult, BundlingMode};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    bundle_sender::{SendBundleRequest, SendBundleResult},
-    server::{BuilderResult, BuilderServer, BuilderServerError, BundlingMode},
-};
+use crate::bundle_sender::{BundleSenderAction, SendBundleRequest, SendBundleResult};
 
 /// Local builder server builder
 #[derive(Debug)]
@@ -57,17 +50,12 @@ impl LocalBuilderBuilder {
     /// Run the local builder server, consuming the builder
     pub fn run(
         self,
-        manual_bundling_mode: Arc<AtomicBool>,
-        send_bundle_requesters: Vec<mpsc::Sender<SendBundleRequest>>,
+        bundle_sender_actions: Vec<mpsc::Sender<BundleSenderAction>>,
         entry_points: Vec<Address>,
         shutdown_token: CancellationToken,
     ) -> JoinHandle<anyhow::Result<()>> {
-        let mut runner = LocalBuilderServerRunner::new(
-            self.req_receiver,
-            manual_bundling_mode,
-            send_bundle_requesters,
-            entry_points,
-        );
+        let mut runner =
+            LocalBuilderServerRunner::new(self.req_receiver, bundle_sender_actions, entry_points);
         tokio::spawn(async move { runner.run(shutdown_token).await })
     }
 }
@@ -80,8 +68,7 @@ pub struct LocalBuilderHandle {
 
 struct LocalBuilderServerRunner {
     req_receiver: mpsc::Receiver<ServerRequest>,
-    send_bundle_requesters: Vec<mpsc::Sender<SendBundleRequest>>,
-    manual_bundling_mode: Arc<AtomicBool>,
+    bundle_sender_actions: Vec<mpsc::Sender<BundleSenderAction>>,
     entry_points: Vec<Address>,
 }
 
@@ -103,13 +90,13 @@ impl LocalBuilderHandle {
 }
 
 #[async_trait]
-impl BuilderServer for LocalBuilderHandle {
+impl Builder for LocalBuilderHandle {
     async fn get_supported_entry_points(&self) -> BuilderResult<Vec<Address>> {
         let req = ServerRequestKind::GetSupportedEntryPoints;
         let resp = self.send(req).await?;
         match resp {
             ServerResponse::GetSupportedEntryPoints { entry_points } => Ok(entry_points),
-            _ => Err(BuilderServerError::UnexpectedResponse),
+            _ => Err(BuilderError::UnexpectedResponse),
         }
     }
 
@@ -118,7 +105,7 @@ impl BuilderServer for LocalBuilderHandle {
         let resp = self.send(req).await?;
         match resp {
             ServerResponse::DebugSendBundleNow { hash, block_number } => Ok((hash, block_number)),
-            _ => Err(BuilderServerError::UnexpectedResponse),
+            _ => Err(BuilderError::UnexpectedResponse),
         }
     }
 
@@ -127,7 +114,7 @@ impl BuilderServer for LocalBuilderHandle {
         let resp = self.send(req).await?;
         match resp {
             ServerResponse::DebugSetBundlingMode => Ok(()),
-            _ => Err(BuilderServerError::UnexpectedResponse),
+            _ => Err(BuilderError::UnexpectedResponse),
         }
     }
 }
@@ -150,14 +137,12 @@ impl HealthCheck for LocalBuilderHandle {
 impl LocalBuilderServerRunner {
     fn new(
         req_receiver: mpsc::Receiver<ServerRequest>,
-        manual_bundling_mode: Arc<AtomicBool>,
-        send_bundle_requesters: Vec<mpsc::Sender<SendBundleRequest>>,
+        bundle_sender_actions: Vec<mpsc::Sender<BundleSenderAction>>,
         entry_points: Vec<Address>,
     ) -> Self {
         Self {
             req_receiver,
-            manual_bundling_mode,
-            send_bundle_requesters,
+            bundle_sender_actions,
             entry_points,
         }
     }
@@ -177,16 +162,14 @@ impl LocalBuilderServerRunner {
                                 })
                             },
                             ServerRequestKind::DebugSendBundleNow => {
-                                if !self.manual_bundling_mode.load(Ordering::Relaxed) {
-                                    break 'a Err(anyhow::anyhow!("bundling mode is not manual").into())
-                                } else if self.send_bundle_requesters.len() != 1 {
+                                if self.bundle_sender_actions.len() != 1 {
                                     break 'a Err(anyhow::anyhow!("more than 1 bundle builder not supported in debug mode").into())
                                 }
 
                                 let (tx, rx) = oneshot::channel();
-                                match self.send_bundle_requesters[0].send(SendBundleRequest{
+                                match self.bundle_sender_actions[0].send(BundleSenderAction::SendBundle(SendBundleRequest{
                                     responder: tx
-                                }).await {
+                                })).await {
                                     Ok(()) => {},
                                     Err(e) => break 'a Err(anyhow::anyhow!("failed to send send bundle request: {}", e.to_string()).into())
                                 }
@@ -203,15 +186,20 @@ impl LocalBuilderServerRunner {
                                     SendBundleResult::NoOperationsInitially => {
                                         Err(anyhow::anyhow!("no ops to send").into())
                                     },
-                                    SendBundleResult::NoOperationsAfterFeeIncreases { .. } => {
-                                        Err(anyhow::anyhow!("bundle initially had operations, but after increasing gas fees it was empty").into())
-                                    },
                                     SendBundleResult::StalledAtMaxFeeIncreases => Err(anyhow::anyhow!("stalled at max fee increases").into()),
                                     SendBundleResult::Error(e) => Err(anyhow::anyhow!("send bundle error: {e:?}").into()),
                                 }
                             },
                             ServerRequestKind::DebugSetBundlingMode { mode } => {
-                                self.manual_bundling_mode.store(mode == BundlingMode::Manual, Ordering::Relaxed);
+                                if self.bundle_sender_actions.len() != 1 {
+                                    break 'a Err(anyhow::anyhow!("more than 1 bundle builder not supported in debug mode").into())
+                                }
+
+                                match self.bundle_sender_actions[0].send(BundleSenderAction::ChangeMode(mode)).await {
+                                    Ok(()) => {},
+                                    Err(e) => break 'a Err(anyhow::anyhow!("failed to change bundler mode: {}", e.to_string()).into())
+                                }
+
                                 Ok(ServerResponse::DebugSetBundlingMode)
                             },
                         }

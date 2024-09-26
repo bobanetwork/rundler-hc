@@ -4,16 +4,12 @@ out = 'out'
 libs = ['lib']
 test = 'test'
 cache_path = 'cache'
+solc_version = '0.8.26'
 cbor_metadata = true
 
 remappings = [
     'forge-std/=lib/forge-std/src',
     'ds-test/=lib/forge-std/lib/ds-test/src/',
-    'account-abstraction/=lib/account-abstraction/contracts/',
-    '@openzeppelin/=lib/openzeppelin-contracts/'
+    'account-abstraction/v0_6=lib/account-abstraction-versions/v0_6/contracts/',
+    'account-abstraction/v0_7=lib/account-abstraction-versions/v0_7/contracts/',
 ]
-
-[etherscan]
-unknown_chain = { key = "Zh6Ck2RK9cewB2bOIXBAvXdpkVhLUjYz", chain=28882, url="https://api.tenderly.co/api/v1/account/mmontour1306/project/aa-hc-sepolia/etherscan/verify/network/28882/public" }
-#unknown_chain = { key = "Zh6Ck2RK9cewB2bOIXBAvXdpkVhLUjYz", chain=28882, url="https://boba-sepolia.gateway.tenderly.co/27jDOLrTf7Wu4ubQGL3tY" }
-

@@ -22,11 +22,14 @@
 //! A provider is a type that provides access to blockchain data and functions
 
 mod ethers;
+pub use ethers::{
+    provider::new_provider, EntryPointV0_6 as EthersEntryPointV0_6,
+    EntryPointV0_7 as EthersEntryPointV0_7,
+};
 
 mod traits;
-pub use traits::{
-    AggregatorOut, AggregatorSimOut, EntryPoint, HandleOpsOut, PaymasterHelper, Provider,
-    ProviderError, ProviderResult, StakeManager, NonceManager,
-};
 #[cfg(any(test, feature = "test-utils"))]
-pub use traits::{MockEntryPoint, MockPaymasterHelper, MockProvider, MockStakeManager, MockNonceManager};
+pub use traits::test_utils::*;
+#[cfg(any(test, feature = "test-utils"))]
+pub use traits::MockProvider;
+pub use traits::*;
