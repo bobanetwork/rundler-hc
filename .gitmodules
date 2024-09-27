@@ -26,3 +26,6 @@
 	path = test/spec-tests/v0_7/bundler-spec-tests
 	url = git@github.com:alchemyplatform/bundler-spec-tests.git
 	ignore = dirty
+[submodule "crates/types/contracts/lib/safe-smart-account"]
+	path = crates/types/contracts/lib/safe-smart-account
+	url = https://github.com/safe-global/safe-smart-account.git

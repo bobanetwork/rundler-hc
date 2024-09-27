@@ -36,6 +36,17 @@ fn generate_v0_6_bindings() -> Result<(), Box<dyn error::Error>> {
         "generate ABIs",
     )?;
 
+    // hybrid compute
+    run_command(
+        forge_build("../lib/account-abstraction-versions/v0_6/contracts")
+            .arg("--remappings")
+            .arg("@openzeppelin/=lib/openzeppelin-contracts-versions/v4_9")
+            .arg("--remappings")
+            .arg("@gnosis.pm/safe-contracts=lib/safe-smart-account"),
+        "https://getfoundry.sh/",
+        "generate ABIs",
+    )?;
+
     MultiAbigen::from_abigens([
         abigen_of("v0_6", "IEntryPoint")?,
         abigen_of("v0_6", "IAggregator")?,
@@ -47,7 +58,7 @@ fn generate_v0_6_bindings() -> Result<(), Box<dyn error::Error>> {
         abigen_of("v0_6", "CallGasEstimationProxy")?,
         // hybrid compute
         abigen_of("v0_6", "INonceManager")?,
-        abigen_of("",     "HCHelper")?,
+        abigen_of("v0_6", "HCHelper")?,
     ])
     .build()?
     .write_to_module("src/contracts/v0_6", false)?;
