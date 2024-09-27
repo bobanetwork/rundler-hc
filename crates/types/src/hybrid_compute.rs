@@ -133,7 +133,7 @@ pub fn init(
     cfg.sys_privkey = sys_privkey;
     cfg.entry_point = entry_point;
     cfg.chain_id = chain_id;
-    cfg.node_http = node_http.clone();
+    cfg.node_http.clone_from(&node_http);
 }
 
 /// Set the EOA address which the bundler is using. Erigon, but not geth, needs this for tx simulation
@@ -189,11 +189,11 @@ pub fn check_trigger(rev: &Bytes) -> bool {
     println!("HC trigger check in {:?}", rev);
     const TRIGGER: [u8; 8] = [0x5f, 0x48, 0x43, 0x5f, 0x54, 0x52, 0x49, 0x47];
 
-    if rev.len() >= MIN_REQ_LEN && &rev[0..8] == TRIGGER {
+    if rev.len() >= MIN_REQ_LEN && rev[0..8] == TRIGGER {
         println!("HC HC triggered");
         return true;
     }
-    return false;
+    false
 }
 
 /// Key used to store response in the HCHelper mapping
@@ -221,8 +221,7 @@ pub fn hc_sub_key(revert_data: &Bytes) -> H256 {
 
 /// Endpoint address (address of HybridAccount which called HCHelper)
 pub fn hc_ep_addr(revert_data: &Bytes) -> Address {
-    let ep_addr = Address::from_slice(&revert_data[8..28]);
-    ep_addr
+    Address::from_slice(&revert_data[8..28])
 }
 
 /// Extract the function selector called by the HC operation
@@ -237,6 +236,7 @@ pub fn hc_req_payload(revert_data: &Bytes) -> Vec<u8> {
 }
 
 /// Internal function to generate a UserOperation for an offchain response
+#[allow(clippy::too_many_arguments)] // FIXME later
 fn make_external_op(
     src_addr: Address,
     nonce: U256,
@@ -270,7 +270,7 @@ fn make_external_op(
 
     let mut new_op: UserOperationV0_6 = UserOperationV0_6 {
         sender: ep_addr,
-        nonce: oo_nonce.into(),
+        nonce: oo_nonce,
         init_code: Bytes::new(),
         call_data: call_data.clone(),
         call_gas_limit: U256::from(call_gas),
@@ -288,6 +288,7 @@ fn make_external_op(
 }
 
 /// Processes an external hybrid compute op.
+#[allow(clippy::too_many_arguments)] // FIXME later
 pub async fn external_op(
     op_key: H256,
     src_addr: Address,
@@ -335,8 +336,8 @@ pub async fn external_op(
     }
 
     let ent: HcEntry = HcEntry {
-        sub_key: sub_key,
-        map_key: map_key,
+        sub_key,
+        map_key,
         user_op: new_op.clone(),
         ts: SystemTime::now(),
         oc_gas: U256::zero(),
@@ -367,7 +368,7 @@ fn make_err_op(
 
     let new_op: UserOperationV0_6 = UserOperationV0_6 {
         sender: cfg.sys_account,
-        nonce: oo_nonce.into(),
+        nonce: oo_nonce,
         init_code: Bytes::new(),
         call_data: call_data.clone(),
         call_gas_limit: U256::from(0x40000),
@@ -383,6 +384,7 @@ fn make_err_op(
 }
 
 /// Encapsulate an error code into a UserOperation
+#[allow(clippy::too_many_arguments)] // FIXME later
 pub async fn err_op(
     op_key: H256,
     entry_point: Address,
@@ -410,8 +412,8 @@ pub async fn err_op(
     println!("HC err_op signed {:?} {:?}", signature, new_op.signature);
 
     let ent: HcEntry = HcEntry {
-        sub_key: sub_key,
-        map_key: map_key,
+        sub_key,
+        map_key,
         user_op: new_op.clone(),
         ts: SystemTime::now(),
         oc_gas: U256::zero(),
@@ -427,7 +429,7 @@ pub async fn rr_op(cfg: &HcCfg, oo_nonce: U256, keys: Vec<H256>) -> UserOperatio
 
     let mut new_op: UserOperationV0_6 = UserOperationV0_6 {
         sender: cfg.sys_account,
-        nonce: oo_nonce.into(),
+        nonce: oo_nonce,
         init_code: Bytes::new(),
         call_data: call_data.clone(),
         call_gas_limit: U256::from(0x6000),
@@ -520,8 +522,8 @@ pub fn hc_set_pvg(key: H256, needed_pvg: U256, oc_gas: U256) {
         map_key: ent.map_key,
         user_op: ent.user_op.clone(),
         ts: ent.ts,
-        needed_pvg: needed_pvg,
-        oc_gas: oc_gas,
+        needed_pvg,
+        oc_gas,
     };
     map.remove(&key);
     map.insert(key, new_ent);

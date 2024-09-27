@@ -259,7 +259,7 @@ where
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        if ops_with_simulations.len() > 0 {
+        if !ops_with_simulations.is_empty() {
             println!(
                 "HC bundle_proposer before assemble_context len {:?}",
                 ops_with_simulations.len()
@@ -671,7 +671,7 @@ where
                 });
         }
 
-        if cleanup_keys.len() > 0 {
+        if !cleanup_keys.is_empty() {
             println!("HC cleanup_keys {:?}", cleanup_keys);
             let cfg = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
             let c_nonce = self

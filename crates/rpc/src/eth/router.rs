@@ -325,8 +325,8 @@ where
 
     async fn get_nonce(&self, addr: Address, key: U256) -> anyhow::Result<U256> {
         let output = self.entry_point.get_nonce(addr, key).await;
-        if output.is_ok() {
-            return Ok(output.unwrap());
+        if let Ok(nonce) = output {
+            return Ok(nonce);
         }
         Err(anyhow::anyhow!("get_nonce() failed"))
     }

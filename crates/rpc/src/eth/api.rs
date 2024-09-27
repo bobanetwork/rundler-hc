@@ -130,13 +130,10 @@ where
             .await;
 
         println!("HC result_v {:?}", result_v);
-        match result_v {
-            Err(EthRpcError::ExecutionReverted(ref msg)) => {
-                if *msg == "_HC_VRFY".to_string() {
-                    return true;
-                }
+        if let Err(EthRpcError::ExecutionReverted(ref msg)) = result_v {
+            if *msg == "_HC_VRFY" {
+                return true;
             }
-            _ => {}
         }
 
         false
@@ -394,21 +391,18 @@ where
             if let Err(EthRpcError::ExecutionReverted(ref r2_err)) = r2a {
                 // FIXME
                 println!("HC op_tmp_2 gas estimation failed (RevertInValidation)");
-                let msg = "HC04: Offchain validation failed: ".to_string() + &r2_err;
+                let msg = "HC04: Offchain validation failed: ".to_string() + r2_err;
                 return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
             };
 
-            let r2: RpcGasEstimateV0_6;
-            match r2a? {
-                RpcGasEstimate::V0_6(abc) => {
-                    r2 = abc;
-                }
+            let r2: RpcGasEstimateV0_6 = match r2a? {
+                RpcGasEstimate::V0_6(estimate) => estimate,
                 _ => {
                     return Err(EthRpcError::Internal(anyhow::anyhow!(
                         "HC04 offchain_op gas estimation failed"
                     )));
                 }
-            }
+            };
 
             // The current formula used to estimate gas usage in the offchain_rpc service
             // sometimes underestimates the true cost. For now all we can do is error here.
@@ -421,8 +415,7 @@ where
             let offchain_gas =
                 r2.pre_verification_gas + r2.verification_gas_limit + r2.call_gas_limit;
 
-            let mut cleanup_keys: Vec<H256> = Vec::new();
-            cleanup_keys.push(map_key);
+            let cleanup_keys: Vec<H256> = vec![map_key];
             let c_nonce = self
                 .router
                 .get_nonce(&entry_point, self.hc.sys_account, U256::zero())
@@ -453,17 +446,14 @@ where
                     at_price,
                 )
                 .await;
-            let r4: RpcGasEstimateV0_6;
-            match r4a? {
-                RpcGasEstimate::V0_6(abc) => {
-                    r4 = abc;
-                }
+            let r4: RpcGasEstimateV0_6 = match r4a? {
+                RpcGasEstimate::V0_6(estimate) => estimate,
                 _ => {
                     return Err(EthRpcError::Internal(anyhow::anyhow!(
                         "HC04 cleanup_op gas estimation failed"
                     )));
                 }
-            }
+            };
 
             let cleanup_gas =
                 r4.pre_verification_gas + r4.verification_gas_limit + r4.call_gas_limit;
@@ -498,14 +488,14 @@ where
                 return Err(EthRpcError::Internal(anyhow::anyhow!(err_msg)));
             }
 
-            return Ok(RpcGasEstimateV0_6 {
+            Ok(RpcGasEstimateV0_6 {
                 pre_verification_gas: (needed_pvg + PVG_PAD),
                 verification_gas_limit: r3.verification_gas_limit,
                 call_gas_limit: r3.call_gas_limit,
             }
-            .into());
+            .into())
         } else {
-            return result2;
+            result2
         }
     }
 
@@ -530,8 +520,8 @@ where
 
         println!("HC api.rs estimate_gas result1 {:?}", result);
         match result {
-            Ok(ref estimate) => match estimate {
-                RpcGasEstimate::V0_6(estimate6) => {
+            Ok(ref estimate) => {
+                if let RpcGasEstimate::V0_6(estimate6) = estimate {
                     return Ok(RpcGasEstimateV0_6 {
                         pre_verification_gas: estimate6.pre_verification_gas,
                         verification_gas_limit: estimate6.verification_gas_limit + VG_PAD,
@@ -539,8 +529,7 @@ where
                     }
                     .into());
                 }
-                _ => {}
-            },
+            }
             Err(EthRpcError::ExecutionRevertedWithBytes(ref r)) => {
                 if hybrid_compute::check_trigger(&r.revert_data) {
                     let bn = 0; //self.provider.get_block_number().await.unwrap();
