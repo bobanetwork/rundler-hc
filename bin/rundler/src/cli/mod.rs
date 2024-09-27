@@ -24,6 +24,7 @@ mod rpc;
 mod tracing;
 
 use builder::BuilderCliArgs;
+use ethers::types::{Address, H256};
 use node::NodeCliArgs;
 use pool::PoolCliArgs;
 use rpc::RpcCliArgs;
@@ -31,8 +32,6 @@ use rundler_rpc::{EthApiSettings, RundlerApiSettings};
 use rundler_sim::{
     EstimationSettings, PrecheckSettings, PriorityFeeMode, SimulationSettings, MIN_CALL_GAS_LIMIT,
 };
-
-use ethers::types::{Address, H256};
 use rundler_types::hybrid_compute;
 
 /// Main entry point for the CLI

@@ -14,14 +14,20 @@
 use std::{collections::HashMap, future::Future, pin::Pin};
 
 use ethers::{
-    types::{spoof, Address, H256, U64},
+    types::{spoof, Address, Bytes, H256, U256, U64},
     utils::{hex, to_checksum},
 };
 use futures_util::future;
+use jsonrpsee::{
+    core::{client::ClientT, params::ObjectParams, JsonValue},
+    http_client::HttpClientBuilder,
+};
 use rundler_types::{
-    chain::ChainSpec, contracts::v0_6::hc_helper::HCHelper as HH2,
-    contracts::v0_6::simple_account::SimpleAccount, pool::Pool, UserOperation,
-    UserOperationOptionalGas, UserOperationVariant,
+    chain::ChainSpec,
+    contracts::v0_6::{hc_helper::HCHelper as HH2, simple_account::SimpleAccount},
+    hybrid_compute,
+    pool::Pool,
+    UserOperation, UserOperationOptionalGas, UserOperationVariant,
 };
 use rundler_utils::log::LogOnError;
 use tracing::Level;
@@ -30,15 +36,9 @@ use super::{
     error::{EthResult, EthRpcError},
     router::EntryPointRouter,
 };
-use crate::types::{RpcGasEstimate, RpcUserOperationByHash, RpcUserOperationReceipt};
-
-use crate::types::RpcGasEstimateV0_6;
-use ethers::types::{Bytes, U256};
-use jsonrpsee::{
-    core::{client::ClientT, params::ObjectParams, JsonValue},
-    http_client::HttpClientBuilder,
+use crate::types::{
+    RpcGasEstimate, RpcGasEstimateV0_6, RpcUserOperationByHash, RpcUserOperationReceipt,
 };
-use rundler_types::hybrid_compute;
 
 /// Settings for the `eth_` API
 #[derive(Copy, Clone, Debug)]

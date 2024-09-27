@@ -21,10 +21,10 @@ use futures_util::StreamExt;
 use mockall::automock;
 use rundler_provider::{BundleHandler, EntryPoint};
 use rundler_sim::ExpectedStorage;
-use rundler_types::hybrid_compute;
 use rundler_types::{
     builder::BundlingMode,
     chain::ChainSpec,
+    hybrid_compute,
     pool::{NewHead, Pool},
     EntityUpdate, UserOperation,
 };

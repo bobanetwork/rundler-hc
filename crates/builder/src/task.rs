@@ -29,7 +29,7 @@ use rundler_sim::{
 };
 use rundler_task::Task;
 use rundler_types::{
-    chain::ChainSpec, pool::Pool, v0_6, v0_7, EntryPointVersion, UserOperation,
+    chain::ChainSpec, hybrid_compute, pool::Pool, v0_6, v0_7, EntryPointVersion, UserOperation,
     UserOperationVariant,
 };
 use rundler_utils::{emit::WithEntryPoint, handle};
@@ -51,8 +51,6 @@ use crate::{
     signer::{BundlerSigner, KmsSigner, LocalSigner},
     transaction_tracker::{self, TransactionTrackerImpl},
 };
-
-use rundler_types::hybrid_compute;
 
 /// Builder task arguments
 #[derive(Debug)]

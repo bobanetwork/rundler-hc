@@ -11,20 +11,22 @@
   ERR_CONNECT  = 6 Unable to connect to RPC server (incl. 500-class HTTP error). Considered to be a temporary failure.
 */
 
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::Mutex,
+    time::{Duration, SystemTime},
+};
+
 use ethers::{
     abi::{AbiDecode, AbiEncode},
     signers::{LocalWallet, Signer},
     types::{Address, BigEndianHash, Bytes, RecoveryMessage::Data, H256, U256},
     utils::keccak256,
 };
-
-use crate::user_operation::UserOperation;
-use crate::v0_6::UserOperation as UserOperationV0_6;
-
-use std::{collections::HashMap, str::FromStr, sync::Mutex};
-
 use once_cell::sync::Lazy;
-use std::time::{Duration, SystemTime};
+
+use crate::{user_operation::UserOperation, v0_6::UserOperation as UserOperationV0_6};
 
 #[derive(Clone, Debug)]
 /// Error code

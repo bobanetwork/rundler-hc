@@ -23,8 +23,6 @@ use ethers::{
         H256, U256,
     },
 };
-use rundler_types::hybrid_compute;
-
 use rundler_types::{
     chain::ChainSpec,
     contracts::v0_6::{
@@ -36,6 +34,7 @@ use rundler_types::{
             UserOpsPerAggregator as UserOpsPerAggregatorV0_6,
         },
     },
+    hybrid_compute,
     v0_6::UserOperation,
     GasFees, UserOpsPerAggregator, ValidationError, ValidationOutput, ValidationRevert,
 };

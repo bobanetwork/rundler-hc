@@ -37,6 +37,7 @@ use rundler_sim::{
 };
 use rundler_types::{
     chain::ChainSpec,
+    hybrid_compute,
     pool::{Pool, PoolOperation, SimulationViolation},
     Entity, EntityInfo, EntityInfos, EntityType, EntityUpdate, EntityUpdateType, GasFees,
     Timestamp, UserOperation, UserOperationVariant, UserOpsPerAggregator, BUNDLE_BYTE_OVERHEAD,
@@ -47,7 +48,6 @@ use tokio::{sync::broadcast, try_join};
 use tracing::{error, info, warn};
 
 use crate::emit::{BuilderEvent, ConditionNotMetReason, OpRejectionReason, SkipReason};
-use rundler_types::hybrid_compute;
 
 /// Extra buffer percent to add on the bundle transaction gas estimate to be sure it will be enough
 const BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT: u64 = 5;

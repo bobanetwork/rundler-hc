@@ -11,13 +11,12 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use ethers::types::{Bytes, U128};
+use ethers::types::{Bytes, U128, U256};
 #[cfg(feature = "test-utils")]
 use mockall::automock;
 use rundler_types::{GasEstimate, ValidationRevert};
 
 use crate::precheck::MIN_CALL_GAS_LIMIT;
-use ethers::types::U256;
 
 mod estimate_verification_gas;
 pub use estimate_verification_gas::{VerificationGasEstimator, VerificationGasEstimatorImpl};
