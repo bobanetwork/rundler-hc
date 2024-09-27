@@ -18,8 +18,8 @@ use ethers::types::{
     BlockId, GethDebugTracerType, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace,
 };
 use rundler_provider::{Provider, SimulationProvider};
-use rundler_types::UserOperation as UserOperation2;
 use rundler_types::v0_6::UserOperation;
+use rundler_types::UserOperation as UserOperation2;
 use serde::Deserialize;
 
 use crate::simulation::context::TracerOutput;

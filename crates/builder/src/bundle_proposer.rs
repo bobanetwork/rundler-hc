@@ -164,7 +164,11 @@ where
     UO: UserOperation + From<UserOperationVariant>,
     UserOperationVariant: AsRef<UO>,
     S: Simulator<UO = UO>,
-    E: EntryPoint + SignatureAggregator<UO = UO> + BundleHandler<UO = UO> + L1GasProvider<UO = UO> + SimulationProvider<UO = UO>,
+    E: EntryPoint
+        + SignatureAggregator<UO = UO>
+        + BundleHandler<UO = UO>
+        + L1GasProvider<UO = UO>
+        + SimulationProvider<UO = UO>,
     P: Provider,
     M: Pool,
 {
@@ -255,9 +259,12 @@ where
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-	if ops_with_simulations.len() > 0 {
-	    println!("HC bundle_proposer before assemble_context len {:?}", ops_with_simulations.len());
-	}
+        if ops_with_simulations.len() > 0 {
+            println!(
+                "HC bundle_proposer before assemble_context len {:?}",
+                ops_with_simulations.len()
+            );
+        }
         let mut context = self
             .assemble_context(ops_with_simulations, balances_by_paymaster)
             .await;
@@ -310,7 +317,11 @@ where
     UO: UserOperation + From<UserOperationVariant>,
     UserOperationVariant: AsRef<UO>,
     S: Simulator<UO = UO>,
-    E: EntryPoint + SignatureAggregator<UO = UO> + BundleHandler<UO = UO> + L1GasProvider<UO = UO> + SimulationProvider<UO = UO>,
+    E: EntryPoint
+        + SignatureAggregator<UO = UO>
+        + BundleHandler<UO = UO>
+        + L1GasProvider<UO = UO>
+        + SimulationProvider<UO = UO>,
     P: Provider,
     M: Pool,
 {
@@ -399,23 +410,34 @@ where
             }
         };
 
-	let hc_hash = op.uo.hc_hash();
-        let mut is_hc:bool = false;
+        let hc_hash = op.uo.hc_hash();
+        let mut is_hc: bool = false;
 
-	if let Some(hc_pvg) = hybrid_compute::hc_get_pvg(hc_hash) {
-	    println!("HC pvg override for op_hash {:?} {:?} {:?}", hc_hash, required_pvg, hc_pvg);
-	    is_hc = true;
+        if let Some(hc_pvg) = hybrid_compute::hc_get_pvg(hc_hash) {
+            println!(
+                "HC pvg override for op_hash {:?} {:?} {:?}",
+                hc_hash, required_pvg, hc_pvg
+            );
+            is_hc = true;
             if hc_pvg > required_pvg {
-	        required_pvg = hc_pvg;
+                required_pvg = hc_pvg;
             }
-	} else {
-	    println!("HC no pvg override for op_hash {:?}, required_pvg {:?}", hc_hash, required_pvg);
-	}
+        } else {
+            println!(
+                "HC no pvg override for op_hash {:?}, required_pvg {:?}",
+                hc_hash, required_pvg
+            );
+        }
 
         if op.uo.pre_verification_gas() < required_pvg {
             if is_hc {
                 // Workaround - reject op here instead of waiting indefinitely.
-                println!("HC WARN rejecting op_hash {:?}, pre_verifification_gas {:?} < {:?}", hc_hash, op.uo.pre_verification_gas(), required_pvg);
+                println!(
+                    "HC WARN rejecting op_hash {:?}, pre_verifification_gas {:?} < {:?}",
+                    hc_hash,
+                    op.uo.pre_verification_gas(),
+                    required_pvg
+                );
 
                 self.emit(BuilderEvent::rejected_op(
                     self.builder_index,
@@ -506,7 +528,7 @@ where
         let mut paymasters_to_reject = Vec::<EntityInfo>::new();
 
         let mut gas_spent = self.settings.chain_spec.transaction_intrinsic_gas;
-        let mut cleanup_keys:Vec<H256> = Vec::new();
+        let mut cleanup_keys: Vec<H256> = Vec::new();
         let mut constructed_bundle_size = BUNDLE_BYTE_OVERHEAD;
         for (po, simulation) in ops_with_simulations {
             let op = po.clone().uo;
@@ -568,10 +590,13 @@ where
             let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
             if hc_ent.is_some() {
                 required_gas += hc_ent.clone().unwrap().oc_gas;
-                println!("HC bundle_properer found hc_ent {:?} op_hash {:?} required_gas {:?}", hc_ent, hc_hash, required_gas);
+                println!(
+                    "HC bundle_properer found hc_ent {:?} op_hash {:?} required_gas {:?}",
+                    hc_ent, hc_hash, required_gas
+                );
             }
 
-           if required_gas > self.settings.max_bundle_gas.into() {
+            if required_gas > self.settings.max_bundle_gas.into() {
                 continue;
             }
 
@@ -612,18 +637,24 @@ where
             if hc_ent.is_some() {
                 gas_spent += hc_ent.clone().unwrap().oc_gas;
                 //println!("HC insert, hc_ent {:?}", hc_ent);
-                let u_op2:UserOperationVariant = hc_ent.clone().unwrap().user_op.into();
+                let u_op2: UserOperationVariant = hc_ent.clone().unwrap().user_op.into();
 
-                let sim_result = self.simulator.simulate_validation(u_op2.clone().into(), None, None).await.expect("Failed to unwrap sim_result");  // FIXME
+                let sim_result = self
+                    .simulator
+                    .simulate_validation(u_op2.clone().into(), None, None)
+                    .await
+                    .expect("Failed to unwrap sim_result"); // FIXME
 
                 context
                     .groups_by_aggregator
                     .entry(simulation.aggregator_address())
                     .or_default()
                     .ops_with_simulations
-                    .push(OpWithSimulation { op:u_op2.into(), simulation:sim_result });
+                    .push(OpWithSimulation {
+                        op: u_op2.into(),
+                        simulation: sim_result,
+                    });
                 cleanup_keys.push(hc_ent.clone().unwrap().map_key);
-
             }
 
             constructed_bundle_size =
@@ -641,20 +672,34 @@ where
         }
 
         if cleanup_keys.len() > 0 {
-	    println!("HC cleanup_keys {:?}", cleanup_keys);
-	    let cfg = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
-	    let c_nonce = self.entry_point.get_nonce(cfg.sys_account, U256::zero()).await.unwrap();
-	    let cleanup_op:UserOperationVariant = hybrid_compute::rr_op(&cfg, c_nonce, cleanup_keys).await.into();
+            println!("HC cleanup_keys {:?}", cleanup_keys);
+            let cfg = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
+            let c_nonce = self
+                .entry_point
+                .get_nonce(cfg.sys_account, U256::zero())
+                .await
+                .unwrap();
+            let cleanup_op: UserOperationVariant =
+                hybrid_compute::rr_op(&cfg, c_nonce, cleanup_keys)
+                    .await
+                    .into();
 
-            let cleanup_sim = self.simulator.simulate_validation(cleanup_op.clone().into(), None, None).await.expect("Failed to unwrap sim_result");  // FIXME
+            let cleanup_sim = self
+                .simulator
+                .simulate_validation(cleanup_op.clone().into(), None, None)
+                .await
+                .expect("Failed to unwrap sim_result"); // FIXME
 
-             context
+            context
                 .groups_by_aggregator
                 .entry(None)
                 .or_default()
                 .ops_with_simulations
-                .push(OpWithSimulation { op:cleanup_op.into(), simulation:cleanup_sim });
-	}
+                .push(OpWithSimulation {
+                    op: cleanup_op.into(),
+                    simulation: cleanup_sim,
+                });
+        }
 
         for paymaster in paymasters_to_reject {
             // No need to update aggregator signatures because we haven't computed them yet.
@@ -791,7 +836,11 @@ where
         );
 
         // call handle ops with the bundle to filter any rejected ops before sending
-        println!("HC bundle_proposer gas1 {:?} {:?}", gas, context.to_ops_per_aggregator());
+        println!(
+            "HC bundle_proposer gas1 {:?} {:?}",
+            gas,
+            context.to_ops_per_aggregator()
+        );
         let handle_ops_out = self
             .entry_point
             .call_handle_ops(
@@ -1204,18 +1253,26 @@ impl<UO: UserOperation> ProposalContext<UO> {
         for (&aggregator, group) in &mut self.groups_by_aggregator {
             if remaining_i < group.ops_with_simulations.len() {
                 let rejected = group.ops_with_simulations.remove(remaining_i);
-                println!("HC reject_index at {:?} of {:?} - {:?}", i, group.ops_with_simulations.len(), rejected.op);
+                println!(
+                    "HC reject_index at {:?} of {:?} - {:?}",
+                    i,
+                    group.ops_with_simulations.len(),
+                    rejected.op
+                );
                 if rejected.op.max_fee_per_gas() == U256::from(0) {
                     // Assume an Offchain op
                     if i == group.ops_with_simulations.len() {
-                         println!("HC ERR rejecting Cleanup op {:?}", rejected.op);
+                        println!("HC ERR rejecting Cleanup op {:?}", rejected.op);
                     } else {
                         println!("HC ERR rejecting offchain op {:?}", rejected.op);
                     }
                 } else {
                     let hc_hash = rejected.op.hc_hash();
                     let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
-                    println!("HC rejecting regular op with hash {:?} paired_op {:?}", hc_hash, hc_ent);
+                    println!(
+                        "HC rejecting regular op with hash {:?} paired_op {:?}",
+                        hc_hash, hc_ent
+                    );
                     if hc_ent.is_some() {
                         todo!("Should remove paired op");
                     }

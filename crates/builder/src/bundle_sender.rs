@@ -21,6 +21,7 @@ use futures_util::StreamExt;
 use mockall::automock;
 use rundler_provider::{BundleHandler, EntryPoint};
 use rundler_sim::ExpectedStorage;
+use rundler_types::hybrid_compute;
 use rundler_types::{
     builder::BundlingMode,
     chain::ChainSpec,
@@ -33,7 +34,6 @@ use tokio::{
     sync::{broadcast, mpsc, mpsc::UnboundedReceiver, oneshot},
 };
 use tracing::{debug, error, info, instrument, warn};
-use rundler_types::hybrid_compute;
 
 use crate::{
     bundle_proposer::{Bundle, BundleProposer, BundleProposerError},

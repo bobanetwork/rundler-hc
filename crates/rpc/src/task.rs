@@ -16,12 +16,11 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use anyhow::bail;
 use async_trait::async_trait;
 use ethers::providers::{JsonRpcClient, Provider};
+use hyper::Method;
 use jsonrpsee::{
     server::{middleware::ProxyGetRequestLayer, ServerBuilder},
     RpcModule,
 };
-use hyper::Method;
-use tower_http::cors::{Any, CorsLayer};
 use rundler_provider::{EthersEntryPointV0_6, EthersEntryPointV0_7};
 use rundler_sim::{
     EstimationSettings, FeeEstimator, GasEstimatorV0_6, GasEstimatorV0_7, PrecheckSettings,
@@ -32,6 +31,7 @@ use rundler_task::{
 };
 use rundler_types::{builder::Builder, chain::ChainSpec, pool::Pool};
 use tokio_util::sync::CancellationToken;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use crate::{

@@ -296,8 +296,11 @@ where
             }
         };
 
-	if let Some(at_gas_price) = at_gas_price {
-            println!("HC Override estimate_pvg gas price from {:?} to {:?}", gas_price, at_gas_price);
+        if let Some(at_gas_price) = at_gas_price {
+            println!(
+                "HC Override estimate_pvg gas price from {:?} to {:?}",
+                gas_price, at_gas_price
+            );
             gas_price = at_gas_price;
         }
 

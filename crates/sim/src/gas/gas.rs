@@ -59,7 +59,13 @@ pub async fn estimate_pre_verification_gas<
         .calc_l1_gas(entry_point.address(), random_op.clone(), gas_price)
         .await?;
 
-    println!("HC estimate_pre_verification_gas {} = {} + {} price {}", static_gas + dynamic_gas, static_gas, dynamic_gas, gas_price);
+    println!(
+        "HC estimate_pre_verification_gas {} = {} + {} price {}",
+        static_gas + dynamic_gas,
+        static_gas,
+        dynamic_gas,
+        gas_price
+    );
 
     Ok(static_gas.saturating_add(dynamic_gas))
 }
@@ -76,7 +82,12 @@ pub async fn calc_required_pre_verification_gas<
     op: &UO,
     base_fee: U256,
 ) -> anyhow::Result<U256> {
-    println!("HC entering calc_pre_verification_gas, base_fee {} op_fees {} {}", base_fee, op.max_priority_fee_per_gas(), op.max_fee_per_gas());
+    println!(
+        "HC entering calc_pre_verification_gas, base_fee {} op_fees {} {}",
+        base_fee,
+        op.max_priority_fee_per_gas(),
+        op.max_fee_per_gas()
+    );
     let static_gas = op.calc_static_pre_verification_gas(chain_spec, true);
     if !chain_spec.calldata_pre_verification_gas {
         return Ok(static_gas);
@@ -90,7 +101,12 @@ pub async fn calc_required_pre_verification_gas<
     let dynamic_gas = entry_point
         .calc_l1_gas(entry_point.address(), op.clone(), gas_price)
         .await?;
-    println!("HC calc_required_pre_verification_gas {} = {} + {}", static_gas + dynamic_gas, static_gas, dynamic_gas);
+    println!(
+        "HC calc_required_pre_verification_gas {} = {} + {}",
+        static_gas + dynamic_gas,
+        static_gas,
+        dynamic_gas
+    );
 
     Ok(static_gas + dynamic_gas)
 }

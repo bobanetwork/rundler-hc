@@ -187,16 +187,15 @@ impl EntryPointRouter {
             EntryPointVersion::Unspecified => unreachable!("unspecified entry point version"),
         }
     }
-    
+
     pub(crate) async fn get_nonce(
         &self,
         entry_point: &Address,
         addr: Address,
         key: U256,
     ) -> EthResult<U256> {
-        
         self.get_route(entry_point)?
-            .get_nonce(addr,key)
+            .get_nonce(addr, key)
             .await
             .map_err(Into::into)
         //Ok(U256::from(0))
@@ -261,11 +260,7 @@ pub(crate) trait EntryPointRoute: Send + Sync + 'static {
         at_price: Option<U256>,
     ) -> Result<GasEstimate, GasEstimationError>;
 
-    async fn get_nonce(
-        &self,
-        addr: Address,
-        key: U256,
-    ) -> anyhow::Result<U256>;
+    async fn get_nonce(&self, addr: Address, key: U256) -> anyhow::Result<U256>;
 
     async fn check_signature(
         &self,
@@ -309,30 +304,27 @@ where
     async fn get_receipt(&self, hash: H256) -> anyhow::Result<Option<RpcUserOperationReceipt>> {
         self.event_provider.get_receipt(hash).await
     }
-    
+
     async fn estimate_gas(
         &self,
         uo: UserOperationOptionalGas,
         state_override: Option<spoof::State>,
         at_price: Option<U256>,
     ) -> Result<GasEstimate, GasEstimationError> {
-        println!("HC router estimate_gas op {:?} state {:?}", uo, state_override);
-        let ret = self.gas_estimator
+        println!(
+            "HC router estimate_gas op {:?} state {:?}",
+            uo, state_override
+        );
+        let ret = self
+            .gas_estimator
             .estimate_op_gas(uo.into(), state_override.unwrap_or_default(), at_price)
             .await;
         println!("HC router estimate_gas ret {:?}", ret);
         ret
     }
 
-    async fn get_nonce(
-        &self,
-        addr: Address,
-        key: U256,
-    ) -> anyhow::Result<U256> {
-        let output = self
-            .entry_point
-            .get_nonce(addr, key)
-            .await;
+    async fn get_nonce(&self, addr: Address, key: U256) -> anyhow::Result<U256> {
+        let output = self.entry_point.get_nonce(addr, key).await;
         if output.is_ok() {
             return Ok(output.unwrap());
         }

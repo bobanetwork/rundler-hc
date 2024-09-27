@@ -62,11 +62,11 @@ impl UserOperationTrait for UserOperation {
         ]))
         .into()
     }
-    
+
     fn hc_hash(&self) -> H256 {
-        keccak256(encode(&[
-            Token::FixedBytes(keccak256(self.pack_for_hc_hash()).to_vec()),
-        ]))
+        keccak256(encode(&[Token::FixedBytes(
+            keccak256(self.pack_for_hc_hash()).to_vec(),
+        )]))
         .into()
     }
 

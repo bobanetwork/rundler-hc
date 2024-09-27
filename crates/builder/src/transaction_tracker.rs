@@ -227,7 +227,10 @@ where
             self.provider.get_transaction(tx_hash),
             self.provider.get_transaction_receipt(tx_hash),
         )?;
-        println!("HC get_mined_tx_gas_info looking for hash {:?} got tx {:?} receipt {:?}", tx_hash, tx, tx_receipt);
+        println!(
+            "HC get_mined_tx_gas_info looking for hash {:?} got tx {:?} receipt {:?}",
+            tx_hash, tx, tx_receipt
+        );
         let gas_limit = tx.map(|t| t.gas).or_else(|| {
             warn!("failed to fetch transaction data for tx: {}", tx_hash);
             None
@@ -374,7 +377,10 @@ where
     async fn check_for_update(&mut self) -> TransactionTrackerResult<Option<TrackerUpdate>> {
         let external_nonce = self.get_external_nonce().await?;
         if self.nonce < external_nonce {
-            println!("HC check_for_update_now at self.nonce {:?} external_nonce {:?}", self.nonce, external_nonce);
+            println!(
+                "HC check_for_update_now at self.nonce {:?} external_nonce {:?}",
+                self.nonce, external_nonce
+            );
             // The nonce has changed. Check to see which of our transactions has
             // mined, if any.
             debug!(
@@ -389,8 +395,11 @@ where
                     .get_transaction_status(tx.tx_hash)
                     .await
                     .context("tracker should check transaction status when the nonce changes")?;
-              println!("HC check_for_update_now status after nonce change {:?}", status);
-              info!("Status of tx {:?}: {:?}", tx.tx_hash, status);
+                println!(
+                    "HC check_for_update_now status after nonce change {:?}",
+                    status
+                );
+                info!("Status of tx {:?}: {:?}", tx.tx_hash, status);
                 if let TxStatus::Mined { block_number } = status {
                     let (gas_limit, gas_used, gas_price) =
                         self.get_mined_tx_gas_info(tx.tx_hash).await?;

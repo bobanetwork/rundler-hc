@@ -283,17 +283,17 @@ where
         user_op: UserOperation,
         max_validation_gas: u64,
     ) -> (TypedTransaction, spoof::State) {
-        let pvg = user_op.pre_verification_gas;  // FIXME HC
+        let pvg = user_op.pre_verification_gas; // FIXME HC
         let gas_price = user_op.max_fee_per_gas;
         let mut call = self
             .i_entry_point
             .simulate_validation(user_op)
             .gas(U256::from(max_validation_gas) + pvg) // FIXME HC
             .tx;
-       let from_addr = hybrid_compute::HC_CONFIG.lock().unwrap().from_addr;
-       call.set_from(from_addr);
-       call.set_gas_price(gas_price);
-       //println!("HC entry_point.rs s_v {:?} {:?} {:?} {:?} gas_price", max_validation_gas, pvg, tx, gas_price);
+        let from_addr = hybrid_compute::HC_CONFIG.lock().unwrap().from_addr;
+        call.set_from(from_addr);
+        call.set_gas_price(gas_price);
+        //println!("HC entry_point.rs s_v {:?} {:?} {:?} {:?} gas_price", max_validation_gas, pvg, tx, gas_price);
         (call, spoof::State::default())
     }
 
@@ -388,11 +388,14 @@ where
         true
     }
 
-    async fn get_nonce(&self, address: Address, key: ::ethers::core::types::U256) -> Result<::ethers::core::types::U256, String> {
+    async fn get_nonce(
+        &self,
+        address: Address,
+        key: ::ethers::core::types::U256,
+    ) -> Result<::ethers::core::types::U256, String> {
         let ret = self.i_entry_point.get_nonce(address, key).await;
         Ok(ret.unwrap())
     }
-
 }
 
 impl<P> EntryPointProvider<UserOperation> for EntryPoint<P> where

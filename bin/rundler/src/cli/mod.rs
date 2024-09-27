@@ -63,7 +63,10 @@ pub async fn run() -> anyhow::Result<()> {
         //opt.common.entry_points[0].parse::<Address>().expect("Must provide an entry_point"),
         cs.entry_point_address_v0_6,
         cs.id,
-        opt.common.node_http.clone().expect("Must provide node_http"),
+        opt.common
+            .node_http
+            .clone()
+            .expect("Must provide node_http"),
     );
 
     match opt.command {
@@ -320,31 +323,26 @@ pub struct CommonArgs {
     #[arg(
         long = "hc_helper_addr",
         name = "hc_helper_addr",
-        env = "HC_HELPER_ADDR",
+        env = "HC_HELPER_ADDR"
     )]
     hc_helper_addr: Address,
 
     #[arg(
         long = "hc_sys_account",
         name = "hc_sys_account",
-        env = "HC_SYS_ACCOUNT",
+        env = "HC_SYS_ACCOUNT"
     )]
     hc_sys_account: Address,
 
-    #[arg(
-        long = "hc_sys_owner",
-        name = "hc_sys_owner",
-        env = "HC_SYS_OWNER",
-    )]
+    #[arg(long = "hc_sys_owner", name = "hc_sys_owner", env = "HC_SYS_OWNER")]
     hc_sys_owner: Address,
 
     #[arg(
         long = "hc_sys_privkey",
         name = "hc_sys_privkey",
-        env = "HC_SYS_PRIVKEY",
+        env = "HC_SYS_PRIVKEY"
     )]
     hc_sys_privkey: H256,
-
 }
 
 const SIMULATION_GAS_OVERHEAD: u64 = 100_000;

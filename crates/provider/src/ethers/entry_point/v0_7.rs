@@ -388,7 +388,11 @@ where
         false
     }
 
-    async fn get_nonce(&self, address: Address, key: ::ethers::core::types::U256) -> Result<::ethers::core::types::U256, String> {
+    async fn get_nonce(
+        &self,
+        address: Address,
+        key: ::ethers::core::types::U256,
+    ) -> Result<::ethers::core::types::U256, String> {
         let ret = self.i_entry_point.get_nonce(address, key).await;
         Ok(ret.unwrap())
     }

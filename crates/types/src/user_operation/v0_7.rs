@@ -111,7 +111,7 @@ impl UserOperationTrait for UserOperation {
     }
 
     fn hc_hash(&self) -> H256 {
-        H256::zero()  // Not yet implemented
+        H256::zero() // Not yet implemented
     }
 
     fn id(&self) -> UserOperationId {

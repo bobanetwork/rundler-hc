@@ -235,8 +235,11 @@ pub trait SimulationProvider: Send + Sync + 'static {
     fn simulation_should_revert(&self) -> bool;
 
     /// Return the AA nonce for the given sender and key   
-    async fn get_nonce(&self, address: Address, key: ::ethers::core::types::U256) -> Result<::ethers::core::types::U256, String>;
-
+    async fn get_nonce(
+        &self,
+        address: Address,
+        key: ::ethers::core::types::U256,
+    ) -> Result<::ethers::core::types::U256, String>;
 }
 
 /// Trait for a provider that provides all entry point functionality
