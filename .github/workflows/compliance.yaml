@@ -24,8 +24,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: bundler-test-executors
-          repository: alchemyplatform/bundler-test-executor
-          ref: releases/v0.6
+          repository: bobanetwork/bundler-test-executor
+          ref: hc-dev
 
       - name: Build rundler image locally
         run: docker buildx build ./rundler -t alchemyplatform/rundler:latest
