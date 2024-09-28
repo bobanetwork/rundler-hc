@@ -61,6 +61,9 @@ jobs:
 #        with:
 #          token: ${{ secrets.GITHUB_TOKEN }}
 #          args: --all --all-features --tests -- -D warnings
+        run: |
+          cargo clippy  --all --all-features --tests -- \
+            -D warnings
 
       - name: buf setup
         uses: bufbuild/buf-setup-action@v1
