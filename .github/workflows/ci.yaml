@@ -51,10 +51,13 @@ jobs:
           args: --all --check
 
       - name: cargo clippy
-        uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all --all-features --tests -- -D warnings
+#        uses: actions-rs/clippy-check@v1
+#        with:
+#          token: ${{ secrets.GITHUB_TOKEN }}
+#          args: --all --all-features --tests -- -D warnings
+        run: |
+          cargo clippy  --all --all-features --tests -- \
+            -D warnings
 
       - name: buf setup
         uses: bufbuild/buf-setup-action@v1
