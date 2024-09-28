@@ -5,6 +5,9 @@ on:
       - main
   pull_request:
 
+env:
+  GH_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
+
 name: ci
 jobs:
   lint:
@@ -32,35 +35,18 @@ jobs:
         # Build to generate the ABI bindings.
 
       - name: cargo build
-#        uses: actions-rs/cargo@v1
-#        with:
-#          command: build
-#          args: --all --all-features
         run: |
           cargo build  --all --all-features
 
       - name: cargo check
-#        uses: actions-rs/cargo@v1
-#        with:
-#          command: check
-#          args: --all --all-features
         run: |
           cargo check  --all --all-features
       
       - name: cargo +nightly fmt
-#        uses: actions-rs/cargo@v1
-#        with:
-#          command: fmt
-#          toolchain: nightly
-#          args: --all --check
         run: |
           cargo +nightly fmt --all --check
 
       - name: cargo clippy
-#        uses: actions-rs/clippy-check@v1
-#        with:
-#          token: ${{ secrets.GITHUB_TOKEN }}
-#          args: --all --all-features --tests -- -D warnings
         run: |
           cargo clippy  --all --all-features --tests -- \
             -D warnings
