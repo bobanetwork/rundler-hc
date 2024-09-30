@@ -24,13 +24,16 @@ services:
       HC_SYS_ACCOUNT:  ${HC_SYS_ACCOUNT}  # Deployed contract address
       HC_SYS_OWNER:    ${HC_SYS_OWNER}    # Owner/Signer for HC_SYS_ACCOUNT
       HC_SYS_PRIVKEY:  ${HC_SYS_PRIVKEY}  # Owner/Signer for HC_SYS_ACCOUNT
-      ENTRY_POINTS:    ${ENTRY_POINTS}    # Deployed contract address
       BUILDER_PRIVATE_KEY: ${BUILDER_PRIVKEY} # Key for bundler EOA
       NODE_HTTP:       ${NODE_HTTP}       # Replica/Sequencer URL
       CHAIN_ID:        ${CHAIN_ID}        # Chain ID
       RPC_PORT:        3300               # RPC port to submit into Bundler
     ports:
       - 3300:3300
+    command: >
+      node
+      --disable_entry_point_v0_7
+      --builder.dropped_status_unsupported
 
   offchain-rpc:
     build:
