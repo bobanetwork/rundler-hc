@@ -12,7 +12,7 @@ once_cell = "1.19.0"
 
 anyhow.workspace = true
 async-trait.workspace = true
-chrono = "0.4.24"
+chrono = "0.4.30"
 constcat = "0.4.1"
 const-hex = "1.11.3"
 ethers.workspace = true
