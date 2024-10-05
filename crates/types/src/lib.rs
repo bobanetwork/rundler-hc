@@ -20,29 +20,37 @@
 
 //! Rundler common types
 
+pub mod builder;
+
 pub mod chain;
 
-/// Generated contracts module
-#[allow(non_snake_case)]
 #[rustfmt::skip]
-#[allow(clippy::all)]
-#[allow(missing_docs)]
 pub mod contracts;
-pub use contracts::shared_types::{DepositInfo, UserOperation, UserOpsPerAggregator};
 
 mod entity;
-pub use entity::{Entity, EntityType, EntityUpdate, EntityUpdateType};
+pub use entity::{Entity, EntityInfo, EntityInfos, EntityType, EntityUpdate, EntityUpdateType};
+
+mod opcode;
+pub use opcode::{Opcode, ViolationOpCode};
 
 mod gas;
 pub use gas::GasFees;
+
+pub mod pool;
 
 mod timestamp;
 pub use timestamp::{Timestamp, ValidTimeRange};
 
 mod user_operation;
-pub use user_operation::UserOperationId;
+pub use user_operation::*;
 
 mod storage;
 pub use storage::StorageSlot;
+
+mod validation_results;
+pub use validation_results::{
+    parse_validation_data, AggregatorInfo, StakeInfo, ValidationError, ValidationOutput,
+    ValidationReturnInfo, ValidationRevert,
+};
 
 pub mod hybrid_compute;

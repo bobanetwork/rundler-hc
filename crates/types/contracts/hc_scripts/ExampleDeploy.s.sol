@@ -2,14 +2,14 @@
 pragma solidity ^0.8.13;
 
 import "forge-std/Script.sol";
-import "lib/account-abstraction/contracts/samples/HybridAccount.sol";
-import "lib/account-abstraction/contracts/test/TestAuctionSystem.sol";
-import "lib/account-abstraction/contracts/test/TestCaptcha.sol";
-import "lib/account-abstraction/contracts/test/TestCounter.sol";
-import "lib/account-abstraction/contracts/test/TestRainfallInsurance.sol";
-import "lib/account-abstraction/contracts/test/TestSportsBetting.sol";
-import "lib/account-abstraction/contracts/test/TestKyc.sol";
-import "lib/account-abstraction/contracts/test/TestTokenPrice.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/samples/HybridAccount.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/test/TestAuctionSystem.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/test/TestCaptcha.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/test/TestCounter.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/test/TestRainfallInsurance.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/test/TestSportsBetting.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/test/TestKyc.sol";
+import "lib/account-abstraction-versions/v0_6/contracts/test/TestTokenPrice.sol";
 
 contract LocalDeploy is Script {
     function run() external 

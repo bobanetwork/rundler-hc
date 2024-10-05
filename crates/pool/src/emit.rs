@@ -14,7 +14,7 @@
 use std::fmt::Display;
 
 use ethers::types::{Address, H256};
-use rundler_types::{Entity, EntityType, Timestamp, UserOperation};
+use rundler_types::{Entity, EntityType, Timestamp, UserOperation, UserOperationVariant};
 use rundler_utils::strs;
 
 use crate::mempool::OperationOrigin;
@@ -27,7 +27,7 @@ pub enum OpPoolEvent {
         /// Operation hash
         op_hash: H256,
         /// The full operation
-        op: UserOperation,
+        op: UserOperationVariant,
         /// Block number the operation was added to the pool
         block_number: u64,
         /// Operation origin
@@ -49,6 +49,11 @@ pub enum OpPoolEvent {
     /// All operations for an entity were removed from the pool
     RemovedEntity {
         /// The removed entity
+        entity: Entity,
+    },
+    /// An Entity was throttled
+    ThrottledEntity {
+        /// The throttled entity
         entity: Entity,
     },
 }
@@ -113,6 +118,11 @@ pub enum OpRemovalReason {
         /// The removed entity
         entity: Entity,
     },
+    /// Op was removed because an associated entity was throttled
+    EntityThrottled {
+        /// The throttled entity
+        entity: Entity,
+    },
     /// Op was removed because it expired
     Expired {
         /// Op was valid until this timestamp
@@ -157,8 +167,8 @@ impl Display for OpPoolEvent {
                     format_entity_status("Factory", entities.factory.as_ref()),
                     format_entity_status("Paymaster", entities.paymaster.as_ref()),
                     format_entity_status("Aggregator", entities.aggregator.as_ref()),
-                    op.max_fee_per_gas,
-                    op.max_priority_fee_per_gas,
+                    op.max_fee_per_gas(),
+                    op.max_priority_fee_per_gas(),
                 )
             }
             OpPoolEvent::RemovedOp { op_hash, reason } => {
@@ -178,6 +188,9 @@ impl Display for OpPoolEvent {
                     concat!("Removed entity from pool.", "    Entity: {}",),
                     entity,
                 )
+            }
+            OpPoolEvent::ThrottledEntity { entity } => {
+                write!(f, concat!("Throttled entity.", "    Entity: {}",), entity,)
             }
         }
     }

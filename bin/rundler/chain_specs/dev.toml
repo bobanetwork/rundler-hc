@@ -1,0 +1,6 @@
+base = "ethereum"
+
+name = "Ethereum Devnet"
+id = 1337
+
+bundle_max_send_interval_millis = 250

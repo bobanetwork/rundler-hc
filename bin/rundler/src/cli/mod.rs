@@ -11,10 +11,11 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use clap::{builder::PossibleValuesParser, Args, Parser, Subcommand};
 
 mod builder;
+mod chain_spec;
 mod json;
 mod metrics;
 mod node;
@@ -23,15 +24,14 @@ mod rpc;
 mod tracing;
 
 use builder::BuilderCliArgs;
+use ethers::types::{Address, H256};
 use node::NodeCliArgs;
 use pool::PoolCliArgs;
 use rpc::RpcCliArgs;
-use rundler_rpc::EthApiSettings;
+use rundler_rpc::{EthApiSettings, RundlerApiSettings};
 use rundler_sim::{
     EstimationSettings, PrecheckSettings, PriorityFeeMode, SimulationSettings, MIN_CALL_GAS_LIMIT,
 };
-
-use ethers::types::{Address, H256};
 use rundler_types::hybrid_compute;
 
 /// Main entry point for the CLI
@@ -51,21 +51,28 @@ pub async fn run() -> anyhow::Result<()> {
     )
     .context("metrics server should start")?;
 
+    let cs = chain_spec::resolve_chain_spec(&opt.common.network, &opt.common.chain_spec);
+    tracing::info!("Chain spec: {:#?}", cs);
+
     hybrid_compute::init(
         opt.common.hc_helper_addr,
         opt.common.hc_sys_account,
         opt.common.hc_sys_owner,
         opt.common.hc_sys_privkey,
-        opt.common.entry_points[0].parse::<Address>().expect("Must provide an entry_point"),
-        opt.common.chain_id,
-        opt.common.node_http.clone().expect("Must provide node_http"),
+        //opt.common.entry_points[0].parse::<Address>().expect("Must provide an entry_point"),
+        cs.entry_point_address_v0_6,
+        cs.id,
+        opt.common
+            .node_http
+            .clone()
+            .expect("Must provide node_http"),
     );
 
     match opt.command {
-        Command::Node(args) => node::run(*args, opt.common).await?,
-        Command::Pool(args) => pool::run(args, opt.common).await?,
-        Command::Rpc(args) => rpc::run(args, opt.common).await?,
-        Command::Builder(args) => builder::run(args, opt.common).await?,
+        Command::Node(args) => node::run(cs, *args, opt.common).await?,
+        Command::Pool(args) => pool::run(cs, args, opt.common).await?,
+        Command::Rpc(args) => rpc::run(cs, args, opt.common).await?,
+        Command::Builder(args) => builder::run(cs, args, opt.common).await?,
     }
 
     tracing::info!("Shutdown, goodbye");
@@ -104,26 +111,24 @@ enum Command {
 #[derive(Debug, Args)]
 #[command(next_help_heading = "Common")]
 pub struct CommonArgs {
-    /// Entry point address to target
+    /// Network flag
     #[arg(
-        long = "entry_points",
-        name = "entry_points",
-        env = "ENTRY_POINTS",
-        default_values_t = Vec::<String>::new(), // required or will error
-        value_delimiter = ',',
-        global = true
-    )]
-    entry_points: Vec<String>,
+        long = "network",
+        name = "network",
+        env = "NETWORK",
+        value_parser = PossibleValuesParser::new(chain_spec::HARDCODED_CHAIN_SPECS),
+        global = true)
+    ]
+    network: Option<String>,
 
-    /// Chain ID to target
+    /// Chain spec file path
     #[arg(
-        long = "chain_id",
-        name = "chain_id",
-        env = "CHAIN_ID",
-        default_value = "1337",
+        long = "chain_spec",
+        name = "chain_spec",
+        env = "CHAIN_SPEC",
         global = true
     )]
-    chain_id: u64,
+    chain_spec: Option<String>,
 
     /// ETH Node HTTP URL to connect to
     #[arg(
@@ -133,6 +138,10 @@ pub struct CommonArgs {
         global = true
     )]
     node_http: Option<String>,
+
+    /// Flag for turning unsafe bundling mode on
+    #[arg(long = "unsafe", env = "UNSAFE", global = true)]
+    unsafe_mode: bool,
 
     #[arg(
         long = "max_verification_gas",
@@ -170,6 +179,17 @@ pub struct CommonArgs {
     )]
     min_unstake_delay: u32,
 
+    /// String representation of the timeout of a custom tracer in a format that is parsable by the
+    /// `ParseDuration` function on the ethereum node. See Docs: https://pkg.go.dev/time#ParseDuration
+    #[arg(
+        long = "tracer_timeout",
+        name = "tracer_timeout",
+        env = "TRACER_TIMEOUT",
+        default_value = "10s",
+        global = true
+    )]
+    tracer_timeout: String,
+
     /// Amount of blocks to search when calling eth_getUserOperationByHash.
     /// Defaults from 0 to latest block
     #[arg(
@@ -190,19 +210,20 @@ pub struct CommonArgs {
     max_simulate_handle_ops_gas: u64,
 
     #[arg(
-        long = "validation_estimation_gas_fee",
-        name = "validation_estimation_gas_fee",
-        env = "VALIDATION_ESTIMATION_GAS_FEE",
+        long = "verification_estimation_gas_fee",
+        name = "verification_estimation_gas_fee",
+        env = "VERIFICATION_ESTIMATION_GAS_FEE",
         default_value = "1000000000000", // 10K gwei
         global = true
     )]
-    validation_estimation_gas_fee: u64,
+    verification_estimation_gas_fee: u64,
 
     #[arg(
         long = "bundle_priority_fee_overhead_percent",
         name = "bundle_priority_fee_overhead_percent",
         env = "BUNDLE_PRIORITY_FEE_OVERHEAD_PERCENT",
-        default_value = "0"
+        default_value = "0",
+        global = true
     )]
     bundle_priority_fee_overhead_percent: u64,
 
@@ -211,7 +232,8 @@ pub struct CommonArgs {
         name = "priority_fee_mode_kind",
         env = "PRIORITY_FEE_MODE_KIND",
         value_parser = PossibleValuesParser::new(["base_fee_percent", "priority_fee_increase_percent"]),
-        default_value = "priority_fee_increase_percent"
+        default_value = "priority_fee_increase_percent",
+        global = true
     )]
     priority_fee_mode_kind: String,
 
@@ -219,7 +241,8 @@ pub struct CommonArgs {
         long = "priority_fee_mode_value",
         name = "priority_fee_mode_value",
         env = "PRIORITY_FEE_MODE_VALUE",
-        default_value = "0"
+        default_value = "0",
+        global = true
     )]
     priority_fee_mode_value: u64,
 
@@ -227,7 +250,8 @@ pub struct CommonArgs {
         long = "base_fee_accept_percent",
         name = "base_fee_accept_percent",
         env = "BASE_FEE_ACCEPT_PERCENT",
-        default_value = "50"
+        default_value = "50",
+        global = true
     )]
     base_fee_accept_percent: u64,
 
@@ -235,71 +259,89 @@ pub struct CommonArgs {
         long = "pre_verification_gas_accept_percent",
         name = "pre_verification_gas_accept_percent",
         env = "PRE_VERIFICATION_GAS_ACCEPT_PERCENT",
-        default_value = "50"
+        default_value = "50",
+        global = true
     )]
     pre_verification_gas_accept_percent: u64,
-
-    /// Interval at which the builder polls an Eth node for new blocks and
-    /// mined transactions.
-    #[arg(
-        long = "eth_poll_interval_millis",
-        name = "eth_poll_interval_millis",
-        env = "ETH_POLL_INTERVAL_MILLIS",
-        default_value = "100"
-    )]
-    pub eth_poll_interval_millis: u64,
 
     #[arg(
         long = "aws_region",
         name = "aws_region",
         env = "AWS_REGION",
-        default_value = "us-east-1"
+        default_value = "us-east-1",
+        global = true
     )]
     aws_region: String,
 
     #[arg(
         long = "mempool_config_path",
         name = "mempool_config_path",
-        env = "MEMPOOL_CONFIG_PATH"
+        env = "MEMPOOL_CONFIG_PATH",
+        global = true
     )]
     pub mempool_config_path: Option<String>,
 
     #[arg(
-        long = "num_builders",
-        name = "num_builders",
-        env = "NUM_BUILDERS",
-        default_value = "1"
+        long = "disable_entry_point_v0_6",
+        name = "disable_entry_point_v0_6",
+        env = "DISABLE_ENTRY_POINT_V0_6",
+        default_value = "false",
+        global = true
     )]
-    pub num_builders: u64,
+    pub disable_entry_point_v0_6: bool,
+
+    // Ignored if entry_point_v0_6_enabled is false
+    #[arg(
+        long = "num_builders_v0_6",
+        name = "num_builders_v0_6",
+        env = "NUM_BUILDERS_V0_6",
+        default_value = "1",
+        global = true
+    )]
+    pub num_builders_v0_6: u64,
+
+    #[arg(
+        long = "disable_entry_point_v0_7",
+        name = "disable_entry_point_v0_7",
+        env = "DISABLE_ENTRY_POINT_V0_7",
+        default_value = "false",
+        global = true
+    )]
+    pub disable_entry_point_v0_7: bool,
+
+    // Ignored if entry_point_v0_7_enabled is false
+    #[arg(
+        long = "num_builders_v0_7",
+        name = "num_builders_v0_7",
+        env = "NUM_BUILDERS_V0_7",
+        default_value = "1",
+        global = true
+    )]
+    pub num_builders_v0_7: u64,
 
     #[arg(
         long = "hc_helper_addr",
         name = "hc_helper_addr",
-        env = "HC_HELPER_ADDR",
+        env = "HC_HELPER_ADDR"
     )]
     hc_helper_addr: Address,
 
     #[arg(
         long = "hc_sys_account",
         name = "hc_sys_account",
-        env = "HC_SYS_ACCOUNT",
+        env = "HC_SYS_ACCOUNT"
     )]
     hc_sys_account: Address,
 
-    #[arg(
-        long = "hc_sys_owner",
-        name = "hc_sys_owner",
-        env = "HC_SYS_OWNER",
-    )]
+    #[arg(long = "hc_sys_owner", name = "hc_sys_owner", env = "HC_SYS_OWNER")]
     hc_sys_owner: Address,
 
     #[arg(
         long = "hc_sys_privkey",
         name = "hc_sys_privkey",
-        env = "HC_SYS_PRIVKEY",
+        env = "HC_SYS_PRIVKEY"
     )]
     hc_sys_privkey: H256,
-
 }
 
 const SIMULATION_GAS_OVERHEAD: u64 = 100_000;
@@ -329,8 +371,11 @@ impl TryFrom<&CommonArgs> for EstimationSettings {
         Ok(Self {
             max_verification_gas: value.max_verification_gas,
             max_call_gas,
+            max_paymaster_verification_gas: value.max_verification_gas,
+            max_paymaster_post_op_gas: max_call_gas,
+            max_total_execution_gas: value.max_bundle_gas,
             max_simulate_handle_ops_gas: value.max_simulate_handle_ops_gas,
-            validation_estimation_gas_fee: value.validation_estimation_gas_fee,
+            verification_estimation_gas_fee: value.verification_estimation_gas_fee,
         })
     }
 }
@@ -338,9 +383,8 @@ impl TryFrom<&CommonArgs> for EstimationSettings {
 impl TryFrom<&CommonArgs> for PrecheckSettings {
     type Error = anyhow::Error;
 
-    fn try_from(value: &CommonArgs) -> anyhow::Result<Self> {
+    fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
         Ok(Self {
-            chain_id: value.chain_id,
             max_verification_gas: value.max_verification_gas.into(),
             max_total_execution_gas: value.max_bundle_gas.into(),
             bundle_priority_fee_overhead_percent: value.bundle_priority_fee_overhead_percent,
@@ -354,20 +398,42 @@ impl TryFrom<&CommonArgs> for PrecheckSettings {
     }
 }
 
-impl From<&CommonArgs> for SimulationSettings {
-    fn from(value: &CommonArgs) -> Self {
-        Self::new(
+impl TryFrom<&CommonArgs> for SimulationSettings {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
+        if go_parse_duration::parse_duration(&value.tracer_timeout).is_err() {
+            bail!("Invalid value for tracer_timeout, must be parsable by the ParseDuration function. See docs https://pkg.go.dev/time#ParseDuration")
+        }
+
+        Ok(Self::new(
             value.min_unstake_delay,
             value.min_stake_value,
             value.max_simulate_handle_ops_gas,
             value.max_verification_gas,
-        )
+            value.tracer_timeout.clone(),
+        ))
     }
 }
 
 impl From<&CommonArgs> for EthApiSettings {
     fn from(value: &CommonArgs) -> Self {
-	Self::new(value.user_operation_event_block_distance)
+        Self::new(value.user_operation_event_block_distance)
+    }
+}
+
+impl TryFrom<&CommonArgs> for RundlerApiSettings {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
+        Ok(Self {
+            priority_fee_mode: PriorityFeeMode::try_from(
+                value.priority_fee_mode_kind.as_str(),
+                value.priority_fee_mode_value,
+            )?,
+            bundle_priority_fee_overhead_percent: value.bundle_priority_fee_overhead_percent,
+            max_verification_gas: value.max_verification_gas,
+        })
     }
 }
 

@@ -14,7 +14,6 @@
 //! Provider implementations using [ethers-rs](https://github.com/gakonst/ethers-rs)
 
 mod entry_point;
-mod paymaster_helper;
-mod provider;
-mod stake_manager;
-mod nonce_manager;
+pub use entry_point::{v0_6::EntryPoint as EntryPointV0_6, v0_7::EntryPoint as EntryPointV0_7};
+mod metrics_middleware;
+pub(crate) mod provider;

@@ -15,37 +15,20 @@
 
 use std::{fmt::Debug, sync::Arc};
 
-use ethers::types::{
-    spoof, transaction::eip2718::TypedTransaction, Address, Block, BlockId, BlockNumber, Bytes,
-    FeeHistory, Filter, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, Log,
-    Transaction, TransactionReceipt, TxHash, H256, U256, U64,
+use ethers::{
+    abi::{AbiDecode, AbiEncode},
+    types::{
+        spoof, transaction::eip2718::TypedTransaction, Address, Block, BlockId, BlockNumber, Bytes,
+        FeeHistory, Filter, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, Log,
+        Transaction, TransactionReceipt, TxHash, H256, U256, U64,
+    },
 };
 #[cfg(feature = "test-utils")]
 use mockall::automock;
-use rundler_types::UserOperation;
+use rundler_types::contracts::utils::get_gas_used::GasUsedResult;
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::error::ProviderError;
-
-/// Output of a successful signature aggregator simulation call
-#[derive(Clone, Debug, Default)]
-pub struct AggregatorSimOut {
-    /// Address of the aggregator contract
-    pub address: Address,
-    /// Aggregated signature
-    pub signature: Bytes,
-}
-
-/// Result of a signature aggregator call
-#[derive(Debug)]
-pub enum AggregatorOut {
-    /// No aggregator used
-    NotNeeded,
-    /// Successful call
-    SuccessWithInfo(AggregatorSimOut),
-    /// Aggregator validation function reverted
-    ValidationReverted,
-}
 
 /// Result of a provider method call
 pub type ProviderResult<T> = Result<T, ProviderError>;
@@ -75,6 +58,19 @@ pub trait Provider: Send + Sync + Debug + 'static {
         block: Option<BlockId>,
         state_overrides: &spoof::State,
     ) -> ProviderResult<Bytes>;
+
+    /// Call a contract's constructor
+    /// The constructor is assumed to revert with the result data
+    async fn call_constructor<A, R>(
+        &self,
+        bytecode: &Bytes,
+        args: A,
+        block_id: Option<BlockId>,
+        state_overrides: &spoof::State,
+    ) -> anyhow::Result<R>
+    where
+        A: AbiEncode + Send + Sync + 'static,
+        R: AbiDecode + Send + Sync + 'static;
 
     /// Get the current block number
     async fn get_block_number(&self) -> ProviderResult<u64>;
@@ -133,33 +129,19 @@ pub trait Provider: Send + Sync + Debug + 'static {
     /// Get the logs matching a filter
     async fn get_logs(&self, filter: &Filter) -> ProviderResult<Vec<Log>>;
 
-    /// Call an aggregator to aggregate signatures for a set of operations
-    async fn aggregate_signatures(
-        self: Arc<Self>,
-        aggregator_address: Address,
-        ops: Vec<UserOperation>,
-    ) -> ProviderResult<Option<Bytes>>;
+    /// Measures the gas used by a call to target with value and data.
+    async fn get_gas_used(
+        self: &Arc<Self>,
+        target: Address,
+        value: U256,
+        data: Bytes,
+        state_overrides: spoof::State,
+    ) -> ProviderResult<GasUsedResult>;
 
-    /// Validate a user operation signature using an aggregator
-    async fn validate_user_op_signature(
-        self: Arc<Self>,
-        aggregator_address: Address,
-        user_op: UserOperation,
-        gas_cap: u64,
-    ) -> ProviderResult<AggregatorOut>;
-
-    /// Calculate the L1 portion of the gas for a user operation on Arbitrum
-    async fn calc_arbitrum_l1_gas(
-        self: Arc<Self>,
-        entry_point_address: Address,
-        op: UserOperation,
-    ) -> ProviderResult<U256>;
-
-    /// Calculate the L1 portion of the gas for a user operation on optimism
-    async fn calc_optimism_l1_gas(
-        self: Arc<Self>,
-        entry_point_address: Address,
-        op: UserOperation,
-        gas_price: U256,
-    ) -> ProviderResult<U256>;
+    /// Get the storage values at a given address and slots
+    async fn batch_get_storage_at(
+        &self,
+        address: Address,
+        slots: Vec<H256>,
+    ) -> ProviderResult<Vec<H256>>;
 }

@@ -26,17 +26,17 @@ mod emit;
 pub use emit::{BuilderEvent, BuilderEventKind};
 
 mod sender;
-pub use sender::TransactionSenderType;
+pub use sender::{
+    BloxrouteSenderArgs, FlashbotsSenderArgs, RawSenderArgs, TransactionSenderArgs,
+    TransactionSenderKind,
+};
 
 mod server;
-pub use server::{
-    BuilderResult, BuilderServer, BuilderServerError, BundlingMode, LocalBuilderBuilder,
-    LocalBuilderHandle, RemoteBuilderClient,
-};
+pub use server::{LocalBuilderBuilder, LocalBuilderHandle, RemoteBuilderClient};
 
 mod signer;
 
 mod task;
-pub use task::{Args as BuilderTaskArgs, BuilderTask};
+pub use task::{Args as BuilderTaskArgs, BuilderTask, EntryPointBuilderSettings};
 
 mod transaction_tracker;

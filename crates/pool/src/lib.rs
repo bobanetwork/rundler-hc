@@ -25,16 +25,12 @@ mod emit;
 pub use emit::OpPoolEvent as PoolEvent;
 
 mod mempool;
-pub use mempool::{
-    MempoolError, PoolConfig, PoolOperation, Reputation, ReputationStatus, StakeStatus,
-};
+pub use mempool::PoolConfig;
 
 mod server;
 #[cfg(feature = "test-utils")]
 pub use server::MockPoolServer;
-pub use server::{
-    LocalPoolBuilder, LocalPoolHandle, PoolResult, PoolServer, PoolServerError, RemotePoolClient,
-};
+pub use server::{LocalPoolBuilder, LocalPoolHandle, RemotePoolClient};
 
 mod task;
 pub use task::{Args as PoolTaskArgs, PoolTask};

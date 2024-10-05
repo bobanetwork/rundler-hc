@@ -11,20 +11,16 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-mod error;
-pub use error::MempoolError;
-
 mod entity_tracker;
 mod pool;
 
 mod reputation;
-pub(crate) use reputation::{HourlyMovingAverageReputation, ReputationParams};
-pub use reputation::{Reputation, ReputationStatus};
-use rundler_provider::ProviderResult;
+pub(crate) use reputation::{AddressReputation, ReputationParams};
 
 mod size;
 
 mod paymaster;
+pub(crate) use paymaster::{PaymasterConfig, PaymasterTracker};
 
 mod uo_pool;
 use std::{
@@ -32,16 +28,22 @@ use std::{
     sync::Arc,
 };
 
-use ethers::types::{Address, H256, U256};
+use ethers::types::{Address, H256};
 #[cfg(test)]
 use mockall::automock;
-use rundler_sim::{EntityInfos, MempoolConfig, PrecheckSettings, SimulationSettings};
-use rundler_types::{Entity, EntityType, EntityUpdate, UserOperation, ValidTimeRange};
+use rundler_sim::{MempoolConfig, PrecheckSettings, SimulationSettings};
+use rundler_types::{
+    pool::{
+        MempoolError, PaymasterMetadata, PoolOperation, Reputation, ReputationStatus, StakeStatus,
+    },
+    EntityUpdate, EntryPointVersion, UserOperationId, UserOperationVariant,
+};
 use tonic::async_trait;
 pub(crate) use uo_pool::UoPool;
 
-use self::error::MempoolResult;
 use super::chain::ChainUpdate;
+
+pub(crate) type MempoolResult<T> = std::result::Result<T, MempoolError>;
 
 #[cfg_attr(test, automock)]
 #[async_trait]
@@ -53,21 +55,24 @@ pub trait Mempool: Send + Sync + 'static {
     /// Returns the entry point address this pool targets.
     fn entry_point(&self) -> Address;
 
+    /// Returns the entry point version this pool targets.
+    fn entry_point_version(&self) -> EntryPointVersion;
+
     /// Adds a user operation to the pool
     async fn add_operation(
         &self,
         origin: OperationOrigin,
-        op: UserOperation,
+        op: UserOperationVariant,
     ) -> MempoolResult<H256>;
 
     /// Removes a set of operations from the pool.
     fn remove_operations(&self, hashes: &[H256]);
 
+    /// Removes an operation from the pool by its ID.
+    fn remove_op_by_id(&self, id: &UserOperationId) -> MempoolResult<Option<H256>>;
+
     /// Updates the reputation of an entity.
     fn update_entity(&self, entity_update: EntityUpdate);
-
-    /// Returns current paymaster balance
-    async fn paymaster_balance(&self, paymaster: Address) -> ProviderResult<PaymasterMetadata>;
 
     /// Returns the best operations from the pool.
     ///
@@ -92,10 +97,13 @@ pub trait Mempool: Send + Sync + 'static {
     /// Debug methods
 
     /// Clears the mempool of UOs or reputation of all addresses
-    fn clear_state(&self, clear_mempool: bool, clear_reputation: bool);
+    fn clear_state(&self, clear_mempool: bool, clear_paymaster: bool, clear_reputation: bool);
 
     /// Dumps the mempool's reputation tracking
     fn dump_reputation(&self) -> Vec<Reputation>;
+
+    /// Dumps the mempool's paymaster balance cache
+    fn dump_paymaster_balances(&self) -> Vec<PaymasterMetadata>;
 
     /// Dumps the mempool's reputation tracking
     fn get_reputation_status(&self, address: Address) -> ReputationStatus;
@@ -106,8 +114,11 @@ pub trait Mempool: Send + Sync + 'static {
     /// Get stake status for address
     async fn get_stake_status(&self, address: Address) -> MempoolResult<StakeStatus>;
 
-    /// Reset paymater state
+    /// Reset paymaster state
     async fn reset_confirmed_paymaster_balances(&self) -> MempoolResult<()>;
+
+    /// Turns on and off tracking errors
+    fn set_tracking(&self, paymaster: bool, reputation: bool);
 }
 
 /// Config for the mempool
@@ -115,6 +126,8 @@ pub trait Mempool: Send + Sync + 'static {
 pub struct PoolConfig {
     /// Address of the entry point this pool targets
     pub entry_point: Address,
+    /// Version of the entry point this pool targets
+    pub entry_point_version: EntryPointVersion,
     /// Chain ID this pool targets
     pub chain_id: u64,
     /// The maximum number of operations an unstaked sender can have in the mempool
@@ -143,23 +156,14 @@ pub struct PoolConfig {
     pub throttled_entity_mempool_count: u64,
     /// The maximum number of blocks a user operation with a throttled entity can stay in the mempool
     pub throttled_entity_live_blocks: u64,
-}
-
-/// Stake status structure
-#[derive(Debug, Clone, Copy)]
-pub struct StakeStatus {
-    /// Address is staked
-    pub is_staked: bool,
-    /// Stake information about address
-    pub stake_info: StakeInfo,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct StakeInfo {
-    /// Stake ammount
-    pub stake: u128,
-    /// Unstake delay in seconds
-    pub unstake_delay_sec: u32,
+    /// Boolean field used to toggle the operation of the paymaster tracker
+    pub paymaster_tracking_enabled: bool,
+    /// Number of paymaster balances to cache
+    pub paymaster_cache_length: u32,
+    /// Boolean field used to toggle the operation of the reputation tracker
+    pub reputation_tracking_enabled: bool,
+    /// The minimum number of blocks a user operation must be in the mempool before it can be dropped
+    pub drop_min_num_blocks: u64,
 }
 
 /// Origin of an operation.
@@ -175,109 +179,11 @@ pub enum OperationOrigin {
     ReturnedAfterReorg,
 }
 
-/// A user operation with additional metadata from validation.
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
-pub struct PoolOperation {
-    /// The user operation stored in the pool
-    pub uo: UserOperation,
-    /// The entry point address for this operation
-    pub entry_point: Address,
-    /// The aggregator address for this operation, if any.
-    pub aggregator: Option<Address>,
-    /// The valid time range for this operation.
-    pub valid_time_range: ValidTimeRange,
-    /// The expected code hash for all contracts accessed during validation for this operation.
-    pub expected_code_hash: H256,
-    /// The block hash simulation was completed at
-    pub sim_block_hash: H256,
-    /// The block number simulation was completed at
-    pub sim_block_number: u64,
-    /// List of entities that need to stake for this operation.
-    pub entities_needing_stake: Vec<EntityType>,
-    /// Whether the account is staked.
-    pub account_is_staked: bool,
-    /// Staking information about all the entities.
-    pub entity_infos: EntityInfos,
-}
-
-#[derive(Debug, Default, Clone, Eq, PartialEq, Copy)]
-pub struct PaymasterMetadata {
-    /// Paymaster address
-    pub address: Address,
-    /// The on-chain balance of the paymaster
-    pub confirmed_balance: U256,
-    /// The pending balance is the confirm balance subtracted by
-    /// the max cost of all the pending user operations that use the paymaster  
-    pub pending_balance: U256,
-}
-
-impl PoolOperation {
-    /// Returns true if the operation contains the given entity.
-    pub fn contains_entity(&self, entity: &Entity) -> bool {
-        if let Some(e) = self.entity_infos.get(entity.kind) {
-            e.address == entity.address
-        } else {
-            false
-        }
-    }
-
-    /// Returns true if the operation requires the given entity to stake.
-    ///
-    /// For non-accounts, its possible that the entity is staked, but doesn't
-    /// _need_ to stake for this operation. For example, if the operation does not
-    /// access any storage slots that require staking. In that case this function
-    /// will return false.
-    ///
-    /// For staked accounts, this function will always return true. Staked accounts
-    /// are able to circumvent the mempool operation limits always need their reputation
-    /// checked to prevent them from filling the pool.
-    pub fn requires_stake(&self, entity: EntityType) -> bool {
-        match entity {
-            EntityType::Account => self.account_is_staked,
-            _ => self.entities_needing_stake.contains(&entity),
-        }
-    }
-
-    /// Returns an iterator over all entities that are included in this operation.
-    pub fn entities(&'_ self) -> impl Iterator<Item = Entity> + '_ {
-        self.entity_infos
-            .entities()
-            .map(|(t, entity)| Entity::new(t, entity.address))
-    }
-
-    /// Returns an iterator over all entities that need stake in this operation. This can be a subset of entities that are staked in the operation.
-    pub fn entities_requiring_stake(&'_ self) -> impl Iterator<Item = Entity> + '_ {
-        self.entity_infos.entities().filter_map(|(t, entity)| {
-            if self.requires_stake(t) {
-                Entity::new(t, entity.address).into()
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Return all the unstaked entities that are used in this operation.
-    pub fn unstaked_entities(&'_ self) -> impl Iterator<Item = Entity> + '_ {
-        self.entity_infos.entities().filter_map(|(t, entity)| {
-            if entity.is_staked {
-                None
-            } else {
-                Entity::new(t, entity.address).into()
-            }
-        })
-    }
-
-    /// Compute the amount of heap memory the PoolOperation takes up.
-    pub fn mem_size(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.uo.heap_size()
-            + self.entities_needing_stake.len() * std::mem::size_of::<EntityType>()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use rundler_sim::EntityInfo;
+    use rundler_types::{
+        v0_6::UserOperation, Entity, EntityInfo, EntityInfos, EntityType, ValidTimeRange,
+    };
 
     use super::*;
 
@@ -294,39 +200,34 @@ mod tests {
                 paymaster_and_data: paymaster.as_fixed_bytes().into(),
                 init_code: factory.as_fixed_bytes().into(),
                 ..Default::default()
-            },
+            }
+            .into(),
             entry_point: Address::random(),
             aggregator: Some(aggregator),
             valid_time_range: ValidTimeRange::all_time(),
             expected_code_hash: H256::random(),
             sim_block_hash: H256::random(),
             sim_block_number: 0,
-            entities_needing_stake: vec![EntityType::Account, EntityType::Aggregator],
             account_is_staked: true,
             entity_infos: EntityInfos {
                 factory: Some(EntityInfo {
-                    address: factory,
+                    entity: Entity::factory(factory),
                     is_staked: false,
                 }),
                 sender: EntityInfo {
-                    address: sender,
+                    entity: Entity::account(sender),
                     is_staked: false,
                 },
                 paymaster: Some(EntityInfo {
-                    address: paymaster,
+                    entity: Entity::paymaster(paymaster),
                     is_staked: false,
                 }),
                 aggregator: Some(EntityInfo {
-                    address: aggregator,
+                    entity: Entity::aggregator(aggregator),
                     is_staked: false,
                 }),
             },
         };
-
-        assert!(po.requires_stake(EntityType::Account));
-        assert!(!po.requires_stake(EntityType::Paymaster));
-        assert!(!po.requires_stake(EntityType::Factory));
-        assert!(po.requires_stake(EntityType::Aggregator));
 
         let entities = po.entities().collect::<Vec<_>>();
         assert_eq!(entities.len(), 4);

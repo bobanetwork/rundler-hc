@@ -13,54 +13,42 @@
 
 // Adapted from https://github.com/onbjerg/ethers-flashbots and
 // https://github.com/gakonst/ethers-rs/blob/master/ethers-providers/src/toolbox/pending_transaction.rs
-use std::{
-    future::Future,
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-    task::{Context as TaskContext, Poll},
-};
+use std::{str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Context};
 use ethers::{
     middleware::SignerMiddleware,
-    providers::{interval, JsonRpcClient, Middleware, Provider},
-    types::{
-        transaction::eip2718::TypedTransaction, Address, Bytes, TransactionReceipt, TxHash, H256,
-        U256, U64,
-    },
+    providers::{JsonRpcClient, Middleware, Provider},
+    types::{transaction::eip2718::TypedTransaction, Address, Bytes, H256, U256, U64},
+    utils,
 };
 use ethers_signers::Signer;
-use futures_timer::Delay;
-use futures_util::{Stream, StreamExt, TryFutureExt};
-use jsonrpsee::{
-    core::{client::ClientT, traits::ToRpcParams},
-    http_client::{transport::HttpBackend, HttpClient, HttpClientBuilder},
+use reqwest::{
+    header::{HeaderMap, HeaderValue, CONTENT_TYPE},
+    Client, Response,
 };
-use pin_project::pin_project;
+use rundler_types::GasFees;
 use serde::{de, Deserialize, Serialize};
-use serde_json::{value::RawValue, Value};
+use serde_json::{json, Value};
 use tonic::async_trait;
 
 use super::{
     fill_and_sign, ExpectedStorage, Result, SentTxInfo, TransactionSender, TxSenderError, TxStatus,
 };
+use crate::sender::CancelTxInfo;
 
 #[derive(Debug)]
-pub(crate) struct FlashbotsTransactionSender<C, S>
-where
-    C: JsonRpcClient + 'static,
-    S: Signer + 'static,
-{
+pub(crate) struct FlashbotsTransactionSender<C, S, FS> {
     provider: SignerMiddleware<Arc<Provider<C>>, S>,
-    client: FlashbotsClient,
+    flashbots_client: FlashbotsClient<FS>,
 }
 
 #[async_trait]
-impl<C, S> TransactionSender for FlashbotsTransactionSender<C, S>
+impl<C, S, FS> TransactionSender for FlashbotsTransactionSender<C, S, FS>
 where
     C: JsonRpcClient + 'static,
     S: Signer + 'static,
+    FS: Signer + 'static,
 {
     async fn send_transaction(
         &self,
@@ -69,13 +57,38 @@ where
     ) -> Result<SentTxInfo> {
         let (raw_tx, nonce) = fill_and_sign(&self.provider, tx).await?;
 
-        let tx_hash = self.client.send_transaction(raw_tx).await?;
+        let tx_hash = self
+            .flashbots_client
+            .send_private_transaction(raw_tx)
+            .await?;
 
         Ok(SentTxInfo { nonce, tx_hash })
     }
 
+    async fn cancel_transaction(
+        &self,
+        tx_hash: H256,
+        _nonce: U256,
+        _to: Address,
+        _gas_fees: GasFees,
+    ) -> Result<CancelTxInfo> {
+        let success = self
+            .flashbots_client
+            .cancel_private_transaction(tx_hash)
+            .await?;
+
+        if !success {
+            return Err(TxSenderError::SoftCancelFailed);
+        }
+
+        Ok(CancelTxInfo {
+            tx_hash: H256::zero(),
+            soft_cancelled: true,
+        })
+    }
+
     async fn get_transaction_status(&self, tx_hash: H256) -> Result<TxStatus> {
-        let status = self.client.status(tx_hash).await?;
+        let status = self.flashbots_client.status(tx_hash).await?;
         Ok(match status.status {
             FlashbotsAPITransactionStatus::Pending => TxStatus::Pending,
             FlashbotsAPITransactionStatus::Included => {
@@ -96,18 +109,15 @@ where
                 }
                 TxStatus::Pending
             }
-            FlashbotsAPITransactionStatus::Failed | FlashbotsAPITransactionStatus::Unknown => {
+            FlashbotsAPITransactionStatus::Unknown => {
                 return Err(TxSenderError::Other(anyhow!(
-                    "Transaction {tx_hash:?} failed in Flashbots with status {:?}",
-                    status.status,
+                    "Transaction {tx_hash:?} unknown in Flashbots API",
                 )));
             }
-            FlashbotsAPITransactionStatus::Cancelled => TxStatus::Dropped,
+            FlashbotsAPITransactionStatus::Failed | FlashbotsAPITransactionStatus::Cancelled => {
+                TxStatus::Dropped
+            }
         })
-    }
-
-    async fn wait_until_mined(&self, tx_hash: H256) -> Result<Option<TransactionReceipt>> {
-        Ok(PendingFlashbotsTransaction::new(tx_hash, self.provider.inner(), &self.client).await?)
     }
 
     fn address(&self) -> Address {
@@ -115,17 +125,86 @@ where
     }
 }
 
-impl<C, S> FlashbotsTransactionSender<C, S>
+impl<C, S, FS> FlashbotsTransactionSender<C, S, FS>
 where
     C: JsonRpcClient + 'static,
     S: Signer + 'static,
+    FS: Signer + 'static,
 {
-    pub(crate) fn new(provider: Arc<Provider<C>>, signer: S) -> Result<Self> {
+    pub(crate) fn new(
+        provider: Arc<Provider<C>>,
+        tx_signer: S,
+        flashbots_signer: FS,
+        builders: Vec<String>,
+        relay_url: String,
+        status_url: String,
+    ) -> Result<Self> {
         Ok(Self {
-            provider: SignerMiddleware::new(provider, signer),
-            client: FlashbotsClient::new()?,
+            provider: SignerMiddleware::new(provider, tx_signer),
+            flashbots_client: FlashbotsClient::new(
+                flashbots_signer,
+                builders,
+                relay_url,
+                status_url,
+            ),
         })
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Preferences {
+    fast: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    privacy: Option<Privacy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validity: Option<Validity>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Privacy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    builders: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Validity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refund: Option<Vec<Refund>>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Refund {
+    address: String,
+    percent: u8,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct FlashbotsSendPrivateTransactionRequest {
+    tx: Bytes,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_block_number: Option<U256>,
+    preferences: Preferences,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct FlashbotsSendPrivateTransactionResponse {
+    result: H256,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct FlashbotsCancelPrivateTransactionRequest {
+    tx_hash: H256,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct FlashbotsCancelPrivateTransactionResponse {
+    result: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,162 +250,115 @@ struct FlashbotsAPIResponse {
 }
 
 #[derive(Debug)]
-struct FlashbotsClient {
-    client: HttpClient<HttpBackend>,
+struct FlashbotsClient<S> {
+    http_client: Client,
+    signer: S,
+    builders: Vec<String>,
+    relay_url: String,
+    status_url: String,
 }
 
-impl FlashbotsClient {
-    fn new() -> anyhow::Result<Self> {
-        let client = HttpClientBuilder::default().build("https://rpc.flashbots.net")?;
-        Ok(Self { client })
+impl<S> FlashbotsClient<S> {
+    fn new(signer: S, builders: Vec<String>, relay_url: String, status_url: String) -> Self {
+        Self {
+            http_client: Client::new(),
+            signer,
+            builders,
+            relay_url,
+            status_url,
+        }
     }
 
     async fn status(&self, tx_hash: H256) -> anyhow::Result<FlashbotsAPIResponse> {
-        let url = format!("https://protect.flashbots.net/tx/{:?}", tx_hash);
-        let resp = reqwest::get(&url).await?;
+        let url = format!("{}{:?}", self.status_url, tx_hash);
+        let resp = self.http_client.get(&url).send().await?;
         resp.json::<FlashbotsAPIResponse>()
             .await
             .context("should deserialize FlashbotsAPIResponse")
     }
+}
 
-    async fn send_transaction(&self, raw_tx: Bytes) -> Result<TxHash> {
-        let response: FlashbotsResponse = self
-            .client
-            .request("eth_sendRawTransaction", (raw_tx,))
-            .await?;
-        Ok(response.tx_hash)
+impl<S> FlashbotsClient<S>
+where
+    S: Signer,
+{
+    async fn send_private_transaction(&self, raw_tx: Bytes) -> anyhow::Result<H256> {
+        let preferences = Preferences {
+            fast: false,
+            privacy: Some(Privacy {
+                hints: None,
+                builders: Some(self.builders.clone()),
+            }),
+            validity: None,
+        };
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": "eth_sendPrivateTransaction",
+            "params": [
+                FlashbotsSendPrivateTransactionRequest {
+                    tx: raw_tx,
+                    max_block_number: None,
+                    preferences,
+                }],
+            "id": 1
+        });
+
+        let response = self.sign_send_request(body).await?;
+
+        let parsed_response = response
+            .json::<FlashbotsSendPrivateTransactionResponse>()
+            .await
+            .map_err(|e| anyhow!("failed to deserialize Flashbots response: {:?}", e))?;
+
+        Ok(parsed_response.result)
     }
-}
 
-#[derive(Serialize)]
-struct FlashbotsRequest {
-    transaction: String,
-}
+    async fn cancel_private_transaction(&self, tx_hash: H256) -> anyhow::Result<bool> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": "eth_cancelPrivateTransaction",
+            "params": [
+                FlashbotsCancelPrivateTransactionRequest { tx_hash }
+            ],
+            "id": 1
+        });
 
-impl ToRpcParams for FlashbotsRequest {
-    fn to_rpc_params(self) -> std::result::Result<Option<Box<RawValue>>, jsonrpsee::core::Error> {
-        let s = String::from_utf8(serde_json::to_vec(&self)?).expect("Valid UTF8 format");
-        RawValue::from_string(s)
-            .map(Some)
-            .map_err(jsonrpsee::core::Error::ParseError)
+        let response = self.sign_send_request(body).await?;
+
+        let parsed_response = response
+            .json::<FlashbotsCancelPrivateTransactionResponse>()
+            .await
+            .map_err(|e| anyhow!("failed to deserialize Flashbots response: {:?}", e))?;
+
+        Ok(parsed_response.result)
     }
-}
 
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct FlashbotsResponse {
-    tx_hash: TxHash,
-}
+    async fn sign_send_request(&self, body: Value) -> anyhow::Result<Response> {
+        let signature = self
+            .signer
+            .sign_message(format!(
+                "0x{:x}",
+                H256::from(utils::keccak256(body.to_string()))
+            ))
+            .await
+            .expect("Signature failed");
+        let header_val =
+            HeaderValue::from_str(&format!("{:?}:0x{}", self.signer.address(), signature))
+                .expect("Header contains invalid characters");
 
-type PinBoxFut<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+        headers.insert("x-flashbots-signature", header_val);
 
-enum PendingFlashbotsTxState<'a> {
-    InitialDelay(Pin<Box<Delay>>),
-    PausedGettingTx,
-    GettingTx(PinBoxFut<'a, FlashbotsAPIResponse>),
-    PausedGettingReceipt,
-    GettingReceipt(PinBoxFut<'a, Option<TransactionReceipt>>),
-    Completed,
-}
-
-#[pin_project]
-struct PendingFlashbotsTransaction<'a, P> {
-    tx_hash: H256,
-    provider: &'a Provider<P>,
-    client: &'a FlashbotsClient,
-    state: PendingFlashbotsTxState<'a>,
-    interval: Box<dyn Stream<Item = ()> + Send + Unpin>,
-}
-
-impl<'a, P: JsonRpcClient> PendingFlashbotsTransaction<'a, P> {
-    fn new(tx_hash: H256, provider: &'a Provider<P>, client: &'a FlashbotsClient) -> Self {
-        let delay = Box::pin(Delay::new(provider.get_interval()));
-
-        Self {
-            tx_hash,
-            provider,
-            client,
-            state: PendingFlashbotsTxState::InitialDelay(delay),
-            interval: Box::new(interval(provider.get_interval())),
-        }
-    }
-}
-
-impl<'a, P: JsonRpcClient> Future for PendingFlashbotsTransaction<'a, P> {
-    type Output = anyhow::Result<Option<TransactionReceipt>>;
-
-    fn poll(self: Pin<&mut Self>, ctx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-
-        match this.state {
-            PendingFlashbotsTxState::InitialDelay(fut) => {
-                futures_util::ready!(fut.as_mut().poll(ctx));
-                let status_fut = Box::pin(this.client.status(*this.tx_hash));
-                *this.state = PendingFlashbotsTxState::GettingTx(status_fut);
-                ctx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            PendingFlashbotsTxState::PausedGettingTx => {
-                let _ready = futures_util::ready!(this.interval.poll_next_unpin(ctx));
-                let status_fut = Box::pin(this.client.status(*this.tx_hash));
-                *this.state = PendingFlashbotsTxState::GettingTx(status_fut);
-                ctx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            PendingFlashbotsTxState::GettingTx(fut) => {
-                let status = futures_util::ready!(fut.as_mut().poll(ctx))?;
-                tracing::debug!("Transaction:status {:?}:{:?}", *this.tx_hash, status.status);
-                match status.status {
-                    FlashbotsAPITransactionStatus::Pending => {
-                        *this.state = PendingFlashbotsTxState::PausedGettingTx;
-                        ctx.waker().wake_by_ref();
-                    }
-                    FlashbotsAPITransactionStatus::Included => {
-                        let receipt_fut = Box::pin(
-                            this.provider
-                                .get_transaction_receipt(*this.tx_hash)
-                                .map_err(|e| anyhow::anyhow!("failed to get receipt: {:?}", e)),
-                        );
-                        *this.state = PendingFlashbotsTxState::GettingReceipt(receipt_fut);
-                        ctx.waker().wake_by_ref();
-                    }
-                    FlashbotsAPITransactionStatus::Cancelled => {
-                        return Poll::Ready(Ok(None));
-                    }
-                    FlashbotsAPITransactionStatus::Failed
-                    | FlashbotsAPITransactionStatus::Unknown => {
-                        return Poll::Ready(Err(anyhow::anyhow!(
-                            "transaction failed with status {:?}",
-                            status.status
-                        )));
-                    }
-                }
-            }
-            PendingFlashbotsTxState::PausedGettingReceipt => {
-                let _ready = futures_util::ready!(this.interval.poll_next_unpin(ctx));
-                let fut = Box::pin(
-                    this.provider
-                        .get_transaction_receipt(*this.tx_hash)
-                        .map_err(|e| anyhow::anyhow!("failed to get receipt: {:?}", e)),
-                );
-                *this.state = PendingFlashbotsTxState::GettingReceipt(fut);
-                ctx.waker().wake_by_ref();
-            }
-            PendingFlashbotsTxState::GettingReceipt(fut) => {
-                if let Some(receipt) = futures_util::ready!(fut.as_mut().poll(ctx))? {
-                    *this.state = PendingFlashbotsTxState::Completed;
-                    return Poll::Ready(Ok(Some(receipt)));
-                } else {
-                    *this.state = PendingFlashbotsTxState::PausedGettingReceipt;
-                    ctx.waker().wake_by_ref();
-                }
-            }
-            PendingFlashbotsTxState::Completed => {
-                panic!("polled pending flashbots transaction future after completion")
-            }
-        }
-
-        Poll::Pending
+        // Send the request
+        self.http_client
+            .post(&self.relay_url)
+            .headers(headers)
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| anyhow!("failed to send request to Flashbots: {:?}", e))
     }
 }
 

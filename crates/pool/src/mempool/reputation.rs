@@ -17,184 +17,9 @@ use std::{
 };
 
 use ethers::types::Address;
-#[cfg(test)]
-use mockall::automock;
 use parking_lot::RwLock;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use rundler_types::pool::{Reputation, ReputationStatus};
 use tokio::time::interval;
-
-/// Reputation status for an entity
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ReputationStatus {
-    /// Entity is not throttled or banned
-    Ok,
-    /// Entity is throttled
-    Throttled,
-    /// Entity is banned
-    Banned,
-}
-
-impl Serialize for ReputationStatus {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            ReputationStatus::Ok => serializer.serialize_str("ok"),
-            ReputationStatus::Throttled => serializer.serialize_str("throttled"),
-            ReputationStatus::Banned => serializer.serialize_str("banned"),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ReputationStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "ok" => Ok(ReputationStatus::Ok),
-            "throttled" => Ok(ReputationStatus::Throttled),
-            "banned" => Ok(ReputationStatus::Banned),
-            _ => Err(de::Error::custom(format!("Invalid reputation status {s}"))),
-        }
-    }
-}
-
-/// The reputation of an entity
-#[derive(Debug, Clone)]
-pub struct Reputation {
-    /// The entity's address
-    pub address: Address,
-    /// Number of ops seen in the current interval
-    pub ops_seen: u64,
-    /// Number of ops included in the current interval
-    pub ops_included: u64,
-}
-
-/// Reputation manager trait
-///
-/// Interior mutability pattern used as ReputationManagers may
-/// need to be thread-safe.
-#[cfg_attr(test, automock)]
-pub(crate) trait ReputationManager: Send + Sync + 'static {
-    /// Called by mempool before returning operations to bundler
-    fn status(&self, address: Address) -> ReputationStatus;
-
-    /// Called by mempool when an operation that requires stake is added to the
-    /// pool
-    fn add_seen(&self, address: Address);
-
-    /// Called by mempool when an unstaked entity causes the invalidation of a bundle
-    fn handle_urep_030_penalty(&self, address: Address);
-
-    /// Called by mempool when a staked entity causes the invalidation of a bundle
-    fn handle_srep_050_penalty(&self, address: Address);
-
-    /// Called by the mempool when an operation that requires stake is removed
-    /// from the pool
-    fn add_included(&self, address: Address);
-
-    /// Called by the mempool when a previously mined operation that requires
-    /// stake is returned to the pool.
-    fn remove_included(&self, address: Address);
-
-    /// Called by debug API
-    fn dump_reputation(&self) -> Vec<Reputation>;
-
-    /// Called by debug API
-    fn set_reputation(&self, address: Address, ops_seen: u64, ops_included: u64);
-
-    /// Get the ops allowed for an unstaked entity
-    fn get_ops_allowed(&self, address: Address) -> u64;
-
-    /// Clear all reputation values
-    fn clear(&self);
-}
-
-#[derive(Debug)]
-pub(crate) struct HourlyMovingAverageReputation {
-    reputation: RwLock<AddressReputation>,
-}
-
-impl HourlyMovingAverageReputation {
-    pub(crate) fn new(
-        params: ReputationParams,
-        blocklist: Option<HashSet<Address>>,
-        allowlist: Option<HashSet<Address>>,
-    ) -> Self {
-        let rep = AddressReputation::new(params)
-            .with_blocklist(blocklist.unwrap_or_default())
-            .with_allowlist(allowlist.unwrap_or_default());
-
-        Self {
-            reputation: RwLock::new(rep),
-        }
-    }
-
-    // run the reputation hourly update job
-    pub(crate) async fn run(&self) {
-        let mut tick = interval(Duration::from_secs(60 * 60));
-        loop {
-            tick.tick().await;
-            self.reputation.write().hourly_update();
-        }
-    }
-}
-
-impl ReputationManager for HourlyMovingAverageReputation {
-    fn status(&self, address: Address) -> ReputationStatus {
-        self.reputation.read().status(address)
-    }
-
-    fn add_seen(&self, address: Address) {
-        self.reputation.write().add_seen(address);
-    }
-
-    fn handle_urep_030_penalty(&self, address: Address) {
-        self.reputation.write().handle_urep_030_penalty(address);
-    }
-
-    fn handle_srep_050_penalty(&self, address: Address) {
-        self.reputation.write().handle_srep_050_penalty(address);
-    }
-
-    fn add_included(&self, address: Address) {
-        self.reputation.write().add_included(address);
-    }
-
-    fn remove_included(&self, address: Address) {
-        self.reputation.write().remove_included(address);
-    }
-
-    fn dump_reputation(&self) -> Vec<Reputation> {
-        let reputation = self.reputation.read();
-        reputation
-            .counts
-            .iter()
-            .map(|(address, count)| Reputation {
-                address: *address,
-                ops_seen: count.ops_seen,
-                ops_included: count.ops_included,
-            })
-            .collect()
-    }
-
-    fn set_reputation(&self, address: Address, ops_seen: u64, ops_included: u64) {
-        self.reputation
-            .write()
-            .set_reputation(address, ops_seen, ops_included)
-    }
-
-    fn get_ops_allowed(&self, address: Address) -> u64 {
-        self.reputation.read().get_ops_allowed(address)
-    }
-
-    fn clear(&self) {
-        self.reputation.write().clear()
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReputationParams {
@@ -205,6 +30,9 @@ pub(crate) struct ReputationParams {
     inclusion_rate_factor: u64,
     throttling_slack: u64,
     ban_slack: u64,
+    tracking_enabled: bool,
+    decay_interval_secs: u64,
+    decay_factor: u64,
 }
 
 impl Default for ReputationParams {
@@ -217,11 +45,22 @@ impl Default for ReputationParams {
             inclusion_rate_factor: 10,
             throttling_slack: 10,
             ban_slack: 50,
+            tracking_enabled: true,
+            decay_interval_secs: 3600,
+            decay_factor: 24,
         }
     }
 }
 
 impl ReputationParams {
+    pub(crate) fn new(tracking_enabled: bool) -> Self {
+        Self {
+            tracking_enabled,
+            ..Default::default()
+        }
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn bundler_default() -> Self {
         Self::default()
     }
@@ -233,10 +72,95 @@ impl ReputationParams {
             ..Self::default()
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_parameters(ban_slack: u64, throttling_slack: u64) -> Self {
+        Self {
+            ban_slack,
+            throttling_slack,
+            ..Self::default()
+        }
+    }
+}
+
+pub(crate) struct AddressReputation {
+    state: RwLock<AddressReputationInner>,
+}
+
+impl AddressReputation {
+    pub(crate) fn new(
+        params: ReputationParams,
+        blocklist: HashSet<Address>,
+        allowlist: HashSet<Address>,
+    ) -> AddressReputation {
+        Self {
+            state: RwLock::new(
+                AddressReputationInner::new(params)
+                    .with_blocklist(blocklist)
+                    .with_allowlist(allowlist),
+            ),
+        }
+    }
+
+    pub(crate) async fn run(&self) {
+        let mut tick = interval(Duration::from_secs(
+            self.state.read().params.decay_interval_secs,
+        ));
+        loop {
+            tick.tick().await;
+            self.state.write().update();
+        }
+    }
+
+    pub(crate) fn status(&self, address: Address) -> ReputationStatus {
+        self.state.read().status(address)
+    }
+
+    pub(crate) fn add_seen(&self, address: Address) {
+        self.state.write().add_seen(address);
+    }
+
+    pub(crate) fn handle_urep_030_penalty(&self, address: Address) {
+        self.state.write().handle_urep_030_penalty(address);
+    }
+
+    pub(crate) fn handle_srep_050_penalty(&self, address: Address) {
+        self.state.write().handle_srep_050_penalty(address);
+    }
+
+    pub(crate) fn dump_reputation(&self) -> Vec<Reputation> {
+        self.state.read().dump_reputation()
+    }
+
+    pub(crate) fn add_included(&self, address: Address) {
+        self.state.write().add_included(address);
+    }
+
+    pub(crate) fn remove_included(&self, address: Address) {
+        self.state.write().remove_included(address);
+    }
+
+    pub(crate) fn set_reputation(&self, address: Address, ops_seen: u64, ops_included: u64) {
+        self.state
+            .write()
+            .set_reputation(address, ops_seen, ops_included);
+    }
+
+    pub(crate) fn get_ops_allowed(&self, address: Address) -> u64 {
+        self.state.read().get_ops_allowed(address)
+    }
+
+    pub(crate) fn clear(&self) {
+        self.state.write().clear();
+    }
+
+    pub(crate) fn set_tracking(&self, tracking_enabled: bool) {
+        self.state.write().set_tracking(tracking_enabled);
+    }
 }
 
 #[derive(Debug)]
-struct AddressReputation {
+struct AddressReputationInner {
     // Addresses that are always banned
     blocklist: HashSet<Address>,
     // Addresses that are always exempt from throttling and banning
@@ -245,9 +169,9 @@ struct AddressReputation {
     params: ReputationParams,
 }
 
-impl AddressReputation {
-    fn new(params: ReputationParams) -> Self {
-        Self {
+impl AddressReputationInner {
+    fn new(params: ReputationParams) -> AddressReputationInner {
+        AddressReputationInner {
             blocklist: HashSet::new(),
             allowlist: HashSet::new(),
             counts: HashMap::new(),
@@ -255,18 +179,22 @@ impl AddressReputation {
         }
     }
 
-    fn with_blocklist(self, blocklist: HashSet<Address>) -> Self {
-        Self { blocklist, ..self }
+    fn with_blocklist(self, blocklist: HashSet<Address>) -> AddressReputationInner {
+        AddressReputationInner { blocklist, ..self }
     }
 
-    fn with_allowlist(self, allowlist: HashSet<Address>) -> Self {
-        Self { allowlist, ..self }
+    fn with_allowlist(self, allowlist: HashSet<Address>) -> AddressReputationInner {
+        AddressReputationInner { allowlist, ..self }
     }
 
     fn status(&self, address: Address) -> ReputationStatus {
         if self.blocklist.contains(&address) {
             return ReputationStatus::Banned;
         } else if self.allowlist.contains(&address) {
+            return ReputationStatus::Ok;
+        }
+
+        if !self.params.tracking_enabled {
             return ReputationStatus::Ok;
         }
 
@@ -299,6 +227,17 @@ impl AddressReputation {
         let count = self.counts.entry(address).or_default();
         // According to the spec we set ops_seen here instead of incrementing it
         count.ops_seen = self.params.bundle_invalidation_ops_seen_staked_penalty;
+    }
+
+    fn dump_reputation(&self) -> Vec<Reputation> {
+        self.counts
+            .iter()
+            .map(|(address, count)| Reputation {
+                address: *address,
+                ops_seen: count.ops_seen,
+                ops_included: count.ops_included,
+            })
+            .collect()
     }
 
     fn add_included(&mut self, address: Address) {
@@ -334,10 +273,10 @@ impl AddressReputation {
         self.params.same_unstaked_entity_mempool_count + inclusion_based_count
     }
 
-    fn hourly_update(&mut self) {
+    fn update(&mut self) {
         for count in self.counts.values_mut() {
-            count.ops_seen -= count.ops_seen / 24;
-            count.ops_included -= count.ops_included / 24;
+            count.ops_seen -= count.ops_seen / self.params.decay_factor;
+            count.ops_included -= count.ops_included / self.params.decay_factor;
         }
         self.counts
             .retain(|_, count| count.ops_seen > 0 || count.ops_included > 0);
@@ -345,6 +284,10 @@ impl AddressReputation {
 
     fn clear(&mut self) {
         self.counts.clear();
+    }
+
+    fn set_tracking(&mut self, tracking_enabled: bool) {
+        self.params.tracking_enabled = tracking_enabled;
     }
 }
 
@@ -363,7 +306,7 @@ mod tests {
     #[test]
     fn seen_included() {
         let addr = Address::random();
-        let mut reputation = AddressReputation::new(ReputationParams::bundler_default());
+        let mut reputation = AddressReputationInner::new(ReputationParams::bundler_default());
 
         for _ in 0..1000 {
             reputation.add_seen(addr);
@@ -377,7 +320,7 @@ mod tests {
     #[test]
     fn set_rep() {
         let addr = Address::random();
-        let mut reputation = AddressReputation::new(ReputationParams::bundler_default());
+        let mut reputation = AddressReputationInner::new(ReputationParams::bundler_default());
 
         reputation.set_reputation(addr, 1000, 1000);
         let counts = reputation.counts.get(&addr).unwrap();
@@ -388,7 +331,7 @@ mod tests {
     #[test]
     fn reputation_ok() {
         let addr = Address::random();
-        let mut reputation = AddressReputation::new(ReputationParams::bundler_default());
+        let mut reputation = AddressReputationInner::new(ReputationParams::bundler_default());
         reputation.add_seen(addr);
         assert_eq!(reputation.status(addr), ReputationStatus::Ok);
     }
@@ -397,7 +340,7 @@ mod tests {
     fn reputation_throttled() {
         let addr = Address::random();
         let params = ReputationParams::bundler_default();
-        let mut reputation = AddressReputation::new(params);
+        let mut reputation = AddressReputationInner::new(params);
 
         let ops_seen = 1000;
         let ops_included =
@@ -410,7 +353,7 @@ mod tests {
     fn reputation_throttled_edge() {
         let addr = Address::random();
         let params = ReputationParams::bundler_default();
-        let mut reputation = AddressReputation::new(params);
+        let mut reputation = AddressReputationInner::new(params);
 
         let ops_seen = 1000;
         let ops_included =
@@ -423,7 +366,7 @@ mod tests {
     fn reputation_banned() {
         let addr = Address::random();
         let params = ReputationParams::bundler_default();
-        let mut reputation = AddressReputation::new(params);
+        let mut reputation = AddressReputationInner::new(params);
 
         let ops_seen = 1000;
         let ops_included = ops_seen / params.min_inclusion_rate_denominator - params.ban_slack - 1;
@@ -432,25 +375,43 @@ mod tests {
     }
 
     #[test]
+    fn reputation_banned_tracking_disabled() {
+        let addr = Address::random();
+        let params = ReputationParams::new(false);
+        let mut reputation = AddressReputationInner::new(params);
+
+        let ops_seen = 1000;
+        let ops_included = ops_seen / params.min_inclusion_rate_denominator - params.ban_slack - 1;
+        reputation.set_reputation(addr, ops_seen, ops_included);
+        assert_eq!(reputation.status(addr), ReputationStatus::Ok);
+    }
+
+    #[test]
     fn hourly_update() {
         let addr = Address::random();
-        let mut reputation = AddressReputation::new(ReputationParams::bundler_default());
+        let mut reputation = AddressReputationInner::new(ReputationParams::bundler_default());
 
         for _ in 0..1000 {
             reputation.add_seen(addr);
             reputation.add_included(addr);
         }
 
-        reputation.hourly_update();
+        reputation.update();
         let counts = reputation.counts.get(&addr).unwrap();
-        assert_eq!(counts.ops_seen, 1000 - 1000 / 24);
-        assert_eq!(counts.ops_included, 1000 - 1000 / 24);
+        assert_eq!(
+            counts.ops_seen,
+            1000 - 1000 / reputation.params.decay_factor
+        );
+        assert_eq!(
+            counts.ops_included,
+            1000 - 1000 / reputation.params.decay_factor
+        );
     }
 
     #[test]
     fn test_blocklist() {
         let addr = Address::random();
-        let reputation = AddressReputation::new(ReputationParams::bundler_default())
+        let reputation = AddressReputationInner::new(ReputationParams::bundler_default())
             .with_blocklist(HashSet::from([addr]));
 
         assert_eq!(reputation.status(addr), ReputationStatus::Banned);
@@ -460,7 +421,7 @@ mod tests {
     #[test]
     fn test_allowlist() {
         let addr = Address::random();
-        let mut reputation = AddressReputation::new(ReputationParams::bundler_default())
+        let mut reputation = AddressReputationInner::new(ReputationParams::bundler_default())
             .with_allowlist(HashSet::from([addr]));
         reputation.set_reputation(addr, 1000000, 0);
 
@@ -471,8 +432,7 @@ mod tests {
 
     #[test]
     fn manager_seen_included() {
-        let manager =
-            HourlyMovingAverageReputation::new(ReputationParams::bundler_default(), None, None);
+        let mut manager = AddressReputationInner::new(ReputationParams::bundler_default());
         let addrs = [Address::random(), Address::random(), Address::random()];
 
         for _ in 0..10 {
@@ -485,8 +445,7 @@ mod tests {
         for addr in &addrs {
             assert_eq!(manager.status(*addr), ReputationStatus::Ok);
 
-            let rep = manager.reputation.read();
-            let counts = rep.counts.get(addr).unwrap();
+            let counts = manager.counts.get(addr).unwrap();
             assert_eq!(counts.ops_seen, 10);
             assert_eq!(counts.ops_included, 10);
         }
@@ -494,8 +453,7 @@ mod tests {
 
     #[test]
     fn manager_set_dump_reputation() {
-        let manager =
-            HourlyMovingAverageReputation::new(ReputationParams::bundler_default(), None, None);
+        let mut manager = AddressReputationInner::new(ReputationParams::bundler_default());
         let addrs = [Address::random(), Address::random(), Address::random()];
 
         for addr in &addrs {

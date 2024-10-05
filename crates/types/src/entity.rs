@@ -17,7 +17,7 @@ use anyhow::bail;
 use ethers::{types::Address, utils::to_checksum};
 use parse_display::Display;
 use serde::{ser::SerializeStruct, Deserialize, Serialize};
-use strum::EnumIter;
+use strum::{EnumIter, IntoEnumIterator};
 
 /// The type of an entity
 #[derive(
@@ -33,11 +33,13 @@ use strum::EnumIter;
     Deserialize,
     Hash,
     Serialize,
+    Default,
 )]
 #[display(style = "camelCase")]
 #[serde(rename_all = "camelCase")]
 pub enum EntityType {
     /// Account type
+    #[default]
     Account,
     /// Paymaster type
     Paymaster,
@@ -74,7 +76,7 @@ impl FromStr for EntityType {
 }
 
 /// An entity associated with a user operation
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct Entity {
     /// The type of entity
     pub kind: EntityType,
@@ -155,4 +157,129 @@ pub struct EntityUpdate {
     pub entity: Entity,
     /// The kind of update to perform for the entity
     pub update_type: EntityUpdateType,
+}
+
+/// additional context about an entity
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EntityInfo {
+    /// The entity
+    pub entity: Entity,
+    /// Whether the entity is staked or not
+    pub is_staked: bool,
+}
+
+impl EntityInfo {
+    /// Create a new entity info
+    pub fn new(entity: Entity, is_staked: bool) -> Self {
+        Self { entity, is_staked }
+    }
+
+    /// Get the entity address
+    pub fn address(self) -> Address {
+        self.entity.address
+    }
+
+    /// Get the entity type
+    pub fn kind(self) -> EntityType {
+        self.entity.kind
+    }
+
+    /// Check if the entity is staked
+    pub fn is_staked(self) -> bool {
+        self.is_staked
+    }
+}
+
+/// additional context for all the entities used in an op
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EntityInfos {
+    /// The entity info for the factory
+    pub factory: Option<EntityInfo>,
+    /// The entity info for the op sender
+    pub sender: EntityInfo,
+    /// The entity info for the paymaster
+    pub paymaster: Option<EntityInfo>,
+    /// The entity info for the aggregator
+    pub aggregator: Option<EntityInfo>,
+}
+
+impl EntityInfos {
+    /// Get iterator over the entities
+    pub fn entities(&'_ self) -> impl Iterator<Item = (EntityType, EntityInfo)> + '_ {
+        EntityType::iter().filter_map(|t| self.get(t).map(|info| (t, info)))
+    }
+
+    /// Get the EntityInfo of a specific entity
+    pub fn get(self, entity: EntityType) -> Option<EntityInfo> {
+        match entity {
+            EntityType::Factory => self.factory,
+            EntityType::Account => Some(self.sender),
+            EntityType::Paymaster => self.paymaster,
+            EntityType::Aggregator => self.aggregator,
+        }
+    }
+
+    /// Get the type of an entity from its address, if any
+    pub fn type_from_address(self, address: Address) -> Option<EntityType> {
+        if address.eq(&self.sender.entity.address) {
+            return Some(EntityType::Account);
+        }
+
+        if let Some(factory) = self.factory {
+            if address.eq(&factory.entity.address) {
+                return Some(EntityType::Factory);
+            }
+        }
+
+        if let Some(paymaster) = self.paymaster {
+            if address.eq(&paymaster.entity.address) {
+                return Some(EntityType::Paymaster);
+            }
+        }
+
+        if let Some(aggregator) = self.aggregator {
+            if address.eq(&aggregator.entity.address) {
+                return Some(EntityType::Aggregator);
+            }
+        }
+
+        None
+    }
+
+    /// Get the sender address
+    pub fn sender_address(self) -> Address {
+        self.sender.entity.address
+    }
+
+    /// Set the sender info
+    pub fn set_sender(&mut self, addr: Address, is_staked: bool) {
+        self.sender = EntityInfo {
+            entity: Entity::account(addr),
+            is_staked,
+        };
+    }
+
+    /// Set the factory info
+    pub fn set_factory(&mut self, addr: Address, is_staked: bool) {
+        self.factory = Some(EntityInfo {
+            entity: Entity::factory(addr),
+            is_staked,
+        });
+    }
+
+    /// Set the paymaster info
+    pub fn set_paymaster(&mut self, addr: Address, is_staked: bool) {
+        self.paymaster = Some(EntityInfo {
+            entity: Entity::paymaster(addr),
+            is_staked,
+        });
+    }
+
+    /// Set the aggregator info
+    pub fn set_aggregator(&mut self, addr: Address, is_staked: bool) {
+        self.aggregator = Some(EntityInfo {
+            entity: Entity::aggregator(addr),
+            is_staked,
+        });
+    }
 }

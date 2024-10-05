@@ -69,7 +69,7 @@ l2_util = eth_utils(w3)
 solcx.install_solc("0.8.17")
 solcx.set_solc_version("0.8.17")
 contract_info = {}
-PATH_PREFIX = "../crates/types/contracts/lib/account-abstraction/contracts/"
+PATH_PREFIX = "../crates/types/contracts/lib/account-abstraction-versions/v0_6/contracts/"
 
 def load_contract(w, name, files):
     """Compiles a contract from source and loads its ABI"""
@@ -77,7 +77,7 @@ def load_contract(w, name, files):
         files,
         output_values=['abi', 'bin', 'bin-runtime'],
         import_remappings={
-            "@openzeppelin": "../crates/types/contracts/lib/openzeppelin-contracts"},
+            "@openzeppelin": "../crates/types/contracts/lib/openzeppelin-contracts-versions/v4_9"},
         allow_paths=[PATH_PREFIX],
         optimize=True,
         optimize_runs=1000000,
@@ -204,25 +204,29 @@ def deploy_account(factory, owner):
         l2_util.sign_and_submit(tx, deploy_key)
     return acct_addr
 
-def deploy_base():
-    """Deploy the basic contracts needed for the local system"""
-    args = ["forge", "script", "--json", "--broadcast", "--silent"]
-    args.append ("--rpc-url=http://127.0.0.1:9545")
-    args.append("hc_scripts/LocalDeploy.s.sol")
+def deploy_forge(script, cmd_env):
+    args = ["/home/enya/.foundry/bin/forge", "script", "--silent", "--json", "--broadcast"]
+    args.append("--rpc-url=http://127.0.0.1:9545")
+    args.append("--contracts")
+    args.append("lib/account-abstraction-versions/v0_6/contracts/core")
+    args.append("--remappings")
+    args.append("@openzeppelin/=lib/openzeppelin-contracts-versions/v4_9")
+    args.append(script)
     sys_env = os.environ.copy()
-    cmd_env = {}
+
     cmd_env['PATH'] = sys_env['PATH']
     cmd_env['PRIVATE_KEY'] = deploy_key
-    cmd_env['HC_SYS_OWNER'] = env_vars['HC_SYS_OWNER']
     cmd_env['DEPLOY_ADDR'] = deploy_addr
     cmd_env['DEPLOY_SALT'] = cli_args.deploy_salt  # Update to force redeployment
-    cmd_env['BOBA_TOKEN'] = boba_token
+    cmd_env['ENTRY_POINTS'] = env_vars['ENTRY_POINTS']
 
     out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env,
         capture_output=True, check=True)
 
     # Subprocess will fail if contracts were previously deployed but those addresses were
     # not passed in as env variables. Retry on a cleanly deployed devnet or change deploy_salt.
+    if out.returncode != 0:
+      print(out)
     assert out.returncode == 0
 
     jstr = out.stdout.split(b'\n')[0].decode('ascii')
@@ -230,25 +234,21 @@ def deploy_base():
     addrs_raw = ret_json['returns']['0']['value']
     # Need to parse the 'internal_type': 'address[5]' value
     addrs = addrs_raw[1:-1].replace(' ','')
+    return addrs
+
+def deploy_base():
+    """Deploy the basic contracts needed for the local system"""
+    cmd_env = {}
+    cmd_env['HC_SYS_OWNER'] = env_vars['HC_SYS_OWNER']
+    cmd_env['BOBA_TOKEN'] = boba_token
+    addrs = deploy_forge("hc_scripts/LocalDeploy.s.sol", cmd_env)
     print("Deployed base contracts:", addrs)
     return addrs.split(',')
 
 def deploy_examples(hybrid_acct_addr):
-    """Deploy example contracts"""
-    args = ["forge", "script", "--json", "--broadcast", "--silent"]
-    args.append ("--rpc-url=http://127.0.0.1:9545")
-    args.append("hc_scripts/ExampleDeploy.s.sol")
-    cmd_env = os.environ.copy()
-    cmd_env['PRIVATE_KEY'] = deploy_key
+    cmd_env = {}
     cmd_env['OC_HYBRID_ACCOUNT'] = hybrid_acct_addr
-
-    out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env,\
-        capture_output=True, check=True)
-    assert out.returncode == 0
-    jstr = out.stdout.split(b'\n')[0].decode('ascii')
-    ret_json = json.loads(jstr)
-    addrs_raw = ret_json['returns']['0']['value']
-    addrs = addrs_raw[1:-1].replace(' ','')
+    addrs = deploy_forge("hc_scripts/ExampleDeploy.s.sol", cmd_env)
     print("Deployed example contracts:", addrs)
     return addrs.split(',')
 

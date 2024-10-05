@@ -11,29 +11,28 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{atomic::AtomicBool, Arc},
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use ethers::{
-    providers::{JsonRpcClient, Provider},
+    providers::{JsonRpcClient, Provider as EthersProvider},
     types::{Address, H256},
 };
 use ethers_signers::Signer;
 use futures::future;
 use futures_util::TryFutureExt;
-use rundler_pool::PoolServer;
+use rundler_provider::{EntryPointProvider, EthersEntryPointV0_6, EthersEntryPointV0_7};
 use rundler_sim::{
-    MempoolConfig, PriorityFeeMode, SimulateValidationTracerImpl, SimulationSettings, SimulatorImpl,
+    simulation::{self, UnsafeSimulator},
+    MempoolConfig, PriorityFeeMode, SimulationSettings, Simulator,
 };
 use rundler_task::Task;
-use rundler_types::contracts::i_entry_point::IEntryPoint;
-use rundler_utils::{emit::WithEntryPoint, eth, handle};
+use rundler_types::{
+    chain::ChainSpec, hybrid_compute, pool::Pool, v0_6, v0_7, EntryPointVersion, UserOperation,
+    UserOperationVariant,
+};
+use rundler_utils::{emit::WithEntryPoint, handle};
 use rusoto_core::Region;
 use tokio::{
     sync::{broadcast, mpsc},
@@ -45,26 +44,26 @@ use tracing::info;
 
 use crate::{
     bundle_proposer::{self, BundleProposerImpl},
-    bundle_sender::{self, BundleSender, BundleSenderImpl, SendBundleRequest},
+    bundle_sender::{self, BundleSender, BundleSenderAction, BundleSenderImpl},
     emit::BuilderEvent,
-    sender::TransactionSenderType,
+    sender::TransactionSenderArgs,
     server::{spawn_remote_builder_server, LocalBuilderBuilder},
     signer::{BundlerSigner, KmsSigner, LocalSigner},
     transaction_tracker::{self, TransactionTrackerImpl},
 };
 
-use rundler_types::hybrid_compute;
-
 /// Builder task arguments
 #[derive(Debug)]
 pub struct Args {
+    /// Chain spec
+    pub chain_spec: ChainSpec,
     /// Full node RPC url
     pub rpc_url: String,
-    /// Address of the entry point contract this builder targets
-    pub entry_point_address: Address,
+    /// True if using unsafe mode
+    pub unsafe_mode: bool,
     /// Private key to use for signing transactions
-    /// If not provided, AWS KMS will be used
-    pub private_key: Option<String>,
+    /// If empty, AWS KMS will be used
+    pub private_keys: Vec<String>,
     /// AWS KMS key ids to use for signing transactions
     /// Only used if private_key is not provided
     pub aws_kms_key_ids: Vec<String>,
@@ -74,44 +73,45 @@ pub struct Args {
     pub redis_uri: String,
     /// Redis lease TTL in milliseconds
     pub redis_lock_ttl_millis: u64,
-    /// Chain ID
-    pub chain_id: u64,
     /// Maximum bundle size in number of operations
     pub max_bundle_size: u64,
     /// Maximum bundle size in gas limit
     pub max_bundle_gas: u64,
-    /// URL to submit bundles too
-    pub submit_url: String,
-    /// Percentage to add to the the network priority fee for the bundle priority fee
+    /// Percentage to add to the network priority fee for the bundle priority fee
     pub bundle_priority_fee_overhead_percent: u64,
     /// Priority fee mode to use for operation priority fee minimums
     pub priority_fee_mode: PriorityFeeMode,
     /// Sender to be used by the builder
-    pub sender_type: TransactionSenderType,
-    /// RPC node poll interval
-    pub eth_poll_interval: Duration,
+    pub sender_args: TransactionSenderArgs,
     /// Operation simulation settings
     pub sim_settings: SimulationSettings,
-    /// Alt-mempool configs
-    pub mempool_configs: HashMap<H256, MempoolConfig>,
     /// Maximum number of blocks to wait for a transaction to be mined
     pub max_blocks_to_wait_for_mine: u64,
     /// Percentage to increase the fees by when replacing a bundle transaction
     pub replacement_fee_percent_increase: u64,
-    /// Maximum number of times to increase the fees when replacing a bundle transaction
-    pub max_fee_increases: u64,
+    /// Maximum number of times to increase the fee when cancelling a transaction
+    pub max_cancellation_fee_increases: u64,
+    /// Maximum amount of blocks to spend in a replacement underpriced state before moving to cancel
+    pub max_replacement_underpriced_blocks: u64,
     /// Address to bind the remote builder server to, if any. If none, no server is starter.
     pub remote_address: Option<SocketAddr>,
-    /// Optional Bloxroute auth header
-    ///
-    /// This is only used for Polygon.
-    ///
-    /// Checked ~after~ checking for conditional sender or Flashbots sender.
-    pub bloxroute_auth_header: Option<String>,
+    /// Entry points to start builders for
+    pub entry_points: Vec<EntryPointBuilderSettings>,
+}
+
+/// Builder settings for an entrypoint
+#[derive(Debug)]
+pub struct EntryPointBuilderSettings {
+    /// Entry point address
+    pub address: Address,
+    /// Entry point version
+    pub version: EntryPointVersion,
     /// Number of bundle builders to start
     pub num_bundle_builders: u64,
     /// Index offset for bundle builders
     pub bundle_builder_index_offset: u64,
+    /// Mempool configs
+    pub mempool_configs: HashMap<H256, MempoolConfig>,
 }
 
 /// Builder task
@@ -126,27 +126,67 @@ pub struct BuilderTask<P> {
 #[async_trait]
 impl<P> Task for BuilderTask<P>
 where
-    P: PoolServer + Clone,
+    P: Pool + Clone,
 {
     async fn run(mut self: Box<Self>, shutdown_token: CancellationToken) -> anyhow::Result<()> {
-        info!("Mempool config: {:?}", self.args.mempool_configs);
+        let provider = rundler_provider::new_provider(&self.args.rpc_url, None)?;
+        let submit_provider = if let TransactionSenderArgs::Raw(args) = &self.args.sender_args {
+            Some(rundler_provider::new_provider(&args.submit_url, None)?)
+        } else {
+            None
+        };
 
-        let provider = eth::new_provider(&self.args.rpc_url, Some(self.args.eth_poll_interval))?;
-        let manual_bundling_mode = Arc::new(AtomicBool::new(false));
+        let ep_v0_6 = EthersEntryPointV0_6::new(
+            self.args.chain_spec.entry_point_address_v0_6,
+            &self.args.chain_spec,
+            self.args.sim_settings.max_simulate_handle_ops_gas,
+            Arc::clone(&provider),
+        );
+        let ep_v0_7 = EthersEntryPointV0_7::new(
+            self.args.chain_spec.entry_point_address_v0_7,
+            &self.args.chain_spec,
+            self.args.sim_settings.max_simulate_handle_ops_gas,
+            Arc::clone(&provider),
+        );
 
         let mut sender_handles = vec![];
-        let mut send_bundle_txs = vec![];
-        for i in 0..self.args.num_bundle_builders {
-            let (spawn_guard, send_bundle_tx) = self
-                .create_bundle_builder(
-                    i + self.args.bundle_builder_index_offset,
-                    Arc::clone(&manual_bundling_mode),
-                    Arc::clone(&provider),
-                )
-                .await?;
-            sender_handles.push(spawn_guard);
-            send_bundle_txs.push(send_bundle_tx);
+        let mut bundle_sender_actions = vec![];
+        let mut pk_iter = self.args.private_keys.clone().into_iter();
+
+        for ep in &self.args.entry_points {
+            match ep.version {
+                EntryPointVersion::V0_6 => {
+                    let (handles, actions) = self
+                        .create_builders_v0_6(
+                            ep,
+                            Arc::clone(&provider),
+                            submit_provider.clone(),
+                            ep_v0_6.clone(),
+                            &mut pk_iter,
+                        )
+                        .await?;
+                    sender_handles.extend(handles);
+                    bundle_sender_actions.extend(actions);
+                }
+                EntryPointVersion::V0_7 => {
+                    let (handles, actions) = self
+                        .create_builders_v0_7(
+                            ep,
+                            Arc::clone(&provider),
+                            submit_provider.clone(),
+                            ep_v0_7.clone(),
+                            &mut pk_iter,
+                        )
+                        .await?;
+                    sender_handles.extend(handles);
+                    bundle_sender_actions.extend(actions);
+                }
+                EntryPointVersion::Unspecified => {
+                    panic!("Unspecified entry point version")
+                }
+            }
         }
+
         // flatten the senders handles to one handle, short-circuit on errors
         let sender_handle = tokio::spawn(
             future::try_join_all(sender_handles)
@@ -156,9 +196,8 @@ where
 
         let builder_handle = self.builder_builder.get_handle();
         let builder_runnder_handle = self.builder_builder.run(
-            manual_bundling_mode,
-            send_bundle_txs,
-            vec![self.args.entry_point_address],
+            bundle_sender_actions,
+            vec![self.args.chain_spec.entry_point_address_v0_6],
             shutdown_token.clone(),
         );
 
@@ -166,7 +205,7 @@ where
             Some(addr) => {
                 spawn_remote_builder_server(
                     addr,
-                    self.args.chain_id,
+                    self.args.chain_spec.id,
                     builder_handle,
                     shutdown_token,
                 )
@@ -196,7 +235,7 @@ where
 
 impl<P> BuilderTask<P>
 where
-    P: PoolServer + Clone,
+    P: Pool + Clone,
 {
     /// Create a new builder task
     pub fn new(
@@ -218,34 +257,161 @@ where
         Box::new(self)
     }
 
-    async fn create_bundle_builder<C: JsonRpcClient + 'static>(
+    async fn create_builders_v0_6<C, E, I>(
+        &self,
+        ep: &EntryPointBuilderSettings,
+        provider: Arc<EthersProvider<C>>,
+        submit_provider: Option<Arc<EthersProvider<C>>>,
+        ep_v0_6: E,
+        pk_iter: &mut I,
+    ) -> anyhow::Result<(
+        Vec<JoinHandle<anyhow::Result<()>>>,
+        Vec<mpsc::Sender<BundleSenderAction>>,
+    )>
+    where
+        C: JsonRpcClient + 'static,
+        E: EntryPointProvider<v0_6::UserOperation> + Clone,
+        I: Iterator<Item = String>,
+    {
+        info!("Mempool config for ep v0.6: {:?}", ep.mempool_configs);
+        let mut sender_handles = vec![];
+        let mut bundle_sender_actions = vec![];
+        for i in 0..ep.num_bundle_builders {
+            let (spawn_guard, bundle_sender_action) = if self.args.unsafe_mode {
+                self.create_bundle_builder(
+                    i + ep.bundle_builder_index_offset,
+                    Arc::clone(&provider),
+                    submit_provider.clone(),
+                    ep_v0_6.clone(),
+                    UnsafeSimulator::new(
+                        Arc::clone(&provider),
+                        ep_v0_6.clone(),
+                        self.args.sim_settings.clone(),
+                    ),
+                    pk_iter,
+                )
+                .await?
+            } else {
+                self.create_bundle_builder(
+                    i + ep.bundle_builder_index_offset,
+                    Arc::clone(&provider),
+                    submit_provider.clone(),
+                    ep_v0_6.clone(),
+                    simulation::new_v0_6_simulator(
+                        Arc::clone(&provider),
+                        ep_v0_6.clone(),
+                        self.args.sim_settings.clone(),
+                        ep.mempool_configs.clone(),
+                    ),
+                    pk_iter,
+                )
+                .await?
+            };
+            sender_handles.push(spawn_guard);
+            bundle_sender_actions.push(bundle_sender_action);
+        }
+        Ok((sender_handles, bundle_sender_actions))
+    }
+
+    async fn create_builders_v0_7<C, E, I>(
+        &self,
+        ep: &EntryPointBuilderSettings,
+        provider: Arc<EthersProvider<C>>,
+        submit_provider: Option<Arc<EthersProvider<C>>>,
+        ep_v0_7: E,
+        pk_iter: &mut I,
+    ) -> anyhow::Result<(
+        Vec<JoinHandle<anyhow::Result<()>>>,
+        Vec<mpsc::Sender<BundleSenderAction>>,
+    )>
+    where
+        C: JsonRpcClient + 'static,
+        E: EntryPointProvider<v0_7::UserOperation> + Clone,
+        I: Iterator<Item = String>,
+    {
+        info!("Mempool config for ep v0.7: {:?}", ep.mempool_configs);
+        let mut sender_handles = vec![];
+        let mut bundle_sender_actions = vec![];
+        for i in 0..ep.num_bundle_builders {
+            let (spawn_guard, bundle_sender_action) = if self.args.unsafe_mode {
+                self.create_bundle_builder(
+                    i + ep.bundle_builder_index_offset,
+                    Arc::clone(&provider),
+                    submit_provider.clone(),
+                    ep_v0_7.clone(),
+                    UnsafeSimulator::new(
+                        Arc::clone(&provider),
+                        ep_v0_7.clone(),
+                        self.args.sim_settings.clone(),
+                    ),
+                    pk_iter,
+                )
+                .await?
+            } else {
+                self.create_bundle_builder(
+                    i + ep.bundle_builder_index_offset,
+                    Arc::clone(&provider),
+                    submit_provider.clone(),
+                    ep_v0_7.clone(),
+                    simulation::new_v0_7_simulator(
+                        Arc::clone(&provider),
+                        ep_v0_7.clone(),
+                        self.args.sim_settings.clone(),
+                        ep.mempool_configs.clone(),
+                    ),
+                    pk_iter,
+                )
+                .await?
+            };
+            sender_handles.push(spawn_guard);
+            bundle_sender_actions.push(bundle_sender_action);
+        }
+        Ok((sender_handles, bundle_sender_actions))
+    }
+
+    async fn create_bundle_builder<UO, E, S, C, I>(
         &self,
         index: u64,
-        manual_bundling_mode: Arc<AtomicBool>,
-        provider: Arc<Provider<C>>,
+        provider: Arc<EthersProvider<C>>,
+        submit_provider: Option<Arc<EthersProvider<C>>>,
+        entry_point: E,
+        simulator: S,
+        pk_iter: &mut I,
     ) -> anyhow::Result<(
         JoinHandle<anyhow::Result<()>>,
-        mpsc::Sender<SendBundleRequest>,
-    )> {
+        mpsc::Sender<BundleSenderAction>,
+    )>
+    where
+        UO: UserOperation + From<UserOperationVariant>,
+        UserOperationVariant: AsRef<UO>,
+        E: EntryPointProvider<UO> + Clone,
+        S: Simulator<UO = UO>,
+        C: JsonRpcClient + 'static,
+        I: Iterator<Item = String>,
+    {
         let (send_bundle_tx, send_bundle_rx) = mpsc::channel(1);
 
-        let signer = if let Some(pk) = &self.args.private_key {
+        let signer = if let Some(pk) = pk_iter.next() {
             info!("Using local signer");
             BundlerSigner::Local(
-                LocalSigner::connect(Arc::clone(&provider), self.args.chain_id, pk.to_owned())
-                    .await?,
+                LocalSigner::connect(
+                    Arc::clone(&provider),
+                    self.args.chain_spec.id,
+                    pk.to_owned(),
+                )
+                .await?,
             )
         } else {
             info!("Using AWS KMS signer");
             let signer = time::timeout(
-                // timeout must be << than the lock TTL to avoid a
+                // timeout must be < than the lock TTL to avoid a
                 // bug in the redis lock implementation that panics if connection
                 // takes longer than the TTL. Generally the TLL should be on the order of 10s of seconds
                 // so this should give ample time for the connection to establish.
-                Duration::from_millis(self.args.redis_lock_ttl_millis / 10),
+                Duration::from_millis(self.args.redis_lock_ttl_millis / 4),
                 KmsSigner::connect(
                     Arc::clone(&provider),
-                    self.args.chain_id,
+                    self.args.chain_spec.id,
                     self.args.aws_kms_region.clone(),
                     self.args.aws_kms_key_ids.clone(),
                     self.args.redis_uri.clone(),
@@ -260,9 +426,9 @@ where
             ret
         };
         let beneficiary = signer.address();
-	hybrid_compute::set_signer(signer.address());
+        hybrid_compute::set_signer(signer.address());
         let proposer_settings = bundle_proposer::Settings {
-            chain_id: self.args.chain_id,
+            chain_spec: self.args.chain_spec.clone(),
             max_bundle_size: self.args.max_bundle_size,
             max_bundle_gas: self.args.max_bundle_gas,
             beneficiary,
@@ -270,31 +436,13 @@ where
             bundle_priority_fee_overhead_percent: self.args.bundle_priority_fee_overhead_percent,
         };
 
-        let entry_point = IEntryPoint::new(self.args.entry_point_address, Arc::clone(&provider));
-        let simulate_validation_tracer =
-            SimulateValidationTracerImpl::new(Arc::clone(&provider), entry_point.clone());
-	let simulator = SimulatorImpl::new(
+        let transaction_sender = self.args.sender_args.clone().into_sender(
             Arc::clone(&provider),
-            entry_point.address(),
-            simulate_validation_tracer,
-            self.args.sim_settings,
-            self.args.mempool_configs.clone(),
-        );
-
-        let submit_provider =
-            eth::new_provider(&self.args.submit_url, Some(self.args.eth_poll_interval))?;
-
-        let transaction_sender = self.args.sender_type.into_sender(
             submit_provider,
             signer,
-            self.args.chain_id,
-            self.args.eth_poll_interval,
-            &self.args.bloxroute_auth_header,
         )?;
 
         let tracker_settings = transaction_tracker::Settings {
-            poll_interval: self.args.eth_poll_interval,
-            max_blocks_to_wait_for_mine: self.args.max_blocks_to_wait_for_mine,
             replacement_fee_percent_increase: self.args.replacement_fee_percent_increase,
         };
 
@@ -302,12 +450,14 @@ where
             Arc::clone(&provider),
             transaction_sender,
             tracker_settings,
+            index,
         )
         .await?;
 
         let builder_settings = bundle_sender::Settings {
-            replacement_fee_percent_increase: self.args.replacement_fee_percent_increase,
-            max_fee_increases: self.args.max_fee_increases,
+            max_replacement_underpriced_blocks: self.args.max_replacement_underpriced_blocks,
+            max_cancellation_fee_increases: self.args.max_cancellation_fee_increases,
+            max_blocks_to_wait_for_mine: self.args.max_blocks_to_wait_for_mine,
         };
 
         let proposer = BundleProposerImpl::new(
@@ -321,9 +471,8 @@ where
         );
         let builder = BundleSenderImpl::new(
             index,
-            manual_bundling_mode.clone(),
             send_bundle_rx,
-            self.args.chain_id,
+            self.args.chain_spec.clone(),
             beneficiary,
             proposer,
             entry_point,

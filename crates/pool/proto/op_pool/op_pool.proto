@@ -17,9 +17,16 @@ syntax = "proto3";
 
 package op_pool;
 
+message UserOperation {
+  oneof uo {
+    UserOperationV06 v06 = 1;
+    UserOperationV07 v07 = 2;
+  }
+}
+
 // Protocol Buffer representation of an ERC-4337 UserOperation. See the official
 // specification at https://eips.ethereum.org/EIPS/eip-4337#definitions
-message UserOperation {
+message UserOperationV06 {
   // The account making the operation
   bytes sender = 1;
   // Anti-replay parameter (see “Semi-abstracted Nonce Support” )
@@ -43,9 +50,46 @@ message UserOperation {
   // Address of paymaster sponsoring the transaction, followed by extra data to
   // send to the paymaster (empty for self-sponsored transaction)
   bytes paymaster_and_data = 10;
-  // Data passed into the account along with the nonce during the verification
-  // step
+  // Signature over the hash of the packed representation of the user operation
   bytes signature = 11;
+}
+
+message UserOperationV07 {
+  // The account making the operation
+  bytes sender = 1;
+  // Anti-replay parameter (see “Semi-abstracted Nonce Support” )
+  bytes nonce = 2;
+  // The data to pass to the sender during the main execution call
+  bytes call_data = 3;
+  // The amount of gas to allocate the main execution call
+  bytes call_gas_limit = 4;
+  // The amount of gas to allocate for the verification step
+  bytes verification_gas_limit = 5;
+  // The amount of gas to pay for to compensate the bundler for pre-verification
+  // execution and calldata
+  bytes pre_verification_gas = 6;
+  // Maximum fee per gas (similar to EIP-1559 max_fee_per_gas)
+  bytes max_fee_per_gas = 7;
+  // Maximum priority fee per gas (similar to EIP-1559 max_priority_fee_per_gas)
+  bytes max_priority_fee_per_gas = 8;
+  // Signature over the hash of the packed representation of the user operation
+  bytes signature = 9;
+  // Address of paymaster sponsoring the transaction, empty if none
+  bytes paymaster = 10;
+  // Extra data to send to the paymaster, zero if no paymaster
+  bytes paymaster_data = 11;
+  // Paymaster verification gas limit, zero if no paymaster
+  bytes paymaster_verification_gas_limit = 12;
+  // Paymaster post-op gas limit, zero if no paymaster
+  bytes paymaster_post_op_gas_limit = 13;
+  // Address of the factory to use to create the sender account, empty if none
+  bytes factory = 14;
+  // Extra data to send to the factory, empty if no factory
+  bytes factory_data = 15;
+
+  // Extra data to compute the hash of the user operation
+  bytes entry_point = 16;
+  uint64 chain_id = 17;
 }
 
 enum EntityType {
@@ -101,17 +145,14 @@ message MempoolOp {
   // See rule (5) here:
   // https://github.com/ethereum/EIPs/blob/master/EIPS/eip-4337.md#specification-1
   bytes expected_code_hash = 5;
-  // A list of all entities that require stake to process this UO as identified in
-  // validation before entering the mempool
-  repeated EntityType entities_needing_stake = 6;
   // Block hash at which the UserOperation was simulated
-  bytes sim_block_hash = 7;
+  bytes sim_block_hash = 6;
   // Indicates if the account is staked. Staked accounts are allowed to have
   // multiple UserOperations in the mempool, otherwise just one UserOperation is
   // permitted
-  bool account_is_staked = 8;
+  bool account_is_staked = 7;
   // The entry point address of this operation
-  bytes entry_point = 9;
+  bytes entry_point = 8;
 }
 
 // Defines the gRPC endpoints for a UserOperation mempool service
@@ -133,6 +174,9 @@ service OpPool {
   // Removes UserOperations from the mempool
   rpc RemoveOps(RemoveOpsRequest) returns (RemoveOpsResponse);
 
+  // Remove a UserOperation by its id
+  rpc RemoveOpById(RemoveOpByIdRequest) returns (RemoveOpByIdResponse);
+
   // Handles a list of updates to be performed on entities
   rpc UpdateEntities(UpdateEntitiesRequest) returns (UpdateEntitiesResponse);
 
@@ -150,6 +194,9 @@ service OpPool {
   // debug_bundler_setReputation
   rpc DebugDumpReputation(DebugDumpReputationRequest) returns (DebugDumpReputationResponse);
 
+  // Dumps the paymaster balances
+  rpc DebugDumpPaymasterBalances(DebugDumpPaymasterBalancesRequest) returns (DebugDumpPaymasterBalancesResponse);
+
   // Get reputation status of address
   rpc GetReputationStatus(GetReputationStatusRequest) returns (GetReputationStatusResponse);
 
@@ -159,6 +206,9 @@ service OpPool {
   // Streaming API to subscribe to be updated upon a new block being added to (or reorged onto)
   // the chain. 
   rpc SubscribeNewHeads(SubscribeNewHeadsRequest) returns (stream SubscribeNewHeadsResponse);
+
+  // Clears the bundler mempool and reputation data of paymasters/accounts/factories/aggregators
+  rpc AdminSetTracking(AdminSetTrackingRequest) returns (AdminSetTrackingResponse);
 }
 
 message GetSupportedEntryPointsRequest {}
@@ -275,6 +325,21 @@ message RemoveOpsResponse {
 }
 message RemoveOpsSuccess {}
 
+message RemoveOpByIdRequest {
+  bytes entry_point = 1;
+  bytes sender = 2;
+  bytes nonce = 3;
+}
+message RemoveOpByIdResponse {
+  oneof result {
+    RemoveOpByIdSuccess success = 1;
+    MempoolError failure = 2;
+  }
+}
+message RemoveOpByIdSuccess {
+  bytes hash = 1;
+}
+
 message UpdateEntitiesRequest {
   // The serilaized entry point address
   bytes entry_point = 1;
@@ -293,6 +358,7 @@ message UpdateEntitiesSuccess {}
 message DebugClearStateRequest {
   bool clear_mempool = 1;
   bool clear_reputation = 2;
+  bool clear_paymaster = 3;
 }
 message DebugClearStateResponse {
   oneof result {
@@ -343,6 +409,24 @@ message DebugDumpReputationSuccess {
   repeated Reputation reputations = 1;
 }
 
+message DebugDumpPaymasterBalancesRequest {
+  bytes entry_point = 1;
+}
+message DebugDumpPaymasterBalancesResponse {
+  oneof result {
+    DebugDumpPaymasterBalancesSuccess success = 1;
+    MempoolError failure = 2;
+  }
+}
+message DebugDumpPaymasterBalancesSuccess {
+  repeated PaymasterBalance balances = 1;
+}
+message PaymasterBalance {
+  bytes address = 1;
+  bytes pending_balance = 2;
+  bytes confirmed_balance = 3;
+}
+
 message SubscribeNewHeadsRequest {}
 message SubscribeNewHeadsResponse {
   // The new chain head
@@ -354,6 +438,20 @@ message NewHead {
   // The block number
   uint64 block_number = 2;
 }
+
+message AdminSetTrackingRequest {
+  // The serialized entry point address via which the UserOperation is being submitted
+  bytes entry_point = 1;
+  bool paymaster = 2;
+  bool reputation = 3;
+}
+message AdminSetTrackingResponse {
+  oneof result {
+    AdminSetTrackingSuccess success = 1;
+    MempoolError failure = 2;
+  }
+}
+message AdminSetTrackingSuccess {}
 
 message Reputation {
   // The (serialized) address to set the reputation for
@@ -389,6 +487,7 @@ message MempoolError {
     SenderAddressUsedAsAlternateEntity sender_address_used_as_alternate_entity = 13;
     AssociatedStorageIsAlternateSender associated_storage_is_alternate_sender = 14;
     PaymasterBalanceTooLow paymaster_balance_too_low = 15;
+    OperationDropTooSoon operation_drop_too_soon = 16;
   }
 }
 
@@ -412,7 +511,7 @@ message PaymasterBalanceTooLow {
 
 message MaxOperationsReachedError {
   uint64 num_ops = 1;
-  bytes entity_address = 2;
+  Entity entity = 2;
 }
 
 message EntityThrottledError {
@@ -435,23 +534,27 @@ message UnsupportedAggregatorError {
 
 message InvalidSignatureError {}
 
+message OperationDropTooSoon {
+  uint64 added_at = 1;
+  uint64 attempted_at = 2;
+  uint64 must_wait = 3;
+}
+
 // PRECHECK VIOLATIONS
 message PrecheckViolationError {
   oneof violation {
-    InitCodeTooShort init_code_too_short = 1;
-    SenderIsNotContractAndNoInitCode sender_is_not_contract_and_no_init_code = 2;
-    ExistingSenderWithInitCode existing_sender_with_init_code = 3;
-    FactoryIsNotContract factory_is_not_contract = 4;
-    TotalGasLimitTooHigh total_gas_limit_too_high = 5;
-    VerificationGasLimitTooHigh verification_gas_limit_too_high = 6;
-    PreVerificationGasTooLow pre_verification_gas_too_low = 7;
-    PaymasterTooShort paymaster_too_short = 8;
-    PaymasterIsNotContract paymaster_is_not_contract = 9;
-    PaymasterDepositTooLow paymaster_deposit_too_low = 10;
-    SenderFundsTooLow sender_funds_too_low = 11;
-    MaxFeePerGasTooLow max_fee_per_gas_too_low = 12;
-    MaxPriorityFeePerGasTooLow max_priority_fee_per_gas_too_low = 13;
-    CallGasLimitTooLow call_gas_limit_too_low = 14;
+    SenderIsNotContractAndNoInitCode sender_is_not_contract_and_no_init_code = 1;
+    ExistingSenderWithInitCode existing_sender_with_init_code = 2;
+    FactoryIsNotContract factory_is_not_contract = 3;
+    TotalGasLimitTooHigh total_gas_limit_too_high = 4;
+    VerificationGasLimitTooHigh verification_gas_limit_too_high = 5;
+    PreVerificationGasTooLow pre_verification_gas_too_low = 6;
+    PaymasterIsNotContract paymaster_is_not_contract = 7;
+    PaymasterDepositTooLow paymaster_deposit_too_low = 8;
+    SenderFundsTooLow sender_funds_too_low = 9;
+    MaxFeePerGasTooLow max_fee_per_gas_too_low = 10;
+    MaxPriorityFeePerGasTooLow max_priority_fee_per_gas_too_low = 11;
+    CallGasLimitTooLow call_gas_limit_too_low = 12;
   }
 }
 
@@ -540,14 +643,30 @@ message SimulationViolationError {
     AggregatorValidationFailed aggregator_validation_failed = 16;
     UnstakedPaymasterContext unstaked_paymaster_context = 17;
     UnstakedAggregator unstaked_aggregator = 18;
+    VerificationGasLimitBufferTooLow verification_gas_limit_buffer_too_low = 19;
+    ValidationRevert validation_revert = 20;
+    InvalidAccountSignature invalid_account_signature = 21;
+    InvalidPaymasterSignature invalid_paymaster_signature = 22;
+    AssociatedStorageDuringDeploy associated_storage_during_deploy = 23;
+    InvalidTimeRange invalid_time_range = 24;
+    AccessedUnsupportedContractType accessed_unsupported_contract_type = 25;
   }
 }
 
 message InvalidSignature {}
 
+message InvalidAccountSignature {}
+
+message InvalidPaymasterSignature {}
+
 message UnstakedAggregator {}
 
 message UnstakedPaymasterContext {}
+
+message InvalidTimeRange {
+  uint64 valid_until = 1;
+  uint64 valud_after = 2;
+}
 
 message UnintendedRevertWithMessage {
   Entity entity = 1;
@@ -576,13 +695,20 @@ message InvalidStorageAccess {
   bytes slot = 3;
 }
 
-message NotStaked {
+message AssociatedStorageDuringDeploy {
   Entity entity = 1;
-  bytes accessed_address = 2;
+  bytes contract_address = 2;
+  bytes slot = 3;
+}
+
+message NotStaked {
+  Entity needs_stake = 1;
+  EntityType accessing_entity = 2;
   EntityType accessed_entity = 3;
-  bytes slot = 4;
-  bytes min_stake = 5;
-  bytes min_unstake_delay = 6;
+  bytes accessed_address = 4;
+  bytes slot = 5;
+  bytes min_stake = 6;
+  bytes min_unstake_delay = 7;
 }
 
 message UnintendedRevert {
@@ -616,3 +742,31 @@ message CodeHashChanged {}
 
 message AggregatorValidationFailed {}
 
+message VerificationGasLimitBufferTooLow {
+  bytes limit = 1;
+  bytes needed = 2;
+}
+
+message ValidationRevert {
+  oneof revert {
+    EntryPointRevert entry_point = 1;
+    OperationRevert operation = 2;
+    UnknownRevert unknown = 3;
+  }
+}
+message EntryPointRevert {
+  string reason = 1;
+}
+message OperationRevert {
+  string entry_point_reason = 1;
+  bytes inner_revert_data = 2;
+  string inner_revert_reason = 3;
+}
+message UnknownRevert {
+  bytes revert_bytes = 1;
+}
+
+message AccessedUnsupportedContractType {
+  string contract_type = 1;
+  bytes contract_address = 2;
+}

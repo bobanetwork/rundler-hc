@@ -12,14 +12,14 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{ensure, Context};
 use ethers::{
-    contract,
+    contract::EthLogDecode,
     prelude::EthEvent,
     types::{Address, Block, Filter, Log, H256, U256},
 };
@@ -27,16 +27,17 @@ use futures::future;
 use rundler_provider::Provider;
 use rundler_task::block_watcher;
 use rundler_types::{
-    contracts::{entry_point::DepositedFilter, i_entry_point::UserOperationEventFilter},
-    Timestamp, UserOperationId,
+    contracts::{v0_6::i_entry_point as entry_point_v0_6, v0_7::i_entry_point as entry_point_v0_7},
+    EntryPointVersion, Timestamp, UserOperationId,
 };
 use tokio::{
     select,
     sync::{broadcast, Semaphore},
     task::JoinHandle,
+    time,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, info, warn};
 
 const MAX_LOAD_OPS_CONCURRENCY: usize = 64;
 
@@ -54,6 +55,8 @@ pub(crate) struct Chain<P: Provider> {
     blocks: VecDeque<BlockSummary>,
     /// Semaphore to limit the number of concurrent `eth_getLogs` calls.
     load_ops_semaphore: Semaphore,
+    /// Filter template
+    filter_template: Filter,
 }
 
 #[derive(Default, Debug, Eq, PartialEq)]
@@ -67,10 +70,10 @@ pub struct ChainUpdate {
     pub reorg_depth: u64,
     pub mined_ops: Vec<MinedOp>,
     pub unmined_ops: Vec<MinedOp>,
-    /// List of on-chain entity deposits made in the most recent block
-    pub entity_deposits: Vec<DepositInfo>,
-    /// List of entity deposits that have been unmined due to a reorg
-    pub unmined_entity_deposits: Vec<DepositInfo>,
+    /// List of on-chain entity balance updates made in the most recent block
+    pub entity_balance_updates: Vec<BalanceUpdate>,
+    /// List of entity balance updates that have been unmined due to a reorg
+    pub unmined_entity_balance_updates: Vec<BalanceUpdate>,
     /// Boolean to state if the most recent chain update had a reorg
     /// that was larger than the existing history that has been tracked
     pub reorg_larger_than_history: bool,
@@ -87,10 +90,11 @@ pub struct MinedOp {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DepositInfo {
+pub struct BalanceUpdate {
     pub address: Address,
     pub entrypoint: Address,
     pub amount: U256,
+    pub is_addition: bool,
 }
 
 impl MinedOp {
@@ -106,7 +110,8 @@ impl MinedOp {
 pub(crate) struct Settings {
     pub(crate) history_size: u64,
     pub(crate) poll_interval: Duration,
-    pub(crate) entry_point_addresses: Vec<Address>,
+    pub(crate) entry_point_addresses: HashMap<Address, EntryPointVersion>,
+    pub(crate) max_sync_retries: u64,
 }
 
 #[derive(Debug)]
@@ -116,18 +121,51 @@ struct BlockSummary {
     timestamp: Timestamp,
     parent_hash: H256,
     ops: Vec<MinedOp>,
-    entity_deposits: Vec<DepositInfo>,
+    entity_balance_updates: Vec<BalanceUpdate>,
 }
 
 impl<P: Provider> Chain<P> {
     pub(crate) fn new(provider: Arc<P>, settings: Settings) -> Self {
         let history_size = settings.history_size as usize;
         assert!(history_size > 0, "history size should be positive");
+
+        let mut events = vec![];
+
+        if settings
+            .entry_point_addresses
+            .values()
+            .any(|v| *v == EntryPointVersion::V0_6)
+        {
+            events.push(entry_point_v0_6::UserOperationEventFilter::abi_signature());
+            events.push(entry_point_v0_6::DepositedFilter::abi_signature());
+            events.push(entry_point_v0_6::WithdrawnFilter::abi_signature());
+        }
+        if settings
+            .entry_point_addresses
+            .values()
+            .any(|v| *v == EntryPointVersion::V0_7)
+        {
+            events.push(entry_point_v0_7::UserOperationEventFilter::abi_signature());
+            events.push(entry_point_v0_7::DepositedFilter::abi_signature());
+            events.push(entry_point_v0_7::WithdrawnFilter::abi_signature());
+        }
+
+        let filter_template = Filter::new()
+            .address(
+                settings
+                    .entry_point_addresses
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+            .events(events.iter().map(|e| e.as_ref()));
+
         Self {
             provider,
             settings,
             blocks: VecDeque::new(),
             load_ops_semaphore: Semaphore::new(MAX_LOAD_OPS_CONCURRENCY),
+            filter_template,
         }
     }
 
@@ -165,13 +203,28 @@ impl<P: Provider> Chain<P> {
             )
             .await;
             block_hash = hash;
-            let update = self.sync_to_block(block).await;
-            match update {
-                Ok(update) => return update,
-                Err(error) => {
-                    error!("Failed to update chain at block {block_hash:?}. Will try again at next block. {error:?}");
+
+            for i in 0..=self.settings.max_sync_retries {
+                if i > 0 {
+                    ChainMetrics::increment_sync_retries();
                 }
+
+                let update = self.sync_to_block(block.clone()).await;
+                match update {
+                    Ok(update) => return update,
+                    Err(error) => {
+                        debug!("Failed to update chain at block {block_hash:?}: {error:?}");
+                    }
+                }
+
+                time::sleep(self.settings.poll_interval).await;
             }
+
+            warn!(
+                "Failed to update chain at block {:?} after {} retries. Abandoning sync.",
+                block_hash, self.settings.max_sync_retries
+            );
+            ChainMetrics::increment_sync_abandoned();
         }
     }
 
@@ -219,13 +272,14 @@ impl<P: Provider> Chain<P> {
             .copied()
             .collect();
 
-        let entity_deposits: Vec<_> = self
+        let entity_balance_updates: Vec<_> = self
             .blocks
             .iter()
-            .flat_map(|block| &block.entity_deposits)
+            .flat_map(|block| &block.entity_balance_updates)
             .copied()
             .collect();
-        Ok(self.new_update(0, mined_ops, vec![], entity_deposits, vec![], false))
+
+        Ok(self.new_update(0, mined_ops, vec![], entity_balance_updates, vec![], false))
     }
 
     /// Given a collection of blocks to add to the chain, whose numbers may
@@ -242,11 +296,12 @@ impl<P: Provider> Chain<P> {
             .copied()
             .collect();
 
-        let entity_deposits: Vec<_> = added_blocks
+        let entity_balance_updates: Vec<_> = added_blocks
             .iter()
-            .flat_map(|block| &block.entity_deposits)
+            .flat_map(|block| &block.entity_balance_updates)
             .copied()
             .collect();
+
         let reorg_depth = current_block_number + 1 - added_blocks[0].number;
         let unmined_ops: Vec<_> = self
             .blocks
@@ -256,11 +311,11 @@ impl<P: Provider> Chain<P> {
             .copied()
             .collect();
 
-        let unmined_entity_deposits: Vec<_> = self
+        let unmined_entity_balance_updates: Vec<_> = self
             .blocks
             .iter()
             .skip(self.blocks.len() - reorg_depth as usize)
-            .flat_map(|block| &block.entity_deposits)
+            .flat_map(|block| &block.entity_balance_updates)
             .copied()
             .collect();
 
@@ -284,8 +339,8 @@ impl<P: Provider> Chain<P> {
             reorg_depth,
             mined_ops,
             unmined_ops,
-            entity_deposits,
-            unmined_entity_deposits,
+            entity_balance_updates,
+            unmined_entity_balance_updates,
             is_reorg_larger_than_history,
         )
     }
@@ -379,9 +434,9 @@ impl<P: Provider> Chain<P> {
         let opses = future::try_join_all(future_opses)
             .await
             .context("should load ops for new blocks")?;
-        for (i, (ops, deposits)) in opses.into_iter().enumerate() {
+        for (i, (ops, balance_updates)) in opses.into_iter().enumerate() {
             blocks[i].ops = ops;
-            blocks[i].entity_deposits = deposits;
+            blocks[i].entity_balance_updates = balance_updates;
         }
         Ok(())
     }
@@ -389,76 +444,126 @@ impl<P: Provider> Chain<P> {
     async fn load_ops_in_block_with_hash(
         &self,
         block_hash: H256,
-    ) -> anyhow::Result<(Vec<MinedOp>, Vec<DepositInfo>)> {
+    ) -> anyhow::Result<(Vec<MinedOp>, Vec<BalanceUpdate>)> {
         let _permit = self
             .load_ops_semaphore
             .acquire()
             .await
             .expect("semaphore should not be closed");
 
-        let deposit = DepositedFilter::abi_signature();
-        let uo_filter = UserOperationEventFilter::abi_signature();
-        let events: Vec<&str> = vec![&deposit, &uo_filter];
-
-        let filter = Filter::new()
-            .address(self.settings.entry_point_addresses.clone())
-            .events(events)
-            .at_block_hash(block_hash);
+        let filter = self.filter_template.clone().at_block_hash(block_hash);
         let logs = self
             .provider
             .get_logs(&filter)
             .await
             .context("chain state should load user operation events")?;
 
-        let deposits = self.load_entity_deposits(&logs);
-        let mined_ops = self.load_mined_ops(&logs);
-
-        Ok((mined_ops, deposits))
-    }
-
-    fn load_mined_ops(&self, logs: &Vec<Log>) -> Vec<MinedOp> {
         let mut mined_ops = vec![];
+        let mut entity_balance_updates = vec![];
         for log in logs {
-            let entry_point = log.address;
-            if let Ok(event) = contract::parse_log::<UserOperationEventFilter>(log.clone()) {
-                let paymaster = if event.paymaster.is_zero() {
-                    None
-                } else {
-                    Some(event.paymaster)
-                };
-
-                let mined = MinedOp {
-                    hash: event.user_op_hash.into(),
-                    entry_point,
-                    sender: event.sender,
-                    nonce: event.nonce,
-                    actual_gas_cost: event.actual_gas_cost,
-                    paymaster,
-                };
-
-                mined_ops.push(mined);
+            match self.settings.entry_point_addresses.get(&log.address) {
+                Some(EntryPointVersion::V0_6) => {
+                    Self::load_v0_6(log, &mut mined_ops, &mut entity_balance_updates)
+                }
+                Some(EntryPointVersion::V0_7) => {
+                    Self::load_v0_7(log, &mut mined_ops, &mut entity_balance_updates)
+                }
+                Some(EntryPointVersion::Unspecified) | None => {
+                    warn!(
+                        "Log with unknown entry point address: {:?}. Ignoring.",
+                        log.address
+                    );
+                }
             }
         }
 
-        mined_ops
+        Ok((mined_ops, entity_balance_updates))
     }
 
-    fn load_entity_deposits(&self, logs: &Vec<Log>) -> Vec<DepositInfo> {
-        let mut deposits = vec![];
-        for log in logs {
-            let entrypoint = log.address;
-            if let Ok(event) = contract::parse_log::<DepositedFilter>(log.clone()) {
-                let info = DepositInfo {
-                    entrypoint,
-                    address: event.account,
-                    amount: event.total_deposit,
-                };
-
-                deposits.push(info);
+    fn load_v0_6(log: Log, mined_ops: &mut Vec<MinedOp>, balance_updates: &mut Vec<BalanceUpdate>) {
+        let address = log.address;
+        if let Ok(event) = entry_point_v0_6::IEntryPointEvents::decode_log(&log.into()) {
+            match event {
+                entry_point_v0_6::IEntryPointEvents::UserOperationEventFilter(event) => {
+                    let paymaster = if event.paymaster.is_zero() {
+                        None
+                    } else {
+                        Some(event.paymaster)
+                    };
+                    let mined = MinedOp {
+                        hash: event.user_op_hash.into(),
+                        entry_point: address,
+                        sender: event.sender,
+                        nonce: event.nonce,
+                        actual_gas_cost: event.actual_gas_cost,
+                        paymaster,
+                    };
+                    mined_ops.push(mined);
+                }
+                entry_point_v0_6::IEntryPointEvents::DepositedFilter(event) => {
+                    let info = BalanceUpdate {
+                        entrypoint: address,
+                        address: event.account,
+                        amount: event.total_deposit,
+                        is_addition: true,
+                    };
+                    balance_updates.push(info);
+                }
+                entry_point_v0_6::IEntryPointEvents::WithdrawnFilter(event) => {
+                    let info = BalanceUpdate {
+                        entrypoint: address,
+                        address: event.account,
+                        amount: event.amount,
+                        is_addition: false,
+                    };
+                    balance_updates.push(info);
+                }
+                _ => {}
             }
         }
+    }
 
-        deposits
+    fn load_v0_7(log: Log, mined_ops: &mut Vec<MinedOp>, balance_updates: &mut Vec<BalanceUpdate>) {
+        let address = log.address;
+        if let Ok(event) = entry_point_v0_7::IEntryPointEvents::decode_log(&log.into()) {
+            match event {
+                entry_point_v0_7::IEntryPointEvents::UserOperationEventFilter(event) => {
+                    let paymaster = if event.paymaster.is_zero() {
+                        None
+                    } else {
+                        Some(event.paymaster)
+                    };
+                    let mined = MinedOp {
+                        hash: event.user_op_hash.into(),
+                        entry_point: address,
+                        sender: event.sender,
+                        nonce: event.nonce,
+                        actual_gas_cost: event.actual_gas_cost,
+                        paymaster,
+                    };
+                    mined_ops.push(mined);
+                }
+                entry_point_v0_7::IEntryPointEvents::DepositedFilter(event) => {
+                    let info = BalanceUpdate {
+                        entrypoint: address,
+                        address: event.account,
+                        amount: event.total_deposit,
+                        is_addition: true,
+                    };
+                    balance_updates.push(info);
+                }
+                entry_point_v0_7::IEntryPointEvents::WithdrawnFilter(event) => {
+                    let info = BalanceUpdate {
+                        entrypoint: address,
+                        address: event.account,
+                        amount: event.amount,
+                        is_addition: false,
+                    };
+                    balance_updates.push(info);
+                }
+                _ => {}
+            }
+        }
     }
 
     fn block_with_number(&self, number: u64) -> Option<&BlockSummary> {
@@ -469,13 +574,14 @@ impl<P: Provider> Chain<P> {
         self.blocks.get((number - earliest_number) as usize)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_update(
         &self,
         reorg_depth: u64,
         mined_ops: Vec<MinedOp>,
         unmined_ops: Vec<MinedOp>,
-        entity_deposits: Vec<DepositInfo>,
-        unmined_entity_deposits: Vec<DepositInfo>,
+        entity_balance_updates: Vec<BalanceUpdate>,
+        unmined_entity_balance_updates: Vec<BalanceUpdate>,
         reorg_larger_than_history: bool,
     ) -> ChainUpdate {
         let latest_block = self
@@ -490,8 +596,8 @@ impl<P: Provider> Chain<P> {
             reorg_depth,
             mined_ops,
             unmined_ops,
-            entity_deposits,
-            unmined_entity_deposits,
+            entity_balance_updates,
+            unmined_entity_balance_updates,
             reorg_larger_than_history,
         }
     }
@@ -527,7 +633,7 @@ impl BlockSummary {
             timestamp: block.timestamp.as_u64().into(),
             parent_hash: block.parent_hash,
             ops: Vec::new(),
-            entity_deposits: Vec::new(),
+            entity_balance_updates: Vec::new(),
         })
     }
 }
@@ -566,15 +672,23 @@ struct ChainMetrics {}
 
 impl ChainMetrics {
     fn set_block_height(block_height: u64) {
-        metrics::gauge!("op_pool_chain_block_height", block_height as f64);
+        metrics::gauge!("op_pool_chain_block_height").set(block_height as f64);
     }
 
     fn increment_reorgs_detected() {
-        metrics::increment_counter!("op_pool_chain_reorgs_detected");
+        metrics::counter!("op_pool_chain_reorgs_detected").increment(1);
     }
 
     fn increment_total_reorg_depth(depth: u64) {
-        metrics::counter!("op_pool_chain_total_reorg_depth", depth);
+        metrics::counter!("op_pool_chain_total_reorg_depth").increment(depth);
+    }
+
+    fn increment_sync_retries() {
+        metrics::counter!("op_pool_chain_sync_retries").increment(1);
+    }
+
+    fn increment_sync_abandoned() {
+        metrics::counter!("op_pool_chain_sync_abandoned").increment(1);
     }
 }
 
@@ -594,22 +708,45 @@ mod tests {
     use super::*;
 
     const HISTORY_SIZE: u64 = 3;
-    const ENTRY_POINT_ADDRESS: Address = H160(*b"01234567890123456789");
+    const ENTRY_POINT_ADDRESS_V0_6: Address = H160(*b"01234567890123456789");
+    const ENTRY_POINT_ADDRESS_V0_7: Address = H160(*b"98765432109876543210");
 
     #[derive(Clone, Debug)]
     struct MockBlock {
         hash: H256,
+        events: Vec<MockEntryPointEvents>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct MockEntryPointEvents {
+        address: Address,
         op_hashes: Vec<H256>,
         deposit_addresses: Vec<Address>,
+        withdrawal_addresses: Vec<Address>,
     }
 
     impl MockBlock {
-        fn new(hash: H256, op_hashes: Vec<H256>, deposit_addresses: Vec<Address>) -> Self {
+        fn new(hash: H256) -> Self {
             Self {
                 hash,
+                events: vec![],
+            }
+        }
+
+        fn add_ep(
+            mut self,
+            address: Address,
+            op_hashes: Vec<H256>,
+            deposit_addresses: Vec<Address>,
+            withdrawal_addresses: Vec<Address>,
+        ) -> Self {
+            self.events.push(MockEntryPointEvents {
+                address,
                 op_hashes,
                 deposit_addresses,
-            }
+                withdrawal_addresses,
+            });
+            self
         }
     }
 
@@ -656,14 +793,44 @@ mod tests {
             };
 
             let mut joined_logs: Vec<Log> = Vec::new();
-            joined_logs.extend(block.op_hashes.iter().copied().map(fake_log));
-            joined_logs.extend(
-                block
-                    .deposit_addresses
-                    .iter()
-                    .copied()
-                    .map(fake_deposit_log),
-            );
+
+            for events in &block.events {
+                if events.address == ENTRY_POINT_ADDRESS_V0_6 {
+                    joined_logs.extend(events.op_hashes.iter().copied().map(fake_mined_log_v0_6));
+                    joined_logs.extend(
+                        events
+                            .deposit_addresses
+                            .iter()
+                            .copied()
+                            .map(fake_deposit_log_v0_6),
+                    );
+                    joined_logs.extend(
+                        events
+                            .withdrawal_addresses
+                            .iter()
+                            .copied()
+                            .map(fake_withdrawal_log_v0_6),
+                    );
+                } else if events.address == ENTRY_POINT_ADDRESS_V0_7 {
+                    joined_logs.extend(events.op_hashes.iter().copied().map(fake_mined_log_v0_7));
+                    joined_logs.extend(
+                        events
+                            .deposit_addresses
+                            .iter()
+                            .copied()
+                            .map(fake_deposit_log_v0_7),
+                    );
+                    joined_logs.extend(
+                        events
+                            .withdrawal_addresses
+                            .iter()
+                            .copied()
+                            .map(fake_withdrawal_log_v0_7),
+                    );
+                } else {
+                    panic!("Unknown entry point address: {:?}", events.address);
+                }
+            }
 
             joined_logs
         }
@@ -673,10 +840,25 @@ mod tests {
     async fn test_initial_load() {
         let (mut chain, controller) = new_chain();
         controller.set_blocks(vec![
-            MockBlock::new(hash(0), vec![hash(101), hash(102)], vec![]),
-            MockBlock::new(hash(1), vec![hash(103)], vec![]),
-            MockBlock::new(hash(2), vec![], vec![]),
-            MockBlock::new(hash(3), vec![hash(104), hash(105)], vec![]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101), hash(102)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(1)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(103)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(2)).add_ep(ENTRY_POINT_ADDRESS_V0_6, vec![], vec![], vec![]),
+            MockBlock::new(hash(3)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(104), hash(105)],
+                vec![],
+                vec![],
+            ),
         ]);
         let update = chain.sync_to_block(controller.get_head()).await.unwrap();
         // With a history size of 3, we should get updates from all blocks except the first one.
@@ -688,10 +870,14 @@ mod tests {
                 latest_block_timestamp: 0.into(),
                 earliest_remembered_block_number: 1,
                 reorg_depth: 0,
-                mined_ops: vec![fake_mined_op(103), fake_mined_op(104), fake_mined_op(105),],
+                mined_ops: vec![
+                    fake_mined_op(103, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(104, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(105, ENTRY_POINT_ADDRESS_V0_6),
+                ],
                 unmined_ops: vec![],
-                entity_deposits: vec![],
-                unmined_entity_deposits: vec![],
+                entity_balance_updates: vec![],
+                unmined_entity_balance_updates: vec![],
                 reorg_larger_than_history: false,
             }
         );
@@ -701,15 +887,35 @@ mod tests {
     async fn test_simple_advance() {
         let (mut chain, controller) = new_chain();
         controller.set_blocks(vec![
-            MockBlock::new(hash(0), vec![hash(101), hash(102)], vec![]),
-            MockBlock::new(hash(1), vec![hash(103)], vec![]),
-            MockBlock::new(hash(2), vec![], vec![]),
-            MockBlock::new(hash(3), vec![hash(104), hash(105)], vec![]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101), hash(102)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(1)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(103)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(2)).add_ep(ENTRY_POINT_ADDRESS_V0_6, vec![], vec![], vec![]),
+            MockBlock::new(hash(3)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(104), hash(105)],
+                vec![],
+                vec![],
+            ),
         ]);
         chain.sync_to_block(controller.get_head()).await.unwrap();
         controller
             .get_blocks_mut()
-            .push(MockBlock::new(hash(4), vec![hash(106)], vec![]));
+            .push(MockBlock::new(hash(4)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(106)],
+                vec![],
+                vec![],
+            ));
         let update = chain.sync_to_block(controller.get_head()).await.unwrap();
         assert_eq!(
             update,
@@ -719,10 +925,10 @@ mod tests {
                 latest_block_timestamp: 0.into(),
                 earliest_remembered_block_number: 2,
                 reorg_depth: 0,
-                mined_ops: vec![fake_mined_op(106)],
+                mined_ops: vec![fake_mined_op(106, ENTRY_POINT_ADDRESS_V0_6)],
                 unmined_ops: vec![],
-                entity_deposits: vec![],
-                unmined_entity_deposits: vec![],
+                entity_balance_updates: vec![],
+                unmined_entity_balance_updates: vec![],
                 reorg_larger_than_history: false,
             }
         );
@@ -732,9 +938,24 @@ mod tests {
     async fn test_forward_reorg() {
         let (mut chain, controller) = new_chain();
         controller.set_blocks(vec![
-            MockBlock::new(hash(0), vec![hash(100)], vec![]),
-            MockBlock::new(hash(1), vec![hash(101)], vec![]),
-            MockBlock::new(hash(2), vec![hash(102)], vec![Address::zero()]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(100)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(1)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(2)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(102)],
+                vec![Address::zero()],
+                vec![addr(1)],
+            ),
         ]);
         chain.sync_to_block(controller.get_head()).await.unwrap();
         {
@@ -742,9 +963,24 @@ mod tests {
             let mut blocks = controller.get_blocks_mut();
             blocks.pop();
             blocks.extend([
-                MockBlock::new(hash(12), vec![hash(112)], vec![]),
-                MockBlock::new(hash(13), vec![hash(113)], vec![]),
-                MockBlock::new(hash(14), vec![hash(114)], vec![]),
+                MockBlock::new(hash(12)).add_ep(
+                    ENTRY_POINT_ADDRESS_V0_6,
+                    vec![hash(112)],
+                    vec![],
+                    vec![],
+                ),
+                MockBlock::new(hash(13)).add_ep(
+                    ENTRY_POINT_ADDRESS_V0_6,
+                    vec![hash(113)],
+                    vec![],
+                    vec![],
+                ),
+                MockBlock::new(hash(14)).add_ep(
+                    ENTRY_POINT_ADDRESS_V0_6,
+                    vec![hash(114)],
+                    vec![],
+                    vec![addr(3)],
+                ),
             ]);
         }
         let update = chain.sync_to_block(controller.get_head()).await.unwrap();
@@ -756,10 +992,22 @@ mod tests {
                 latest_block_timestamp: 0.into(),
                 earliest_remembered_block_number: 2,
                 reorg_depth: 1,
-                mined_ops: vec![fake_mined_op(112), fake_mined_op(113), fake_mined_op(114)],
-                unmined_ops: vec![fake_mined_op(102)],
-                entity_deposits: vec![],
-                unmined_entity_deposits: vec![fake_mined_deposit(Address::zero(), 0.into())],
+                mined_ops: vec![
+                    fake_mined_op(112, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(113, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(114, ENTRY_POINT_ADDRESS_V0_6)
+                ],
+                unmined_ops: vec![fake_mined_op(102, ENTRY_POINT_ADDRESS_V0_6)],
+                entity_balance_updates: vec![fake_mined_balance_update(
+                    addr(3),
+                    0.into(),
+                    false,
+                    ENTRY_POINT_ADDRESS_V0_6
+                )],
+                unmined_entity_balance_updates: vec![
+                    fake_mined_balance_update(addr(0), 0.into(), true, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_balance_update(addr(1), 0.into(), false, ENTRY_POINT_ADDRESS_V0_6),
+                ],
                 reorg_larger_than_history: false,
             }
         );
@@ -769,9 +1017,24 @@ mod tests {
     async fn test_sideways_reorg() {
         let (mut chain, controller) = new_chain();
         controller.set_blocks(vec![
-            MockBlock::new(hash(0), vec![hash(100)], vec![]),
-            MockBlock::new(hash(1), vec![hash(101)], vec![addr(1)]),
-            MockBlock::new(hash(2), vec![hash(102)], vec![]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(100)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(1)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101)],
+                vec![addr(1)],
+                vec![addr(9)],
+            ),
+            MockBlock::new(hash(2)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(102)],
+                vec![],
+                vec![],
+            ),
         ]);
         chain.sync_to_block(controller.get_head()).await.unwrap();
         {
@@ -780,23 +1043,47 @@ mod tests {
             blocks.pop();
             blocks.pop();
             blocks.extend([
-                MockBlock::new(hash(11), vec![hash(111)], vec![addr(2)]),
-                MockBlock::new(hash(12), vec![hash(112)], vec![]),
+                MockBlock::new(hash(11)).add_ep(
+                    ENTRY_POINT_ADDRESS_V0_6,
+                    vec![hash(111)],
+                    vec![addr(2)],
+                    vec![],
+                ),
+                MockBlock::new(hash(12)).add_ep(
+                    ENTRY_POINT_ADDRESS_V0_6,
+                    vec![hash(112)],
+                    vec![],
+                    vec![],
+                ),
             ]);
         }
         let update = chain.sync_to_block(controller.get_head()).await.unwrap();
         assert_eq!(
             update,
             ChainUpdate {
-                entity_deposits: vec![fake_mined_deposit(addr(2), 0.into())],
+                entity_balance_updates: vec![fake_mined_balance_update(
+                    addr(2),
+                    0.into(),
+                    true,
+                    ENTRY_POINT_ADDRESS_V0_6
+                )],
                 latest_block_number: 2,
                 latest_block_hash: hash(12),
                 latest_block_timestamp: 0.into(),
                 earliest_remembered_block_number: 0,
                 reorg_depth: 2,
-                mined_ops: vec![fake_mined_op(111), fake_mined_op(112)],
-                unmined_ops: vec![fake_mined_op(101), fake_mined_op(102)],
-                unmined_entity_deposits: vec![fake_mined_deposit(addr(1), 0.into())],
+                mined_ops: vec![
+                    fake_mined_op(111, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(112, ENTRY_POINT_ADDRESS_V0_6)
+                ],
+                unmined_ops: vec![
+                    fake_mined_op(101, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(102, ENTRY_POINT_ADDRESS_V0_6)
+                ],
+                unmined_entity_balance_updates: vec![
+                    fake_mined_balance_update(addr(1), 0.into(), true, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_balance_update(addr(9), 0.into(), false, ENTRY_POINT_ADDRESS_V0_6),
+                ],
                 reorg_larger_than_history: false,
             }
         );
@@ -806,9 +1093,24 @@ mod tests {
     async fn test_backwards_reorg() {
         let (mut chain, controller) = new_chain();
         controller.set_blocks(vec![
-            MockBlock::new(hash(0), vec![hash(100)], vec![]),
-            MockBlock::new(hash(1), vec![hash(101)], vec![]),
-            MockBlock::new(hash(2), vec![hash(102)], vec![]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(100)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(1)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(2)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(102)],
+                vec![],
+                vec![],
+            ),
         ]);
         chain.sync_to_block(controller.get_head()).await.unwrap();
         {
@@ -816,21 +1118,34 @@ mod tests {
             let mut blocks = controller.get_blocks_mut();
             blocks.pop();
             blocks.pop();
-            blocks.push(MockBlock::new(hash(11), vec![hash(111)], vec![addr(1)]));
+            blocks.push(MockBlock::new(hash(11)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(111)],
+                vec![addr(1)],
+                vec![],
+            ));
         }
         let update = chain.sync_to_block(controller.get_head()).await.unwrap();
         assert_eq!(
             update,
             ChainUpdate {
                 latest_block_number: 1,
-                entity_deposits: vec![fake_mined_deposit(addr(1), 0.into())],
+                entity_balance_updates: vec![fake_mined_balance_update(
+                    addr(1),
+                    0.into(),
+                    true,
+                    ENTRY_POINT_ADDRESS_V0_6
+                )],
                 latest_block_hash: hash(11),
                 latest_block_timestamp: 0.into(),
                 earliest_remembered_block_number: 0,
                 reorg_depth: 2,
-                mined_ops: vec![fake_mined_op(111)],
-                unmined_ops: vec![fake_mined_op(101), fake_mined_op(102)],
-                unmined_entity_deposits: vec![],
+                mined_ops: vec![fake_mined_op(111, ENTRY_POINT_ADDRESS_V0_6)],
+                unmined_ops: vec![
+                    fake_mined_op(101, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(102, ENTRY_POINT_ADDRESS_V0_6)
+                ],
+                unmined_entity_balance_updates: vec![],
                 reorg_larger_than_history: false,
             }
         );
@@ -840,32 +1155,80 @@ mod tests {
     async fn test_reorg_longer_than_history() {
         let (mut chain, controller) = new_chain();
         controller.set_blocks(vec![
-            MockBlock::new(hash(0), vec![hash(100)], vec![]),
-            MockBlock::new(hash(1), vec![hash(101)], vec![]),
-            MockBlock::new(hash(2), vec![hash(102)], vec![]),
-            MockBlock::new(hash(3), vec![hash(103)], vec![]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(100)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(1)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(2)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(102)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(3)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(103)],
+                vec![],
+                vec![],
+            ),
         ]);
         chain.sync_to_block(controller.get_head()).await.unwrap();
         // The history has size 3, so after this update it's completely unrecognizable.
         controller.set_blocks(vec![
-            MockBlock::new(hash(0), vec![hash(100)], vec![]),
-            MockBlock::new(hash(11), vec![hash(111)], vec![]),
-            MockBlock::new(hash(12), vec![hash(112)], vec![]),
-            MockBlock::new(hash(13), vec![hash(113)], vec![]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(100)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(11)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(111)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(12)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(112)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(13)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(113)],
+                vec![],
+                vec![],
+            ),
         ]);
         let update = chain.sync_to_block(controller.get_head()).await.unwrap();
         assert_eq!(
             update,
             ChainUpdate {
-                entity_deposits: vec![],
                 latest_block_number: 3,
                 latest_block_hash: hash(13),
                 latest_block_timestamp: 0.into(),
                 earliest_remembered_block_number: 1,
                 reorg_depth: 3,
-                mined_ops: vec![fake_mined_op(111), fake_mined_op(112), fake_mined_op(113)],
-                unmined_ops: vec![fake_mined_op(101), fake_mined_op(102), fake_mined_op(103)],
-                unmined_entity_deposits: vec![],
+                mined_ops: vec![
+                    fake_mined_op(111, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(112, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(113, ENTRY_POINT_ADDRESS_V0_6)
+                ],
+                unmined_ops: vec![
+                    fake_mined_op(101, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(102, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(103, ENTRY_POINT_ADDRESS_V0_6)
+                ],
+                entity_balance_updates: vec![],
+                unmined_entity_balance_updates: vec![],
                 reorg_larger_than_history: true,
             }
         );
@@ -875,15 +1238,35 @@ mod tests {
     async fn test_advance_larger_than_history_size() {
         let (mut chain, controller) = new_chain();
         controller.set_blocks(vec![
-            MockBlock::new(hash(0), vec![hash(100)], vec![]),
-            MockBlock::new(hash(1), vec![hash(101)], vec![]),
-            MockBlock::new(hash(2), vec![hash(102)], vec![]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(100)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(1)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(2)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(102)],
+                vec![],
+                vec![],
+            ),
         ]);
         chain.sync_to_block(controller.get_head()).await.unwrap();
         {
             let mut blocks = controller.get_blocks_mut();
             for i in 3..7 {
-                blocks.push(MockBlock::new(hash(10 + i), vec![hash(100 + i)], vec![]));
+                blocks.push(MockBlock::new(hash(10 + i)).add_ep(
+                    ENTRY_POINT_ADDRESS_V0_6,
+                    vec![hash(100 + i)],
+                    vec![],
+                    vec![],
+                ));
             }
         }
         let update = chain.sync_to_block(controller.get_head()).await.unwrap();
@@ -895,10 +1278,14 @@ mod tests {
                 latest_block_timestamp: 0.into(),
                 earliest_remembered_block_number: 4,
                 reorg_depth: 0,
-                entity_deposits: vec![],
-                mined_ops: vec![fake_mined_op(104), fake_mined_op(105), fake_mined_op(106)],
+                entity_balance_updates: vec![],
+                unmined_entity_balance_updates: vec![],
+                mined_ops: vec![
+                    fake_mined_op(104, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(105, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(106, ENTRY_POINT_ADDRESS_V0_6)
+                ],
                 unmined_ops: vec![],
-                unmined_entity_deposits: vec![],
                 reorg_larger_than_history: false,
             }
         );
@@ -909,8 +1296,18 @@ mod tests {
     async fn test_latest_block_number_smaller_than_history_size() {
         let (mut chain, controller) = new_chain();
         let blocks = vec![
-            MockBlock::new(hash(0), vec![hash(101), hash(102)], vec![]),
-            MockBlock::new(hash(1), vec![hash(103)], vec![]),
+            MockBlock::new(hash(0)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101), hash(102)],
+                vec![],
+                vec![],
+            ),
+            MockBlock::new(hash(1)).add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(103)],
+                vec![],
+                vec![],
+            ),
         ];
         controller.set_blocks(blocks);
         let update = chain.sync_to_block(controller.get_head()).await.unwrap();
@@ -922,10 +1319,62 @@ mod tests {
                 latest_block_timestamp: 0.into(),
                 earliest_remembered_block_number: 0,
                 reorg_depth: 0,
-                entity_deposits: vec![],
-                mined_ops: vec![fake_mined_op(101), fake_mined_op(102), fake_mined_op(103),],
+                mined_ops: vec![
+                    fake_mined_op(101, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(102, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(103, ENTRY_POINT_ADDRESS_V0_6),
+                ],
                 unmined_ops: vec![],
-                unmined_entity_deposits: vec![],
+                entity_balance_updates: vec![],
+                unmined_entity_balance_updates: vec![],
+                reorg_larger_than_history: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mixed_event_types() {
+        let (mut chain, controller) = new_chain();
+        controller.set_blocks(vec![MockBlock::new(hash(0))
+            .add_ep(
+                ENTRY_POINT_ADDRESS_V0_6,
+                vec![hash(101), hash(102)],
+                vec![addr(1), addr(2)],
+                vec![addr(3), addr(4)],
+            )
+            .add_ep(
+                ENTRY_POINT_ADDRESS_V0_7,
+                vec![hash(201), hash(202)],
+                vec![addr(5), addr(6)],
+                vec![addr(7), addr(8)],
+            )]);
+        let update = chain.sync_to_block(controller.get_head()).await.unwrap();
+        assert_eq!(
+            update,
+            ChainUpdate {
+                latest_block_number: 0,
+                latest_block_hash: hash(0),
+                latest_block_timestamp: 0.into(),
+                earliest_remembered_block_number: 0,
+                reorg_depth: 0,
+                mined_ops: vec![
+                    fake_mined_op(101, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(102, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_op(201, ENTRY_POINT_ADDRESS_V0_7),
+                    fake_mined_op(202, ENTRY_POINT_ADDRESS_V0_7),
+                ],
+                unmined_ops: vec![],
+                entity_balance_updates: vec![
+                    fake_mined_balance_update(addr(1), 0.into(), true, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_balance_update(addr(2), 0.into(), true, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_balance_update(addr(3), 0.into(), false, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_balance_update(addr(4), 0.into(), false, ENTRY_POINT_ADDRESS_V0_6),
+                    fake_mined_balance_update(addr(5), 0.into(), true, ENTRY_POINT_ADDRESS_V0_7),
+                    fake_mined_balance_update(addr(6), 0.into(), true, ENTRY_POINT_ADDRESS_V0_7),
+                    fake_mined_balance_update(addr(7), 0.into(), false, ENTRY_POINT_ADDRESS_V0_7),
+                    fake_mined_balance_update(addr(8), 0.into(), false, ENTRY_POINT_ADDRESS_V0_7),
+                ],
+                unmined_entity_balance_updates: vec![],
                 reorg_larger_than_history: false,
             }
         );
@@ -938,7 +1387,11 @@ mod tests {
             Settings {
                 history_size: HISTORY_SIZE,
                 poll_interval: Duration::from_secs(250), // Not used in tests.
-                entry_point_addresses: vec![ENTRY_POINT_ADDRESS],
+                entry_point_addresses: HashMap::from([
+                    (ENTRY_POINT_ADDRESS_V0_6, EntryPointVersion::V0_6),
+                    (ENTRY_POINT_ADDRESS_V0_7, EntryPointVersion::V0_7),
+                ]),
+                max_sync_retries: 1,
             },
         );
         (chain, controller)
@@ -968,12 +1421,12 @@ mod tests {
         (provider, controller)
     }
 
-    fn fake_log(op_hash: H256) -> Log {
+    fn fake_mined_log_v0_6(op_hash: H256) -> Log {
         Log {
-            address: ENTRY_POINT_ADDRESS,
+            address: ENTRY_POINT_ADDRESS_V0_6,
             topics: vec![
                 H256::from(utils::keccak256(
-                    UserOperationEventFilter::abi_signature().as_bytes(),
+                    entry_point_v0_6::UserOperationEventFilter::abi_signature().as_bytes(),
                 )),
                 op_hash,
                 H256::zero(), // sender
@@ -990,12 +1443,12 @@ mod tests {
         }
     }
 
-    fn fake_deposit_log(deposit_address: Address) -> Log {
+    fn fake_deposit_log_v0_6(deposit_address: Address) -> Log {
         Log {
-            address: ENTRY_POINT_ADDRESS,
+            address: ENTRY_POINT_ADDRESS_V0_6,
             topics: vec![
                 H256::from(utils::keccak256(
-                    DepositedFilter::abi_signature().as_bytes(),
+                    entry_point_v0_6::DepositedFilter::abi_signature().as_bytes(),
                 )),
                 H256::from(deposit_address),
             ],
@@ -1007,10 +1460,85 @@ mod tests {
         }
     }
 
-    fn fake_mined_op(n: u8) -> MinedOp {
+    fn fake_withdrawal_log_v0_6(withdrawal_address: Address) -> Log {
+        Log {
+            address: ENTRY_POINT_ADDRESS_V0_6,
+            topics: vec![
+                H256::from(utils::keccak256(
+                    entry_point_v0_6::WithdrawnFilter::abi_signature().as_bytes(),
+                )),
+                H256::from(withdrawal_address),
+            ],
+            data: AbiEncode::encode((
+                Address::zero(), // withdrawAddress
+                U256::zero(),    // amount
+            ))
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn fake_mined_log_v0_7(op_hash: H256) -> Log {
+        Log {
+            address: ENTRY_POINT_ADDRESS_V0_7,
+            topics: vec![
+                H256::from(utils::keccak256(
+                    entry_point_v0_7::UserOperationEventFilter::abi_signature().as_bytes(),
+                )),
+                op_hash,
+                H256::zero(), // sender
+                H256::zero(), // paymaster
+            ],
+            data: AbiEncode::encode((
+                U256::zero(), // nonce
+                true,         // success
+                U256::zero(), // actual_gas_cost
+                U256::zero(), // actual_gas_used
+            ))
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn fake_deposit_log_v0_7(deposit_address: Address) -> Log {
+        Log {
+            address: ENTRY_POINT_ADDRESS_V0_7,
+            topics: vec![
+                H256::from(utils::keccak256(
+                    entry_point_v0_7::DepositedFilter::abi_signature().as_bytes(),
+                )),
+                H256::from(deposit_address),
+            ],
+            data: AbiEncode::encode((
+                U256::zero(), // totalDeposits
+            ))
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn fake_withdrawal_log_v0_7(withdrawal_address: Address) -> Log {
+        Log {
+            address: ENTRY_POINT_ADDRESS_V0_7,
+            topics: vec![
+                H256::from(utils::keccak256(
+                    entry_point_v0_7::WithdrawnFilter::abi_signature().as_bytes(),
+                )),
+                H256::from(withdrawal_address),
+            ],
+            data: AbiEncode::encode((
+                Address::zero(), // withdrawAddress
+                U256::zero(),    // amount
+            ))
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn fake_mined_op(n: u8, ep: Address) -> MinedOp {
         MinedOp {
             hash: hash(n),
-            entry_point: ENTRY_POINT_ADDRESS,
+            entry_point: ep,
             sender: Address::zero(),
             nonce: U256::zero(),
             actual_gas_cost: U256::zero(),
@@ -1018,11 +1546,17 @@ mod tests {
         }
     }
 
-    fn fake_mined_deposit(address: Address, amount: U256) -> DepositInfo {
-        DepositInfo {
+    fn fake_mined_balance_update(
+        address: Address,
+        amount: U256,
+        is_addition: bool,
+        ep: Address,
+    ) -> BalanceUpdate {
+        BalanceUpdate {
             address,
-            entrypoint: ENTRY_POINT_ADDRESS,
+            entrypoint: ep,
             amount,
+            is_addition,
         }
     }
 

@@ -12,60 +12,53 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use anyhow::{bail, Context};
-use ethers::types::Opcode;
-use rundler_sim::{NeedsStakeInformation, PrecheckViolation, SimulationViolation, ViolationOpCode};
-use rundler_task::grpc::protos::{from_bytes, to_le_bytes, ConversionError};
-use rundler_types::StorageSlot;
+use rundler_task::grpc::protos::{from_bytes, ToProtoBytes};
+use rundler_types::{
+    pool::{
+        MempoolError, NeedsStakeInformation, PoolError, PrecheckViolation, SimulationViolation,
+    },
+    Opcode, StorageSlot, Timestamp, ValidationRevert, ViolationOpCode,
+};
 
 use super::protos::{
-    mempool_error, precheck_violation_error, simulation_violation_error,
-    AccessedUndeployedContract, AggregatorValidationFailed, AssociatedStorageIsAlternateSender,
-    CallGasLimitTooLow, CallHadValue, CalledBannedEntryPointMethod, CodeHashChanged, DidNotRevert,
-    DiscardedOnInsertError, Entity, EntityThrottledError, EntityType, ExistingSenderWithInitCode,
-    FactoryCalledCreate2Twice, FactoryIsNotContract, InitCodeTooShort, InvalidSignature,
-    InvalidStorageAccess, MaxFeePerGasTooLow, MaxOperationsReachedError,
-    MaxPriorityFeePerGasTooLow, MempoolError as ProtoMempoolError, MultipleRolesViolation,
-    NotStaked, OperationAlreadyKnownError, OutOfGas, PaymasterBalanceTooLow,
-    PaymasterDepositTooLow, PaymasterIsNotContract, PaymasterTooShort, PreVerificationGasTooLow,
-    PrecheckViolationError as ProtoPrecheckViolationError, ReplacementUnderpricedError,
-    SenderAddressUsedAsAlternateEntity, SenderFundsTooLow, SenderIsNotContractAndNoInitCode,
-    SimulationViolationError as ProtoSimulationViolationError, TotalGasLimitTooHigh,
-    UnintendedRevert, UnintendedRevertWithMessage, UnknownEntryPointError, UnstakedAggregator,
-    UnstakedPaymasterContext, UnsupportedAggregatorError, UsedForbiddenOpcode,
-    UsedForbiddenPrecompile, VerificationGasLimitTooHigh, WrongNumberOfPhases,
+    mempool_error, precheck_violation_error, simulation_violation_error, validation_revert,
+    AccessedUndeployedContract, AccessedUnsupportedContractType, AggregatorValidationFailed,
+    AssociatedStorageDuringDeploy, AssociatedStorageIsAlternateSender, CallGasLimitTooLow,
+    CallHadValue, CalledBannedEntryPointMethod, CodeHashChanged, DidNotRevert,
+    DiscardedOnInsertError, Entity, EntityThrottledError, EntityType, EntryPointRevert,
+    ExistingSenderWithInitCode, FactoryCalledCreate2Twice, FactoryIsNotContract,
+    InvalidAccountSignature, InvalidPaymasterSignature, InvalidSignature, InvalidStorageAccess,
+    InvalidTimeRange, MaxFeePerGasTooLow, MaxOperationsReachedError, MaxPriorityFeePerGasTooLow,
+    MempoolError as ProtoMempoolError, MultipleRolesViolation, NotStaked,
+    OperationAlreadyKnownError, OperationDropTooSoon, OperationRevert, OutOfGas,
+    PaymasterBalanceTooLow, PaymasterDepositTooLow, PaymasterIsNotContract,
+    PreVerificationGasTooLow, PrecheckViolationError as ProtoPrecheckViolationError,
+    ReplacementUnderpricedError, SenderAddressUsedAsAlternateEntity, SenderFundsTooLow,
+    SenderIsNotContractAndNoInitCode, SimulationViolationError as ProtoSimulationViolationError,
+    TotalGasLimitTooHigh, UnintendedRevert, UnintendedRevertWithMessage, UnknownEntryPointError,
+    UnknownRevert, UnstakedAggregator, UnstakedPaymasterContext, UnsupportedAggregatorError,
+    UsedForbiddenOpcode, UsedForbiddenPrecompile, ValidationRevert as ProtoValidationRevert,
+    VerificationGasLimitBufferTooLow, VerificationGasLimitTooHigh, WrongNumberOfPhases,
 };
-use crate::{mempool::MempoolError, server::error::PoolServerError};
 
-impl From<tonic::Status> for PoolServerError {
-    fn from(value: tonic::Status) -> Self {
-        PoolServerError::Other(anyhow::anyhow!(value.to_string()))
-    }
-}
-
-impl From<ConversionError> for PoolServerError {
-    fn from(value: ConversionError) -> Self {
-        PoolServerError::Other(anyhow::anyhow!(value.to_string()))
-    }
-}
-
-impl TryFrom<ProtoMempoolError> for PoolServerError {
+impl TryFrom<ProtoMempoolError> for PoolError {
     type Error = anyhow::Error;
 
     fn try_from(value: ProtoMempoolError) -> Result<Self, Self::Error> {
-        Ok(PoolServerError::MempoolError(value.try_into()?))
+        Ok(PoolError::MempoolError(value.try_into()?))
     }
 }
 
-impl From<PoolServerError> for ProtoMempoolError {
-    fn from(value: PoolServerError) -> Self {
+impl From<PoolError> for ProtoMempoolError {
+    fn from(value: PoolError) -> Self {
         match value {
-            PoolServerError::MempoolError(e) => e.into(),
-            PoolServerError::UnexpectedResponse => ProtoMempoolError {
+            PoolError::MempoolError(e) => e.into(),
+            PoolError::UnexpectedResponse => ProtoMempoolError {
                 error: Some(mempool_error::Error::Internal(
                     "unexpected response from pool server".to_string(),
                 )),
             },
-            PoolServerError::Other(e) => ProtoMempoolError {
+            PoolError::Other(e) => ProtoMempoolError {
                 error: Some(mempool_error::Error::Internal(e.to_string())),
             },
         }
@@ -90,7 +83,7 @@ impl TryFrom<ProtoMempoolError> for MempoolError {
             Some(mempool_error::Error::MaxOperationsReached(e)) => {
                 MempoolError::MaxOperationsReached(
                     e.num_ops as usize,
-                    from_bytes(&e.entity_address)?,
+                    (&e.entity.context("should have entity in error")?).try_into()?,
                 )
             }
             Some(mempool_error::Error::EntityThrottled(e)) => MempoolError::EntityThrottled(
@@ -109,7 +102,30 @@ impl TryFrom<ProtoMempoolError> for MempoolError {
             Some(mempool_error::Error::UnknownEntryPoint(e)) => {
                 MempoolError::UnknownEntryPoint(from_bytes(&e.entry_point)?)
             }
-            _ => bail!("unknown proto mempool error"),
+            Some(mempool_error::Error::InvalidSignature(_)) => {
+                MempoolError::SimulationViolation(SimulationViolation::InvalidSignature)
+            }
+            Some(mempool_error::Error::PaymasterBalanceTooLow(e)) => {
+                MempoolError::PaymasterBalanceTooLow(
+                    from_bytes(&e.current_balance)?,
+                    from_bytes(&e.required_balance)?,
+                )
+            }
+            Some(mempool_error::Error::AssociatedStorageIsAlternateSender(_)) => {
+                MempoolError::AssociatedStorageIsAlternateSender
+            }
+            Some(mempool_error::Error::SenderAddressUsedAsAlternateEntity(e)) => {
+                MempoolError::SenderAddressUsedAsAlternateEntity(from_bytes(&e.sender_address)?)
+            }
+            Some(mempool_error::Error::MultipleRolesViolation(e)) => {
+                MempoolError::MultipleRolesViolation(
+                    (&e.entity.context("should have entity in error")?).try_into()?,
+                )
+            }
+            Some(mempool_error::Error::OperationDropTooSoon(e)) => {
+                MempoolError::OperationDropTooSoon(e.added_at, e.attempted_at, e.must_wait)
+            }
+            None => bail!("unknown proto mempool error"),
         })
     }
 }
@@ -140,23 +156,23 @@ impl From<MempoolError> for ProtoMempoolError {
             MempoolError::SenderAddressUsedAsAlternateEntity(addr) => ProtoMempoolError {
                 error: Some(mempool_error::Error::SenderAddressUsedAsAlternateEntity(
                     SenderAddressUsedAsAlternateEntity {
-                        sender_address: addr.as_bytes().to_vec(),
+                        sender_address: addr.to_proto_bytes(),
                     },
                 )),
             },
             MempoolError::ReplacementUnderpriced(fee, priority_fee) => ProtoMempoolError {
                 error: Some(mempool_error::Error::ReplacementUnderpriced(
                     ReplacementUnderpricedError {
-                        current_fee: to_le_bytes(fee),
-                        current_priority_fee: to_le_bytes(priority_fee),
+                        current_fee: fee.to_proto_bytes(),
+                        current_priority_fee: priority_fee.to_proto_bytes(),
                     },
                 )),
             },
-            MempoolError::MaxOperationsReached(ops, addr) => ProtoMempoolError {
+            MempoolError::MaxOperationsReached(ops, entity) => ProtoMempoolError {
                 error: Some(mempool_error::Error::MaxOperationsReached(
                     MaxOperationsReachedError {
                         num_ops: ops as u64,
-                        entity_address: addr.as_bytes().to_vec(),
+                        entity: Some((&entity).into()),
                     },
                 )),
             },
@@ -176,8 +192,8 @@ impl From<MempoolError> for ProtoMempoolError {
                 ProtoMempoolError {
                     error: Some(mempool_error::Error::PaymasterBalanceTooLow(
                         PaymasterBalanceTooLow {
-                            current_balance: to_le_bytes(current_balance),
-                            required_balance: to_le_bytes(required_balance),
+                            current_balance: current_balance.to_proto_bytes(),
+                            required_balance: required_balance.to_proto_bytes(),
                         },
                     )),
                 }
@@ -191,17 +207,28 @@ impl From<MempoolError> for ProtoMempoolError {
             MempoolError::UnsupportedAggregator(agg) => ProtoMempoolError {
                 error: Some(mempool_error::Error::UnsupportedAggregator(
                     UnsupportedAggregatorError {
-                        aggregator_address: agg.as_bytes().to_vec(),
+                        aggregator_address: agg.to_proto_bytes(),
                     },
                 )),
             },
             MempoolError::UnknownEntryPoint(entry_point) => ProtoMempoolError {
                 error: Some(mempool_error::Error::UnknownEntryPoint(
                     UnknownEntryPointError {
-                        entry_point: entry_point.as_bytes().to_vec(),
+                        entry_point: entry_point.to_proto_bytes(),
                     },
                 )),
             },
+            MempoolError::OperationDropTooSoon(added_at, attempted_at, must_wait) => {
+                ProtoMempoolError {
+                    error: Some(mempool_error::Error::OperationDropTooSoon(
+                        OperationDropTooSoon {
+                            added_at,
+                            attempted_at,
+                            must_wait,
+                        },
+                    )),
+                }
+            }
         }
     }
 }
@@ -209,19 +236,12 @@ impl From<MempoolError> for ProtoMempoolError {
 impl From<PrecheckViolation> for ProtoPrecheckViolationError {
     fn from(value: PrecheckViolation) -> Self {
         match value {
-            PrecheckViolation::InitCodeTooShort(length) => ProtoPrecheckViolationError {
-                violation: Some(precheck_violation_error::Violation::InitCodeTooShort(
-                    InitCodeTooShort {
-                        length: length as u64,
-                    },
-                )),
-            },
             PrecheckViolation::SenderIsNotContractAndNoInitCode(addr) => {
                 ProtoPrecheckViolationError {
                     violation: Some(
                         precheck_violation_error::Violation::SenderIsNotContractAndNoInitCode(
                             SenderIsNotContractAndNoInitCode {
-                                sender_address: addr.as_bytes().to_vec(),
+                                sender_address: addr.to_proto_bytes(),
                             },
                         ),
                     ),
@@ -231,7 +251,7 @@ impl From<PrecheckViolation> for ProtoPrecheckViolationError {
                 violation: Some(
                     precheck_violation_error::Violation::ExistingSenderWithInitCode(
                         ExistingSenderWithInitCode {
-                            sender_address: addr.as_bytes().to_vec(),
+                            sender_address: addr.to_proto_bytes(),
                         },
                     ),
                 ),
@@ -239,15 +259,15 @@ impl From<PrecheckViolation> for ProtoPrecheckViolationError {
             PrecheckViolation::FactoryIsNotContract(addr) => ProtoPrecheckViolationError {
                 violation: Some(precheck_violation_error::Violation::FactoryIsNotContract(
                     FactoryIsNotContract {
-                        factory_address: addr.as_bytes().to_vec(),
+                        factory_address: addr.to_proto_bytes(),
                     },
                 )),
             },
             PrecheckViolation::TotalGasLimitTooHigh(actual, max) => ProtoPrecheckViolationError {
                 violation: Some(precheck_violation_error::Violation::TotalGasLimitTooHigh(
                     TotalGasLimitTooHigh {
-                        actual_gas: to_le_bytes(actual),
-                        max_gas: to_le_bytes(max),
+                        actual_gas: actual.to_proto_bytes(),
+                        max_gas: max.to_proto_bytes(),
                     },
                 )),
             },
@@ -256,8 +276,8 @@ impl From<PrecheckViolation> for ProtoPrecheckViolationError {
                     violation: Some(
                         precheck_violation_error::Violation::VerificationGasLimitTooHigh(
                             VerificationGasLimitTooHigh {
-                                actual_gas: to_le_bytes(actual),
-                                max_gas: to_le_bytes(max),
+                                actual_gas: actual.to_proto_bytes(),
+                                max_gas: max.to_proto_bytes(),
                             },
                         ),
                     ),
@@ -268,48 +288,41 @@ impl From<PrecheckViolation> for ProtoPrecheckViolationError {
                     violation: Some(
                         precheck_violation_error::Violation::PreVerificationGasTooLow(
                             PreVerificationGasTooLow {
-                                actual_gas: to_le_bytes(actual),
-                                min_gas: to_le_bytes(min),
+                                actual_gas: actual.to_proto_bytes(),
+                                min_gas: min.to_proto_bytes(),
                             },
                         ),
                     ),
                 }
             }
-            PrecheckViolation::PaymasterTooShort(length) => ProtoPrecheckViolationError {
-                violation: Some(precheck_violation_error::Violation::PaymasterTooShort(
-                    PaymasterTooShort {
-                        length: length as u64,
-                    },
-                )),
-            },
             PrecheckViolation::PaymasterIsNotContract(addr) => ProtoPrecheckViolationError {
                 violation: Some(precheck_violation_error::Violation::PaymasterIsNotContract(
                     PaymasterIsNotContract {
-                        paymaster_address: addr.as_bytes().to_vec(),
+                        paymaster_address: addr.to_proto_bytes(),
                     },
                 )),
             },
             PrecheckViolation::PaymasterDepositTooLow(actual, min) => ProtoPrecheckViolationError {
                 violation: Some(precheck_violation_error::Violation::PaymasterDepositTooLow(
                     PaymasterDepositTooLow {
-                        actual_deposit: to_le_bytes(actual),
-                        min_deposit: to_le_bytes(min),
+                        actual_deposit: actual.to_proto_bytes(),
+                        min_deposit: min.to_proto_bytes(),
                     },
                 )),
             },
             PrecheckViolation::SenderFundsTooLow(actual, min) => ProtoPrecheckViolationError {
                 violation: Some(precheck_violation_error::Violation::SenderFundsTooLow(
                     SenderFundsTooLow {
-                        actual_funds: to_le_bytes(actual),
-                        min_funds: to_le_bytes(min),
+                        actual_funds: actual.to_proto_bytes(),
+                        min_funds: min.to_proto_bytes(),
                     },
                 )),
             },
             PrecheckViolation::MaxFeePerGasTooLow(actual, min) => ProtoPrecheckViolationError {
                 violation: Some(precheck_violation_error::Violation::MaxFeePerGasTooLow(
                     MaxFeePerGasTooLow {
-                        actual_fee: to_le_bytes(actual),
-                        min_fee: to_le_bytes(min),
+                        actual_fee: actual.to_proto_bytes(),
+                        min_fee: min.to_proto_bytes(),
                     },
                 )),
             },
@@ -318,8 +331,8 @@ impl From<PrecheckViolation> for ProtoPrecheckViolationError {
                     violation: Some(
                         precheck_violation_error::Violation::MaxPriorityFeePerGasTooLow(
                             MaxPriorityFeePerGasTooLow {
-                                actual_fee: to_le_bytes(actual),
-                                min_fee: to_le_bytes(min),
+                                actual_fee: actual.to_proto_bytes(),
+                                min_fee: min.to_proto_bytes(),
                             },
                         ),
                     ),
@@ -328,8 +341,8 @@ impl From<PrecheckViolation> for ProtoPrecheckViolationError {
             PrecheckViolation::CallGasLimitTooLow(actual, min) => ProtoPrecheckViolationError {
                 violation: Some(precheck_violation_error::Violation::CallGasLimitTooLow(
                     CallGasLimitTooLow {
-                        actual_gas_limit: to_le_bytes(actual),
-                        min_gas_limit: to_le_bytes(min),
+                        actual_gas_limit: actual.to_proto_bytes(),
+                        min_gas_limit: min.to_proto_bytes(),
                     },
                 )),
             },
@@ -342,9 +355,6 @@ impl TryFrom<ProtoPrecheckViolationError> for PrecheckViolation {
 
     fn try_from(value: ProtoPrecheckViolationError) -> Result<Self, Self::Error> {
         Ok(match value.violation {
-            Some(precheck_violation_error::Violation::InitCodeTooShort(e)) => {
-                PrecheckViolation::InitCodeTooShort(e.length as usize)
-            }
             Some(precheck_violation_error::Violation::SenderIsNotContractAndNoInitCode(e)) => {
                 PrecheckViolation::SenderIsNotContractAndNoInitCode(from_bytes(&e.sender_address)?)
             }
@@ -371,9 +381,6 @@ impl TryFrom<ProtoPrecheckViolationError> for PrecheckViolation {
                     from_bytes(&e.actual_gas)?,
                     from_bytes(&e.min_gas)?,
                 )
-            }
-            Some(precheck_violation_error::Violation::PaymasterTooShort(e)) => {
-                PrecheckViolation::PaymasterTooShort(e.length as usize)
             }
             Some(precheck_violation_error::Violation::PaymasterIsNotContract(e)) => {
                 PrecheckViolation::PaymasterIsNotContract(from_bytes(&e.paymaster_address)?)
@@ -423,6 +430,20 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                     InvalidSignature {},
                 )),
             },
+            SimulationViolation::InvalidAccountSignature => ProtoSimulationViolationError {
+                violation: Some(
+                    simulation_violation_error::Violation::InvalidAccountSignature(
+                        InvalidAccountSignature {},
+                    ),
+                ),
+            },
+            SimulationViolation::InvalidPaymasterSignature => ProtoSimulationViolationError {
+                violation: Some(
+                    simulation_violation_error::Violation::InvalidPaymasterSignature(
+                        InvalidPaymasterSignature {},
+                    ),
+                ),
+            },
             SimulationViolation::UnstakedPaymasterContext => ProtoSimulationViolationError {
                 violation: Some(
                     simulation_violation_error::Violation::UnstakedPaymasterContext(
@@ -438,7 +459,7 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                                 entity: Some(Entity {
                                     kind: EntityType::from(et) as i32,
                                     address: maybe_address
-                                        .map_or(vec![], |addr| addr.as_bytes().to_vec()),
+                                        .map_or(vec![], |addr| addr.to_proto_bytes()),
                                 }),
                                 reason,
                             },
@@ -451,7 +472,7 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                     violation: Some(simulation_violation_error::Violation::UsedForbiddenOpcode(
                         UsedForbiddenOpcode {
                             entity: Some((&entity).into()),
-                            contract_address: addr.as_bytes().to_vec(),
+                            contract_address: addr.to_proto_bytes(),
                             opcode: opcode.0 as u32,
                         },
                     )),
@@ -466,8 +487,8 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                     simulation_violation_error::Violation::UsedForbiddenPrecompile(
                         UsedForbiddenPrecompile {
                             entity: Some((&entity).into()),
-                            contract_address: contract_addr.as_bytes().to_vec(),
-                            precompile_address: precompile_addr.as_bytes().to_vec(),
+                            contract_address: contract_addr.to_proto_bytes(),
+                            precompile_address: precompile_addr.to_proto_bytes(),
                         },
                     ),
                 ),
@@ -476,18 +497,31 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                 violation: Some(
                     simulation_violation_error::Violation::FactoryCalledCreate2Twice(
                         FactoryCalledCreate2Twice {
-                            factory_address: addr.as_bytes().to_vec(),
+                            factory_address: addr.to_proto_bytes(),
                         },
                     ),
                 ),
             },
+            SimulationViolation::AssociatedStorageDuringDeploy(entity, slot) => {
+                ProtoSimulationViolationError {
+                    violation: Some(
+                        simulation_violation_error::Violation::AssociatedStorageDuringDeploy(
+                            AssociatedStorageDuringDeploy {
+                                entity: entity.as_ref().map(|e| e.into()),
+                                contract_address: slot.address.to_proto_bytes(),
+                                slot: slot.slot.to_proto_bytes(),
+                            },
+                        ),
+                    ),
+                }
+            }
             SimulationViolation::InvalidStorageAccess(entity, slot) => {
                 ProtoSimulationViolationError {
                     violation: Some(simulation_violation_error::Violation::InvalidStorageAccess(
                         InvalidStorageAccess {
                             entity: Some((&entity).into()),
-                            contract_address: slot.address.as_bytes().to_vec(),
-                            slot: to_le_bytes(slot.slot),
+                            contract_address: slot.address.to_proto_bytes(),
+                            slot: slot.slot.to_proto_bytes(),
                         },
                     )),
                 }
@@ -495,12 +529,13 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
             SimulationViolation::NotStaked(stake_data) => ProtoSimulationViolationError {
                 violation: Some(simulation_violation_error::Violation::NotStaked(
                     NotStaked {
-                        entity: Some((&stake_data.entity).into()),
-                        accessed_address: stake_data.accessed_address.as_bytes().to_vec(),
+                        needs_stake: Some((&stake_data.needs_stake).into()),
+                        accessing_entity: EntityType::from(stake_data.accessing_entity) as i32,
+                        accessed_address: stake_data.accessed_address.to_proto_bytes(),
                         accessed_entity: EntityType::from(stake_data.accessed_entity) as i32,
-                        slot: to_le_bytes(stake_data.slot),
-                        min_stake: to_le_bytes(stake_data.min_stake),
-                        min_unstake_delay: to_le_bytes(stake_data.min_unstake_delay),
+                        slot: stake_data.slot.to_proto_bytes(),
+                        min_stake: stake_data.min_stake.to_proto_bytes(),
+                        min_unstake_delay: stake_data.min_unstake_delay.to_proto_bytes(),
                     },
                 )),
             },
@@ -510,13 +545,17 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                         UnintendedRevert {
                             entity: Some(Entity {
                                 kind: EntityType::from(et) as i32,
-                                address: maybe_address
-                                    .map_or(vec![], |addr| addr.as_bytes().to_vec()),
+                                address: maybe_address.map_or(vec![], |addr| addr.to_proto_bytes()),
                             }),
                         },
                     )),
                 }
             }
+            SimulationViolation::ValidationRevert(revert) => ProtoSimulationViolationError {
+                violation: Some(simulation_violation_error::Violation::ValidationRevert(
+                    revert.into(),
+                )),
+            },
             SimulationViolation::DidNotRevert => ProtoSimulationViolationError {
                 violation: Some(simulation_violation_error::Violation::DidNotRevert(
                     DidNotRevert {},
@@ -550,7 +589,7 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                         simulation_violation_error::Violation::AccessedUndeployedContract(
                             AccessedUndeployedContract {
                                 entity: Some((&entity).into()),
-                                contract_address: contract_addr.as_bytes().to_vec(),
+                                contract_address: contract_addr.to_proto_bytes(),
                             },
                         ),
                     ),
@@ -572,6 +611,16 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                     CodeHashChanged {},
                 )),
             },
+            SimulationViolation::InvalidTimeRange(valid_until, valid_after) => {
+                ProtoSimulationViolationError {
+                    violation: Some(simulation_violation_error::Violation::InvalidTimeRange(
+                        InvalidTimeRange {
+                            valid_until: valid_until.seconds_since_epoch(),
+                            valud_after: valid_after.seconds_since_epoch(),
+                        },
+                    )),
+                }
+            }
             SimulationViolation::AggregatorValidationFailed => ProtoSimulationViolationError {
                 violation: Some(
                     simulation_violation_error::Violation::AggregatorValidationFailed(
@@ -579,6 +628,30 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                     ),
                 ),
             },
+            SimulationViolation::VerificationGasLimitBufferTooLow(limit, needed) => {
+                ProtoSimulationViolationError {
+                    violation: Some(
+                        simulation_violation_error::Violation::VerificationGasLimitBufferTooLow(
+                            VerificationGasLimitBufferTooLow {
+                                limit: limit.to_proto_bytes(),
+                                needed: needed.to_proto_bytes(),
+                            },
+                        ),
+                    ),
+                }
+            }
+            SimulationViolation::AccessedUnsupportedContractType(contract_type, address) => {
+                ProtoSimulationViolationError {
+                    violation: Some(
+                        simulation_violation_error::Violation::AccessedUnsupportedContractType(
+                            AccessedUnsupportedContractType {
+                                contract_type,
+                                contract_address: address.to_proto_bytes(),
+                            },
+                        ),
+                    ),
+                }
+            }
         }
     }
 }
@@ -590,6 +663,18 @@ impl TryFrom<ProtoSimulationViolationError> for SimulationViolation {
         Ok(match value.violation {
             Some(simulation_violation_error::Violation::InvalidSignature(_)) => {
                 SimulationViolation::InvalidSignature
+            }
+            Some(simulation_violation_error::Violation::InvalidTimeRange(e)) => {
+                SimulationViolation::InvalidTimeRange(
+                    Timestamp::new(e.valid_until),
+                    Timestamp::new(e.valud_after),
+                )
+            }
+            Some(simulation_violation_error::Violation::InvalidAccountSignature(_)) => {
+                SimulationViolation::InvalidAccountSignature
+            }
+            Some(simulation_violation_error::Violation::InvalidPaymasterSignature(_)) => {
+                SimulationViolation::InvalidPaymasterSignature
             }
             Some(simulation_violation_error::Violation::UnstakedPaymasterContext(_)) => {
                 SimulationViolation::UnstakedPaymasterContext
@@ -627,6 +712,15 @@ impl TryFrom<ProtoSimulationViolationError> for SimulationViolation {
             Some(simulation_violation_error::Violation::FactoryCalledCreate2Twice(e)) => {
                 SimulationViolation::FactoryCalledCreate2Twice(from_bytes(&e.factory_address)?)
             }
+            Some(simulation_violation_error::Violation::AssociatedStorageDuringDeploy(e)) => {
+                SimulationViolation::AssociatedStorageDuringDeploy(
+                    e.entity.as_ref().map(|e| e.try_into()).transpose()?,
+                    StorageSlot {
+                        address: from_bytes(&e.contract_address)?,
+                        slot: from_bytes(&e.slot)?,
+                    },
+                )
+            }
             Some(simulation_violation_error::Violation::InvalidStorageAccess(e)) => {
                 SimulationViolation::InvalidStorageAccess(
                     (&e.entity.context("should have entity in error")?).try_into()?,
@@ -637,6 +731,10 @@ impl TryFrom<ProtoSimulationViolationError> for SimulationViolation {
                 )
             }
             Some(simulation_violation_error::Violation::NotStaked(e)) => {
+                let accessing_entity = rundler_types::EntityType::try_from(
+                    EntityType::try_from(e.accessing_entity).context("unknown entity type")?,
+                )
+                .context("invalid entity type")?;
                 let accessed_entity = match rundler_types::EntityType::try_from(
                     EntityType::try_from(e.accessed_entity).context("unknown entity type")?,
                 ) {
@@ -645,7 +743,9 @@ impl TryFrom<ProtoSimulationViolationError> for SimulationViolation {
                 };
 
                 SimulationViolation::NotStaked(Box::new(NeedsStakeInformation {
-                    entity: (&e.entity.context("should have entity in error")?).try_into()?,
+                    needs_stake: (&e.needs_stake.context("should have entity in error")?)
+                        .try_into()?,
+                    accessing_entity,
                     accessed_address: from_bytes(&e.accessed_address)?,
                     accessed_entity,
                     slot: from_bytes(&e.slot)?,
@@ -666,6 +766,9 @@ impl TryFrom<ProtoSimulationViolationError> for SimulationViolation {
                         Some(from_bytes(&address)?)
                     },
                 )
+            }
+            Some(simulation_violation_error::Violation::ValidationRevert(e)) => {
+                SimulationViolation::ValidationRevert(e.try_into()?)
             }
             Some(simulation_violation_error::Violation::DidNotRevert(_)) => {
                 SimulationViolation::DidNotRevert
@@ -703,8 +806,70 @@ impl TryFrom<ProtoSimulationViolationError> for SimulationViolation {
             Some(simulation_violation_error::Violation::AggregatorValidationFailed(_)) => {
                 SimulationViolation::AggregatorValidationFailed
             }
+            Some(simulation_violation_error::Violation::VerificationGasLimitBufferTooLow(e)) => {
+                SimulationViolation::VerificationGasLimitBufferTooLow(
+                    from_bytes(&e.limit)?,
+                    from_bytes(&e.needed)?,
+                )
+            }
+            Some(simulation_violation_error::Violation::AccessedUnsupportedContractType(e)) => {
+                SimulationViolation::AccessedUnsupportedContractType(
+                    e.contract_type,
+                    from_bytes(&e.contract_address)?,
+                )
+            }
             None => {
                 bail!("unknown proto mempool simulation violation")
+            }
+        })
+    }
+}
+
+impl From<ValidationRevert> for ProtoValidationRevert {
+    fn from(revert: ValidationRevert) -> Self {
+        let inner = match revert {
+            ValidationRevert::EntryPoint(reason) => {
+                validation_revert::Revert::EntryPoint(EntryPointRevert { reason })
+            }
+            ValidationRevert::Operation {
+                entry_point_reason,
+                inner_revert_data,
+                inner_revert_reason,
+            } => validation_revert::Revert::Operation(OperationRevert {
+                entry_point_reason,
+                inner_revert_data: inner_revert_data.to_vec(),
+                inner_revert_reason: inner_revert_reason.unwrap_or_default(),
+            }),
+            ValidationRevert::Unknown(revert_bytes) => {
+                validation_revert::Revert::Unknown(UnknownRevert {
+                    revert_bytes: revert_bytes.to_vec(),
+                })
+            }
+        };
+        ProtoValidationRevert {
+            revert: Some(inner),
+        }
+    }
+}
+
+impl TryFrom<ProtoValidationRevert> for ValidationRevert {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ProtoValidationRevert) -> Result<Self, Self::Error> {
+        Ok(match value.revert {
+            Some(validation_revert::Revert::EntryPoint(e)) => {
+                ValidationRevert::EntryPoint(e.reason)
+            }
+            Some(validation_revert::Revert::Operation(e)) => ValidationRevert::Operation {
+                entry_point_reason: e.entry_point_reason,
+                inner_revert_data: e.inner_revert_data.into(),
+                inner_revert_reason: Some(e.inner_revert_reason).filter(|s| !s.is_empty()),
+            },
+            Some(validation_revert::Revert::Unknown(e)) => {
+                ValidationRevert::Unknown(e.revert_bytes.into())
+            }
+            None => {
+                bail!("unknown proto validation revert")
             }
         })
     }
@@ -727,12 +892,16 @@ mod tests {
 
     #[test]
     fn test_precheck_error() {
-        let error = MempoolError::PrecheckViolation(PrecheckViolation::InitCodeTooShort(0));
+        let error = MempoolError::PrecheckViolation(PrecheckViolation::SenderFundsTooLow(
+            0.into(),
+            0.into(),
+        ));
         let proto_error: ProtoMempoolError = error.into();
         let error2 = proto_error.try_into().unwrap();
         match error2 {
-            MempoolError::PrecheckViolation(PrecheckViolation::InitCodeTooShort(v)) => {
-                assert_eq!(v, 0)
+            MempoolError::PrecheckViolation(PrecheckViolation::SenderFundsTooLow(x, y)) => {
+                assert_eq!(x, 0.into());
+                assert_eq!(y, 0.into());
             }
             _ => panic!("wrong error type"),
         }

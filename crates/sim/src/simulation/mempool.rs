@@ -13,8 +13,8 @@
 
 use std::{collections::HashMap, str::FromStr};
 
-use ethers::types::{Address, Opcode, H256, U256};
-use rundler_types::{Entity, EntityType};
+use ethers::types::{Address, H256, U256};
+use rundler_types::{Entity, EntityType, Opcode};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 
@@ -24,9 +24,34 @@ use crate::simulation::SimulationViolation;
 ///
 /// Typically read from a JSON file using the `Deserialize` trait.
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct MempoolConfig {
+    /// Entry point address this mempool is associated with.
+    pub(crate) entry_point: Address,
     /// Allowlist to match violations against.
     pub(crate) allowlist: Vec<AllowlistEntry>,
+}
+
+impl MempoolConfig {
+    /// Return the entrypoint address this mempool is associated with
+    pub fn entry_point(&self) -> Address {
+        self.entry_point
+    }
+}
+
+/// A collection of mempool configurations keyed by their ID.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MempoolConfigs(HashMap<H256, MempoolConfig>);
+
+impl MempoolConfigs {
+    /// Get the mempool configs for a specific entry point address
+    pub fn get_for_entry_point(&self, entry_point: Address) -> HashMap<H256, MempoolConfig> {
+        self.0
+            .iter()
+            .filter(|(_, config)| config.entry_point == entry_point)
+            .map(|(id, config)| (*id, config.clone()))
+            .collect()
+    }
 }
 
 /// The entity allowed by an allowlist entry.
@@ -158,7 +183,7 @@ impl AllowlistEntry {
             }
             AllowRule::NotStaked => {
                 if let SimulationViolation::NotStaked(stake_data) = violation {
-                    self.entity.is_allowed(&stake_data.entity)
+                    self.entity.is_allowed(&stake_data.needs_stake)
                 } else {
                     false
                 }
@@ -201,10 +226,9 @@ pub(crate) fn match_mempools(
 #[cfg(test)]
 mod tests {
     use ethers::types::U256;
-    use rundler_types::StorageSlot;
+    use rundler_types::{pool::NeedsStakeInformation, StorageSlot, ViolationOpCode};
 
     use super::*;
-    use crate::simulation::{simulation::NeedsStakeInformation, ViolationOpCode};
 
     #[test]
     fn test_allow_entity_any() {
@@ -437,12 +461,10 @@ mod tests {
         let entry = AllowlistEntry::new(AllowEntity::Address(entity_addr), AllowRule::NotStaked);
 
         let violation = SimulationViolation::NotStaked(Box::new(NeedsStakeInformation {
-            entity: Entity {
-                kind: EntityType::Account,
-                address: entity_addr,
-            },
+            needs_stake: Entity::paymaster(entity_addr),
+            accessing_entity: EntityType::Paymaster,
             accessed_entity: Some(EntityType::Paymaster),
-            accessed_address: Address::random(),
+            accessed_address: entity_addr,
             slot: U256::zero(),
             min_stake: U256::zero(),
             min_unstake_delay: U256::zero(),
@@ -451,12 +473,10 @@ mod tests {
         assert!(entry.is_allowed(&violation));
 
         let violation = SimulationViolation::NotStaked(Box::new(NeedsStakeInformation {
-            entity: Entity {
-                kind: EntityType::Account,
-                address: Address::random(),
-            },
+            needs_stake: Entity::paymaster(Address::random()),
+            accessing_entity: EntityType::Paymaster,
             accessed_entity: Some(EntityType::Paymaster),
-            accessed_address: Address::random(),
+            accessed_address: entity_addr,
             slot: U256::zero(),
             min_stake: U256::zero(),
             min_unstake_delay: U256::zero(),
@@ -473,6 +493,7 @@ mod tests {
             (
                 H256::random(),
                 MempoolConfig {
+                    entry_point: Address::random(),
                     allowlist: vec![AllowlistEntry::new(
                         AllowEntity::Type(EntityType::Account),
                         AllowRule::ForbiddenOpcode {
@@ -505,6 +526,7 @@ mod tests {
             (
                 H256::random(),
                 MempoolConfig {
+                    entry_point: Address::random(),
                     allowlist: vec![AllowlistEntry::new(
                         AllowEntity::Type(EntityType::Account),
                         AllowRule::ForbiddenOpcode {
@@ -549,6 +571,7 @@ mod tests {
             (
                 mempool1,
                 MempoolConfig {
+                    entry_point: Address::random(),
                     allowlist: vec![AllowlistEntry::new(
                         AllowEntity::Type(EntityType::Account),
                         AllowRule::ForbiddenOpcode {
@@ -584,6 +607,7 @@ mod tests {
             (
                 mempool1,
                 MempoolConfig {
+                    entry_point: Address::random(),
                     allowlist: vec![
                         AllowlistEntry::new(
                             AllowEntity::Type(EntityType::Account),
@@ -605,6 +629,7 @@ mod tests {
             (
                 mempool2,
                 MempoolConfig {
+                    entry_point: Address::random(),
                     allowlist: vec![
                         AllowlistEntry::new(
                             AllowEntity::Type(EntityType::Account),

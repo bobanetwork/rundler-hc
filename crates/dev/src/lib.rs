@@ -42,11 +42,11 @@ use ethers::{
     utils::{self, hex, keccak256},
 };
 use rundler_types::{
-    contracts::{
-        entry_point::EntryPoint, simple_account::SimpleAccount,
+    contracts::v0_6::{
+        i_entry_point::IEntryPoint, simple_account::SimpleAccount,
         simple_account_factory::SimpleAccountFactory, verifying_paymaster::VerifyingPaymaster,
     },
-    UserOperation,
+    v0_6, UserOperation,
 };
 
 /// Chain ID used by Geth in --dev mode.
@@ -185,14 +185,14 @@ pub fn test_signing_key_bytes(test_account_id: u8) -> [u8; 32] {
 }
 
 /// An alternative to the default user op with gas values prefilled.
-pub fn base_user_op() -> UserOperation {
-    UserOperation {
+pub fn base_user_op() -> v0_6::UserOperation {
+    v0_6::UserOperation {
         call_gas_limit: 1_000_000.into(),
         verification_gas_limit: 1_000_000.into(),
         pre_verification_gas: 1_000_000.into(),
         max_fee_per_gas: 100.into(),
         max_priority_fee_per_gas: 5.into(),
-        ..UserOperation::default()
+        ..v0_6::UserOperation::default()
     }
 }
 
@@ -281,7 +281,7 @@ pub async fn deploy_dev_contracts(entry_point_bytecode: &str) -> anyhow::Result<
     let entry_point_address = deterministic_deploy
         .deploy_bytecode(entry_point_bytecode, 0)
         .await?;
-    let entry_point = EntryPoint::new(entry_point_address, Arc::clone(&deployer_client));
+    let entry_point = IEntryPoint::new(entry_point_address, Arc::clone(&deployer_client));
 
     // TODO use deterministic deployment
     // account factory
@@ -315,12 +315,12 @@ pub async fn deploy_dev_contracts(entry_point_bytecode: &str) -> anyhow::Result<
         factory.create_account(wallet_owner_eoa.address(), salt),
     );
 
-    let mut op = UserOperation {
+    let mut op = v0_6::UserOperation {
         sender: wallet_address,
         init_code,
         ..base_user_op()
     };
-    let op_hash = op.op_hash(entry_point.address(), DEV_CHAIN_ID);
+    let op_hash = op.hash(entry_point.address(), DEV_CHAIN_ID);
     let signature = wallet_owner_eoa
         .sign_message(op_hash)
         .await
@@ -348,7 +348,7 @@ pub struct DevClients {
     /// The client used by the bundler.
     pub bundler_client: Arc<SimpleSignerMiddleware>,
     /// The entry point contract.
-    pub entry_point: EntryPoint<SimpleSignerMiddleware>,
+    pub entry_point: IEntryPoint<SimpleSignerMiddleware>,
     /// The account factory contract.
     pub factory: SimpleAccountFactory<Provider<Http>>,
     /// The wallet contract.
@@ -373,7 +373,7 @@ impl DevClients {
         let provider = new_local_provider();
         let bundler_client = new_test_client(Arc::clone(&provider), BUNDLER_ACCOUNT_ID);
         let wallet_owner_client = new_test_client(Arc::clone(&provider), WALLET_OWNER_ACCOUNT_ID);
-        let entry_point = EntryPoint::new(entry_point_address, Arc::clone(&bundler_client));
+        let entry_point = IEntryPoint::new(entry_point_address, Arc::clone(&bundler_client));
         let factory = SimpleAccountFactory::new(factory_address, Arc::clone(&provider));
         let wallet = SimpleAccount::new(wallet_address, Arc::clone(&provider));
         let paymaster = VerifyingPaymaster::new(paymaster_address, Arc::clone(&provider));
@@ -400,7 +400,7 @@ impl DevClients {
     /// Adds a signature to a user operation.
     pub async fn add_signature(
         &self,
-        op: &mut UserOperation,
+        op: &mut v0_6::UserOperation,
         use_paymaster: bool,
     ) -> anyhow::Result<()> {
         if use_paymaster {
@@ -426,7 +426,7 @@ impl DevClients {
             paymaster_and_data.extend(paymaster_signature.to_vec());
             op.paymaster_and_data = paymaster_and_data.into()
         }
-        let op_hash = op.op_hash(self.entry_point.address(), DEV_CHAIN_ID);
+        let op_hash = op.hash(self.entry_point.address(), DEV_CHAIN_ID);
         let signature = self
             .wallet_owner_signer
             .sign_message(op_hash)
@@ -441,7 +441,7 @@ impl DevClients {
         &self,
         call: ContractCall<M, D>,
         value: U256,
-    ) -> anyhow::Result<UserOperation> {
+    ) -> anyhow::Result<v0_6::UserOperation> {
         self.new_wallet_op_internal(call, value, false).await
     }
 
@@ -450,7 +450,7 @@ impl DevClients {
         &self,
         call: ContractCall<M, D>,
         value: U256,
-    ) -> anyhow::Result<UserOperation> {
+    ) -> anyhow::Result<v0_6::UserOperation> {
         self.new_wallet_op_internal(call, value, true).await
     }
 
@@ -459,7 +459,7 @@ impl DevClients {
         call: ContractCall<M, D>,
         value: U256,
         use_paymaster: bool,
-    ) -> anyhow::Result<UserOperation> {
+    ) -> anyhow::Result<v0_6::UserOperation> {
         let tx = &call.tx;
         let inner_call_data = Bytes::clone(
             tx.data()
@@ -480,7 +480,7 @@ impl DevClients {
                 .data()
                 .context("wallet execute should have call data")?,
         );
-        let mut op = UserOperation {
+        let mut op = v0_6::UserOperation {
             sender: self.wallet.address(),
             call_data,
             nonce,
