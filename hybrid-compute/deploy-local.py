@@ -7,7 +7,6 @@ import socket
 import argparse
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
-import solcx
 from eth_abi import abi as ethabi
 
 from aa_utils import *
@@ -77,6 +76,11 @@ def load_contract(w, name, path, address):
     contract_info[name] = {}
 
     contract_info[name]['abi'] = j['abi']
+
+    deployed[name] = {}
+    deployed[name]['abi'] = contract_info[name]['abi']
+    deployed[name]['address'] = address
+
     return w.eth.contract(abi=contract_info[name]['abi'], address=address)
 
 
@@ -302,8 +306,6 @@ if boba_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
     while boba_balance(deploy_addr) == 0:
         time.sleep(2)
     print("Continuing")
-
-deployed = {}
 
 fund_addr(env_vars['BUNDLER_ADDR'])
 
