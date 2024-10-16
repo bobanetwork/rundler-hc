@@ -85,7 +85,7 @@ def load_contract(w, name, path, address):
 
 
 def submit_as_op(addr, calldata, signer_key):
-    """Wrapper to build and submit a UserOperation directly to the EntryPoint. We don't
+    """Wrapper to build and submit a UserOperation directly to the int. We don't
        have a Bundler to run gas estimation so the values are hard-coded. It might be
        necessary to change these values e.g. if simulating different L1 prices on the local devnet"""
     op = {
@@ -259,7 +259,7 @@ def boba_balance(addr):
     bal = w3.eth.call({'to':boba_token, 'data':bal_calldata})
     return Web3.to_int(bal)
 
-EP = load_contract(w3, "EntryPoint", "../crates/types/contracts/lib/account-abstraction-versions/v0_6/contracts/EntryPoint.sol/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
+EP = load_contract(w3, "EntryPoint", "../crates/types/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
 
 assert l1.eth.get_balance(deploy_addr) > Web3.to_wei(1000, 'ether')
 
@@ -313,7 +313,7 @@ fund_addr(env_vars['BUNDLER_ADDR'])
 
 aa = aa_rpc(ep_addr, w3, None)
 
-HH = load_contract(w3, 'HCHelper', OUT_PREFIX + "v0_6/HCHelper.sol/HCHelper.json", hh_addr)
+HH = load_contract(w3, 'HCHelper', OUT_PREFIX + "HCHelper.sol/HCHelper.json", hh_addr)
 l2_util.approve_token(boba_token, HH.address, deploy_addr, deploy_key)
 
 tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
