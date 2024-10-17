@@ -4,7 +4,7 @@ from get_token_price.get_token_price_test import TestTokenPrice
 from check_kyc.check_kyc_test import TestKyc
 from add_sub_2.add_sub_2_test import TestAddSub2
 from ramble.ramble_test import TestWordGuess
-from verify_captcha.captcha_test import TestCaptcha
+#from verify_captcha.captcha_test import TestCaptcha
 from auction_system.auction_system_test import TestAuction
 from sports_betting.sports_betting_test import TestSportsBetting
 from rainfall_insurance.rainfall_insurance_test import test_rainfall_insurance_purchase,test_rainfall_insurance_payout

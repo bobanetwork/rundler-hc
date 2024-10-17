@@ -67,7 +67,7 @@ SA = w3.eth.contract(
 HA = w3.eth.contract(address=deployed['HybridAccount']
                      ['address'], abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
-    address=deployed['TestCounter']['address'], abi=deployed['TestCounter']['abi'])
+    address=deployed['TestHybrid']['address'], abi=deployed['TestHybrid']['abi'])
 KYC = w3.eth.contract(
     address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
 TFP = w3.eth.contract(

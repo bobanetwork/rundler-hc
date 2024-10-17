@@ -2,14 +2,14 @@
 pragma solidity ^0.8.13;
 
 import "forge-std/Script.sol";
-import "lib/account-abstraction-versions/v0_6/contracts/samples/HybridAccount.sol";
-import "lib/account-abstraction-versions/v0_6/contracts/test/TestAuctionSystem.sol";
-import "lib/account-abstraction-versions/v0_6/contracts/test/TestCaptcha.sol";
-import "lib/account-abstraction-versions/v0_6/contracts/test/TestCounter.sol";
-import "lib/account-abstraction-versions/v0_6/contracts/test/TestRainfallInsurance.sol";
-import "lib/account-abstraction-versions/v0_6/contracts/test/TestSportsBetting.sol";
-import "lib/account-abstraction-versions/v0_6/contracts/test/TestKyc.sol";
-import "lib/account-abstraction-versions/v0_6/contracts/test/TestTokenPrice.sol";
+import "src/hc0_6/HybridAccount.sol";
+import "src/hc0_6/TestAuctionSystem.sol";
+import "src/hc0_6/TestCaptcha.sol";
+import "src/hc0_6/TestHybrid.sol";
+import "src/hc0_6/TestRainfallInsurance.sol";
+import "src/hc0_6/TestSportsBetting.sol";
+import "src/hc0_6/TestKyc.sol";
+import "src/hc0_6/TestTokenPrice.sol";
 
 contract LocalDeploy is Script {
     function run() external 
@@ -25,7 +25,7 @@ contract LocalDeploy is Script {
 
         ret[0] = address(new AuctionFactory(ha1Addr));
         ret[1] = address(new TestCaptcha(ha1Addr));
-        ret[2] = address(new TestCounter(ha1Addr));
+        ret[2] = address(new TestHybrid(ha1Addr));
         ret[3] = address(new RainfallInsurance(ha1Addr));
         ret[4] = address(new SportsBetting(ha1Addr));
         ret[5] = address(new TestKyc(ha1Addr));
