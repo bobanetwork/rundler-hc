@@ -1,0 +1,5 @@
+jsonrpcclient
+git+https://github.com/bobanetwork/jsonrpclib.git
+python-dotenv
+redis
+web3~=6.14

@@ -7,7 +7,6 @@ import socket
 import argparse
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
-import solcx
 from eth_abi import abi as ethabi
 
 from aa_utils import *
@@ -66,35 +65,27 @@ assert w3.is_connected
 l1_util = eth_utils(l1)
 l2_util = eth_utils(w3)
 
-solcx.install_solc("0.8.17")
-solcx.set_solc_version("0.8.17")
 contract_info = {}
-PATH_PREFIX = "../crates/types/contracts/lib/account-abstraction-versions/v0_6/contracts/"
+OUT_PREFIX = "../crates/types/contracts/out/"
 
-def load_contract(w, name, files):
-    """Compiles a contract from source and loads its ABI"""
-    compiled = solcx.compile_files(
-        files,
-        output_values=['abi', 'bin', 'bin-runtime'],
-        import_remappings={
-            "@openzeppelin": "../crates/types/contracts/lib/openzeppelin-contracts-versions/v4_9"},
-        allow_paths=[PATH_PREFIX],
-        optimize=True,
-        optimize_runs=1000000,
-    )
+def load_contract(w, name, path, address):
+    """Loads a contract's JSON ABI"""
+    with open(path, "r") as f:
+        j = json.loads(f.read())
 
-    for k in compiled.keys():
-        if re.search(re.compile(name), k):
-            break
     contract_info[name] = {}
 
-    contract_info[name]['abi'] = compiled[k]['abi']
-    contract_info[name]['bin'] = compiled[k]['bin']
-    return w.eth.contract(abi=contract_info[name]['abi'], bytecode=contract_info[name]['bin'])
+    contract_info[name]['abi'] = j['abi']
+
+    deployed[name] = {}
+    deployed[name]['abi'] = contract_info[name]['abi']
+    deployed[name]['address'] = address
+
+    return w.eth.contract(abi=contract_info[name]['abi'], address=address)
 
 
 def submit_as_op(addr, calldata, signer_key):
-    """Wrapper to build and submit a UserOperation directly to the EntryPoint. We don't
+    """Wrapper to build and submit a UserOperation directly to the int. We don't
        have a Bundler to run gas estimation so the values are hard-coded. It might be
        necessary to change these values e.g. if simulating different L1 prices on the local devnet"""
     op = {
@@ -208,7 +199,7 @@ def deploy_forge(script, cmd_env):
     args = ["/home/enya/.foundry/bin/forge", "script", "--silent", "--json", "--broadcast"]
     args.append("--rpc-url=http://127.0.0.1:9545")
     args.append("--contracts")
-    args.append("lib/account-abstraction-versions/v0_6/contracts/core")
+    args.append("src/hc0_6")
     args.append("--remappings")
     args.append("@openzeppelin/=lib/openzeppelin-contracts-versions/v4_9")
     args.append(script)
@@ -268,20 +259,7 @@ def boba_balance(addr):
     bal = w3.eth.call({'to':boba_token, 'data':bal_calldata})
     return Web3.to_int(bal)
 
-HH = load_contract(w3, "HCHelper",      PATH_PREFIX+"core/HCHelper.sol")
-KYC = load_contract(w3, "TestKyc",          PATH_PREFIX+"test/TestKyc.sol")
-TEST_TOKEN_PRICE = load_contract(
-    w3, "TestTokenPrice", PATH_PREFIX+"test/TestTokenPrice.sol")
-TestCaptcha = load_contract(
-    w3, "TestCaptcha", PATH_PREFIX+"test/TestCaptcha.sol")
-TC = load_contract(w3, "TestCounter",   PATH_PREFIX+"test/TestCounter.sol")
-TestRainfallInsurance = load_contract(
-    w3, "TestRainfallInsurance", PATH_PREFIX+"test/TestRainfallInsurance.sol")
-EP = load_contract(w3, "EntryPoint",    PATH_PREFIX+"core/EntryPoint.sol")
-SA = load_contract(w3, "SimpleAccount", PATH_PREFIX+"samples/SimpleAccount.sol")
-HA = load_contract(w3, "HybridAccount", PATH_PREFIX+"samples/HybridAccount.sol")
-TEST_AUCTION = load_contract(w3, "TestAuctionSystem", PATH_PREFIX+"test/TestAuctionSystem.sol")
-SPORT_BET = load_contract(w3, "TestSportsBetting", PATH_PREFIX+"test/TestSportsBetting.sol")
+EP = load_contract(w3, "EntryPoint", "../crates/types/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
 
 assert l1.eth.get_balance(deploy_addr) > Web3.to_wei(1000, 'ether')
 
@@ -329,17 +307,13 @@ if boba_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
         time.sleep(2)
     print("Continuing")
 
-deployed = {}
-
 fund_addr(env_vars['BUNDLER_ADDR'])
 
 (ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr) = deploy_base()
 
 aa = aa_rpc(ep_addr, w3, None)
 
-EP = get_contract('EntryPoint',ep_addr)
-HH = get_contract('HCHelper',hh_addr)
-
+HH = load_contract(w3, 'HCHelper', OUT_PREFIX + "HCHelper.sol/HCHelper.json", hh_addr)
 l2_util.approve_token(boba_token, HH.address, deploy_addr, deploy_key)
 
 tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
@@ -352,18 +326,19 @@ fund_addr(client_addr)
 
 ha1_addr = deploy_account(haf_addr, env_vars['OC_OWNER'])
 fund_addr_ep(EP, ha1_addr)
-HA = get_contract('HybridAccount',ha1_addr)
-SA = get_contract('SimpleAccount', client_addr)
+
+HA = load_contract(w3, 'HybridAccount', OUT_PREFIX + "HybridAccount.sol/HybridAccount.json", ha1_addr)
+SA = load_contract(w3, 'SimpleAccount', OUT_PREFIX + "SimpleAccount.sol/SimpleAccount.json", client_addr)
 
 example_addrs = deploy_examples(ha1_addr)
 
-TEST_AUCTION = get_contract('TestAuctionSystem', example_addrs[0])
-CAPTCHA = get_contract('TestCaptcha', example_addrs[1])
-TC = get_contract('TestCounter', example_addrs[2])
-RAINFALL_INSURANCE = get_contract('TestRainfallInsurance', example_addrs[3])
-TEST_SPORTS_BETTING = get_contract('TestSportsBetting', example_addrs[4])
-KYC = get_contract('TestKyc', example_addrs[5])
-TEST_TOKEN_PRICE = get_contract('TestTokenPrice', example_addrs[6])
+TEST_AUCTION = load_contract(w3, 'TestAuctionSystem', OUT_PREFIX + "TestAuctionSystem.sol/AuctionFactory.json", example_addrs[0])
+CAPTCHA = load_contract(w3, 'TestCaptcha', OUT_PREFIX + "TestCaptcha.sol/TestCaptcha.json", example_addrs[1])
+TC = load_contract(w3, 'TestHybrid', OUT_PREFIX + "TestHybrid.sol/TestHybrid.json", example_addrs[2])
+RAINFALL_INSURANCE = load_contract(w3, 'TestRainfallInsurance', OUT_PREFIX + "TestRainfallInsurance.sol/RainfallInsurance.json", example_addrs[3])
+TEST_SPORTS_BETTING = load_contract(w3, 'TestSportsBetting', OUT_PREFIX + "TestSportsBetting.sol/SportsBetting.json", example_addrs[4])
+KYC = load_contract(w3, 'TestKyc', OUT_PREFIX + "TestKyc.sol/TestKyc.json", example_addrs[5])
+TEST_TOKEN_PRICE = load_contract(w3, 'TestTokenPrice', OUT_PREFIX + "TestTokenPrice.sol/TestTokenPrice.json", example_addrs[6])
 
 for a in example_addrs:
     permit_caller(HA, a)
