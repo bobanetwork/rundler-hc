@@ -213,7 +213,7 @@ impl EntryPointRouter {
             .map_err(Into::into)
     }
 
-    pub(crate) /* exposed for hybrid_compute */ fn get_ep_version(&self, entry_point: &Address) -> EthResult<EntryPointVersion> {
+    pub(crate) fn get_ep_version(&self, entry_point: &Address) -> EthResult<EntryPointVersion> {
         if let Some((addr, _)) = self.v0_6 {
             if addr == *entry_point {
                 return Ok(EntryPointVersion::V0_6);

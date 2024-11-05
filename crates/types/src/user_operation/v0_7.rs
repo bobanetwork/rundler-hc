@@ -272,7 +272,8 @@ impl UserOperation {
             Token::FixedBytes(hash_paymaster_and_data.to_vec()), // ???
         ])
         .into()
-    }}
+    }
+}
 
 impl From<UserOperationVariant> for UserOperation {
     /// Converts a UserOperationVariant to a UserOperation 0.7
@@ -526,7 +527,10 @@ impl UserOperationOptionalGas {
     /// Hash fields relevant to Hybrid Compute
     pub fn hc_hash(&self) -> H256 {
         let cs = ChainSpec::default();
-        self.clone().into_user_operation_builder(&cs, U128::from(0), U128::from(0), U128::from(0)).build().hc_hash()
+        self.clone()
+            .into_user_operation_builder(&cs, U128::from(0), U128::from(0), U128::from(0))
+            .build()
+            .hc_hash()
     }
 }
 

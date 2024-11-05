@@ -26,13 +26,14 @@ use ethers::{
 };
 use once_cell::sync::Lazy;
 
-use crate::user_operation::{
-    UserOperation,
-    UserOperationOptionalGas,
-    v0_6::UserOperationOptionalGas as UserOperationOptionalGasV0_6,
-    v0_7::UserOperationOptionalGas as UserOperationOptionalGasV0_7,
+use crate::{
+    chain::ChainSpec,
+    user_operation::{
+        v0_6::UserOperationOptionalGas as UserOperationOptionalGasV0_6,
+        v0_7::UserOperationOptionalGas as UserOperationOptionalGasV0_7, UserOperation,
+        UserOperationOptionalGas,
+    },
 };
-use crate::chain::ChainSpec;
 
 #[derive(Clone, Debug)]
 /// Error code
@@ -273,7 +274,7 @@ fn make_external_op(
         call_data
     );
     if is_v7 {
-         let mut new_op = UserOperationOptionalGasV0_7 {
+        let mut new_op = UserOperationOptionalGasV0_7 {
             sender: ha_addr,
             nonce: oo_nonce,
             call_data: call_data.clone(),
@@ -346,7 +347,9 @@ pub async fn external_op(
         is_v7,
     );
 
-    let check_hash = new_op.into_variant(&cfg.chain_spec).hash(entry_point, cfg.chain_spec.id);
+    let check_hash = new_op
+        .into_variant(&cfg.chain_spec)
+        .hash(entry_point, cfg.chain_spec.id);
     let check_sig: ethers::types::Signature =
         ethers::types::Signature::from_str(&sig_hex).expect("Signature decode");
     let check_msg: ethers::types::RecoveryMessage = Data(check_hash.to_fixed_bytes().to_vec());
@@ -364,7 +367,18 @@ pub async fn external_op(
         let key_bytes: Bytes = cfg.sys_privkey.as_fixed_bytes().into();
         let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
-        (new_op, new_cd) = make_err_op(hc_err.clone(), sub_key, src_addr, nn, oo_nonce, cfg, entry_point, wallet, is_v7).await;
+        (new_op, new_cd) = make_err_op(
+            hc_err.clone(),
+            sub_key,
+            src_addr,
+            nn,
+            oo_nonce,
+            cfg,
+            entry_point,
+            wallet,
+            is_v7,
+        )
+        .await;
     }
 
     let ent: HcEntry = HcEntry {
@@ -421,9 +435,11 @@ async fn make_err_op(
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
         };
-        let hh = UserOperationOptionalGas::V0_7(new_op.clone()).into_variant(&cfg.chain_spec).hash(entry_point, cfg.chain_spec.id);
+        let hh = UserOperationOptionalGas::V0_7(new_op.clone())
+            .into_variant(&cfg.chain_spec)
+            .hash(entry_point, cfg.chain_spec.id);
         let signature = wallet.sign_message(hh).await;
-        let sig_bytes:Bytes =signature.as_ref().unwrap().to_vec().into();
+        let sig_bytes: Bytes = signature.as_ref().unwrap().to_vec().into();
         println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
         new_op.signature = sig_bytes;
 
@@ -442,9 +458,11 @@ async fn make_err_op(
             paymaster_and_data: Bytes::new(),
             signature: Bytes::new(),
         };
-        let hh = UserOperationOptionalGas::V0_6(new_op.clone()).into_variant(&cfg.chain_spec).hash(entry_point, cfg.chain_spec.id);
+        let hh = UserOperationOptionalGas::V0_6(new_op.clone())
+            .into_variant(&cfg.chain_spec)
+            .hash(entry_point, cfg.chain_spec.id);
         let signature = wallet.sign_message(hh).await;
-        let sig_bytes:Bytes =signature.as_ref().unwrap().to_vec().into();
+        let sig_bytes: Bytes = signature.as_ref().unwrap().to_vec().into();
         println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
         new_op.signature = sig_bytes;
 
@@ -474,7 +492,18 @@ pub async fn err_op(
     let key_bytes: Bytes = cfg.sys_privkey.as_fixed_bytes().into();
     let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
-    let (new_op, new_cd) = make_err_op(err_hc, sub_key, src_addr, nn, oo_nonce, cfg, entry_point, wallet, is_v7).await;
+    let (new_op, new_cd) = make_err_op(
+        err_hc,
+        sub_key,
+        src_addr,
+        nn,
+        oo_nonce,
+        cfg,
+        entry_point,
+        wallet,
+        is_v7,
+    )
+    .await;
 
     let ent: HcEntry = HcEntry {
         sub_key,
@@ -517,12 +546,14 @@ pub async fn rr_op(
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
-         };
+        };
 
         let key_bytes: Bytes = cfg.sys_privkey.as_fixed_bytes().into();
         let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
-        let hh = UserOperationOptionalGas::V0_7(new_op.clone()).into_variant(&cfg.chain_spec).hash(entry_point, cfg.chain_spec.id);
+        let hh = UserOperationOptionalGas::V0_7(new_op.clone())
+            .into_variant(&cfg.chain_spec)
+            .hash(entry_point, cfg.chain_spec.id);
 
         let signature = wallet.sign_message(hh).await;
         new_op.signature = signature.as_ref().unwrap().to_vec().into();
@@ -547,7 +578,9 @@ pub async fn rr_op(
         let key_bytes: Bytes = cfg.sys_privkey.as_fixed_bytes().into();
         let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
 
-        let hh = UserOperationOptionalGas::V0_6(new_op.clone()).into_variant(&cfg.chain_spec).hash(entry_point, cfg.chain_spec.id);
+        let hh = UserOperationOptionalGas::V0_6(new_op.clone())
+            .into_variant(&cfg.chain_spec)
+            .hash(entry_point, cfg.chain_spec.id);
         println!("HC pre_sign hash {:?}", hh);
 
         let signature = wallet.sign_message(hh).await;
@@ -856,12 +889,11 @@ mod test {
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
         };
-        let (op,_) = op_future.await;
+        let (op, _) = op_future.await;
         if let UserOperationOptionalGas::V0_7(op7) = op {
             assert_eq!(expected, op7);
         } else {
             panic!("Invalud UserOperation variant");
         }
-
     }
 }

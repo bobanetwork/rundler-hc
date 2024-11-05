@@ -638,7 +638,11 @@ where
             if hc_ent.is_some() {
                 gas_spent += hc_ent.clone().unwrap().oc_gas;
                 //println!("HC insert, hc_ent {:?}", hc_ent);
-                let u_op2: UserOperationVariant = hc_ent.clone().unwrap().user_op.into_variant(&self.settings.chain_spec);
+                let u_op2: UserOperationVariant = hc_ent
+                    .clone()
+                    .unwrap()
+                    .user_op
+                    .into_variant(&self.settings.chain_spec);
 
                 let sim_result = self
                     .simulator
@@ -680,11 +684,17 @@ where
                 .get_nonce(cfg.sys_account, U256::zero())
                 .await
                 .unwrap();
-            let is_v7 = self.entry_point.address() == self.settings.chain_spec.entry_point_address_v0_7;
-            let cleanup_op: UserOperationVariant =
-                hybrid_compute::rr_op(&cfg, self.entry_point.address(), c_nonce, cleanup_keys, is_v7)
-                    .await
-                    .into_variant(&self.settings.chain_spec);
+            let is_v7 =
+                self.entry_point.address() == self.settings.chain_spec.entry_point_address_v0_7;
+            let cleanup_op: UserOperationVariant = hybrid_compute::rr_op(
+                &cfg,
+                self.entry_point.address(),
+                c_nonce,
+                cleanup_keys,
+                is_v7,
+            )
+            .await
+            .into_variant(&self.settings.chain_spec);
 
             let cleanup_sim = self
                 .simulator

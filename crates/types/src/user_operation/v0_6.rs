@@ -404,7 +404,9 @@ impl UserOperationOptionalGas {
 
     /// Hash fields relevant to Hybrid Compute
     pub fn hc_hash(&self) -> H256 {
-        self.clone().into_user_operation(U256::from(0), U256::from(0)).hc_hash()
+        self.clone()
+            .into_user_operation(U256::from(0), U256::from(0))
+            .hc_hash()
     }
 }
 

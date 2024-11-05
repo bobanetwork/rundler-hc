@@ -159,7 +159,7 @@ where
 
         let hh = op.hc_hash();
         println!("HC api.rs hh {:?}", hh);
-        let op_t:UserOperationVariant = op.into_variant(&self.chain_spec);
+        let op_t: UserOperationVariant = op.into_variant(&self.chain_spec);
 
         let ep_addr = hybrid_compute::hc_ha_addr(revert_data);
 
@@ -179,7 +179,10 @@ where
             .unwrap();
         println!(
             "HC hc_nonce {:?} err_nonce {:?} op_nonce {:?} n_key {:?}",
-            hc_nonce, err_nonce, op_t.nonce(), n_key
+            hc_nonce,
+            err_nonce,
+            op_t.nonce(),
+            n_key
         );
         let p2 = rundler_provider::new_provider(&self.hc.node_http, None)?;
 
@@ -227,14 +230,23 @@ where
         const REQ_VERSION_V7: &str = "0.3";
 
         let is_v7 = match self.router.get_ep_version(&entry_point)? {
-             rundler_types::EntryPointVersion::V0_7 => true,
-             rundler_types::EntryPointVersion::V0_6 => false,
-             rundler_types::EntryPointVersion::Unspecified => { return Err(EthRpcError::Internal(anyhow::anyhow!("HC04: Unknown EntryPoint version"))) },
+            rundler_types::EntryPointVersion::V0_7 => true,
+            rundler_types::EntryPointVersion::V0_6 => false,
+            rundler_types::EntryPointVersion::Unspecified => {
+                return Err(EthRpcError::Internal(anyhow::anyhow!(
+                    "HC04: Unknown EntryPoint version"
+                )))
+            }
         };
 
         let mut params = ObjectParams::new();
-        let _ = params.insert("ver",
-            if is_v7 { REQ_VERSION_V7 } else { REQ_VERSION_V6 }
+        let _ = params.insert(
+            "ver",
+            if is_v7 {
+                REQ_VERSION_V7
+            } else {
+                REQ_VERSION_V6
+            },
         );
         let _ = params.insert("sk", sk_hex);
         let _ = params.insert("src_addr", src_addr);
@@ -365,7 +377,7 @@ where
                     r3 = est;
                 }
                 RpcGasEstimate::V0_7(est) => {
-                    r3 = RpcGasEstimateV0_6{
+                    r3 = RpcGasEstimateV0_6 {
                         pre_verification_gas: est.pre_verification_gas,
                         call_gas_limit: est.call_gas_limit,
                         verification_gas_limit: est.verification_gas_limit,
@@ -382,7 +394,7 @@ where
                 .router
                 .estimate_gas(
                     &entry_point,
-                   op_tmp_2.clone(),
+                    op_tmp_2.clone(),
                     Some(spoof::State::default()),
                     at_price,
                 )
@@ -397,12 +409,10 @@ where
 
             let r2: RpcGasEstimateV0_6 = match r2a? {
                 RpcGasEstimate::V0_6(est) => est,
-                RpcGasEstimate::V0_7(est) => {
-                    RpcGasEstimateV0_6{
-                        pre_verification_gas: est.pre_verification_gas,
-                        call_gas_limit: est.call_gas_limit,
-                        verification_gas_limit: est.verification_gas_limit,
-                    }
+                RpcGasEstimate::V0_7(est) => RpcGasEstimateV0_6 {
+                    pre_verification_gas: est.pre_verification_gas,
+                    call_gas_limit: est.call_gas_limit,
+                    verification_gas_limit: est.verification_gas_limit,
                 },
             };
 
@@ -423,14 +433,16 @@ where
                 .get_nonce(&entry_point, self.hc.sys_account, U256::zero())
                 .await
                 .unwrap();
-            let cleanup_op = hybrid_compute::rr_op(&self.hc, entry_point, c_nonce, cleanup_keys.clone(), is_v7).await;
+            let cleanup_op =
+                hybrid_compute::rr_op(&self.hc, entry_point, c_nonce, cleanup_keys.clone(), is_v7)
+                    .await;
 
             println!("HC cleanup_op {:?} {:?}", cleanup_op, cleanup_keys);
             let r4a = self
                 .router
                 .estimate_gas(
                     &entry_point,
-                   // rundler_types::UserOperationOptionalGas::V0_6(op_tmp_4),
+                    // rundler_types::UserOperationOptionalGas::V0_6(op_tmp_4),
                     cleanup_op,
                     Some(spoof::State::default()),
                     at_price,
@@ -438,12 +450,10 @@ where
                 .await;
             let r4: RpcGasEstimateV0_6 = match r4a? {
                 RpcGasEstimate::V0_6(est) => est,
-                RpcGasEstimate::V0_7(est) => {
-                    RpcGasEstimateV0_6{
-                        pre_verification_gas: est.pre_verification_gas,
-                        call_gas_limit: est.call_gas_limit,
-                        verification_gas_limit: est.verification_gas_limit,
-                    }
+                RpcGasEstimate::V0_7(est) => RpcGasEstimateV0_6 {
+                    pre_verification_gas: est.pre_verification_gas,
+                    call_gas_limit: est.call_gas_limit,
+                    verification_gas_limit: est.verification_gas_limit,
                 },
             };
 
