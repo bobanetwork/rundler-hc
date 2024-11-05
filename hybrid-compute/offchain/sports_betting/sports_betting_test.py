@@ -3,7 +3,7 @@ from userop_utils import *
 import time
 def TestSportsBetting(aa):
     print("\n  - - - - SportBetting() - - - -")
-    print("SA ADDRESS {}".format(SA.address))
+    print("SA ADDRESS {}".format(u_account))
 
     game_id = 456
     create_bet(aa, game_id)
@@ -21,7 +21,7 @@ def create_bet(aa, game_id):
     print("--------------------Create Bet--------------------")
     create_call = selector("createGame(uint256)") + ethabi.encode(['uint256'], [game_id])
 
-    op = aa.build_op(SA.address, TEST_SPORTS_BETTING.address, 0, create_call, nKey)
+    op = aa.build_op(u_account, TEST_SPORTS_BETTING.address, 0, create_call, nKey)
 
     (success, op) = estimateOp(aa, op)
     assert success
@@ -38,7 +38,7 @@ def place_bet(aa, game_id):
                                                                             [game_id, outcome])
     amount_to_bet = 2
 
-    op = aa.build_op(SA.address, TEST_SPORTS_BETTING.address, amount_to_bet, place_bet, nKey)
+    op = aa.build_op(u_account, TEST_SPORTS_BETTING.address, amount_to_bet, place_bet, nKey)
 
     (success, op) = estimateOp(aa, op)
     assert success
@@ -52,7 +52,7 @@ def settle_bet(aa, game_id):
     print("--------------------Settle Bet--------------------")
     settle_bet = selector("settleBet(uint256)") + ethabi.encode(['uint256'], [game_id])
 
-    op = aa.build_op(SA.address, TEST_SPORTS_BETTING.address, 0, settle_bet, nKey)
+    op = aa.build_op(u_account, TEST_SPORTS_BETTING.address, 0, settle_bet, nKey)
     time.sleep(5)
     (success, op) = estimateOp(aa, op)
     assert success

@@ -14,7 +14,7 @@ from userop_utils import *
 
 def TestKyc(aa, isValid: bool):
     print("\n  - - - - TestKyc({}) - - - -".format(isValid))
-    print("SA ADDRESS {}".format(SA.address))
+    print("SA ADDRESS {}".format(u_account))
     print("TestKyc begin")
 
     kycCall = None
@@ -24,7 +24,7 @@ def TestKyc(aa, isValid: bool):
     else:
         kycCall = selector("openForKyced(string)") + ethabi.encode(['string'], [""])
 
-    op = aa.build_op(SA.address, KYC.address, 0, kycCall, nKey)
+    op = aa.build_op(u_account, KYC.address, 0, kycCall, nKey)
 
     (success, op) = estimateOp(aa, op)
     assert success == isValid

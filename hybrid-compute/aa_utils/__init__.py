@@ -35,6 +35,46 @@ class aa_utils:
         op['signature'] = Web3.to_hex(sig.signature)
         return op
 
+    def sign_v7_op(self, user_op, signer_key):
+        """Signs a UserOperation, returning a modified op containing a 'signature' field."""
+        op = dict(user_op) # Derived fields are added to 'op' prior to hashing
+
+        assert 'paymaster' not in op # not yet implemented
+
+        # The deploy-local script supplies the packed values prior to signature, as it bypasses the bundler.
+        # For normal UserOperations the fields are derived here
+        if 'accountGasLimits' not in op:
+            accountGasLimits  = ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['verificationGasLimit'])])[16:32] \
+                + ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['callGasLimit'])])[16:32]
+        else:
+            accountGasLimits = Web3.to_bytes(hexstr=op['accountGasLimits'])
+
+        if 'gasFees' not in op:
+            gasFees = ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['maxPriorityFeePerGas'])])[16:32] \
+                + ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['maxFeePerGas'])])[16:32]
+        else:
+            gasFees = Web3.to_bytes(hexstr=op['gasFees'])
+
+        if 'paymasterAndData' not in op:
+            op['paymasterAndData'] = "0x"
+
+        pack1 = ethabi.encode(['address','uint256','bytes32','bytes32','bytes32','uint256','bytes32','bytes32'], \
+              [op['sender'],
+              Web3.to_int(hexstr=op['nonce']),
+              Web3.keccak(hexstr="0x"), # initcode
+              Web3.keccak(hexstr=op['callData']),
+              accountGasLimits,
+              Web3.to_int(hexstr=op['preVerificationGas']),
+              gasFees,
+              Web3.keccak(hexstr=op['paymasterAndData']),
+              ])
+        pack2 = ethabi.encode(['bytes32','address','uint256'], [Web3.keccak(pack1), self.EP_addr, self.chain_id])
+        e_msg = eth_account.messages.encode_defunct(Web3.keccak(pack2))
+        signer_acct = eth_account.account.Account.from_key(signer_key)
+        sig = signer_acct.sign_message(e_msg)
+        user_op['signature'] = Web3.to_hex(sig.signature)
+        return user_op
+
 class aa_rpc(aa_utils):
     """Provides AA helper methods which talk to an ETH node and/or a Bundler"""
     def __init__(self, _EP_addr, _eth_rpc, _bundler_url):
@@ -69,22 +109,24 @@ class aa_rpc(aa_utils):
         op = {
            'sender': sender,
            'nonce': self.aa_nonce(sender,nonce_key),
-           'initCode': '0x',
+           #factory - none
+           #factoryData - none
            'callData': Web3.to_hex(ex_calldata),
            'callGasLimit': "0x0",
            'verificationGasLimit': Web3.to_hex(0),
            'preVerificationGas': "0x0",
            'maxFeePerGas': Web3.to_hex(fee),
            'maxPriorityFeePerGas': Web3.to_hex(tip),
-           'paymasterAndData': '0x',
+           #paymaster - none
+           #paymasterVerificationGasLimit - none
+           #paymasterPostOpGasLimit - none
+           #paymasterData - none
            # Dummy signature, per Alchemy AA documentation
-           # A future update may require a valid signature on gas estimation ops. This should be safe because the gas
-           # limits in the signed request are set to zero, therefore it would be rejected if a third party attempted to
-           # submit it as a real transaction.
            'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
         }
         print("Built userOperation", op)
         return op
+
     def estimate_op_gas(self, op, extra_pvg=0, extra_vg=0, extra_cg=0):
         """ Wrapper to call eth_estimateUserOperationGas() and update the op.
             Allows limits to be increased in cases where a bundler is
@@ -114,7 +156,17 @@ class aa_rpc(aa_utils):
     def sign_submit_op(self, op, owner_key):
         """Sign and submit a UserOperation to the Bundler"""
 
-        op = self.sign_op(op, owner_key)
+        is_v7 = False
+        if self.EP_addr == "0x0000000071727De22E5E9d8BAf0edAc6f37da032":
+            is_v7 = True
+        elif self.EP_addr != "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789":
+            assert "unknown EntryPoint address"
+
+        if is_v7:
+            op = self.sign_v7_op(op, owner_key)
+        else:
+            op = self.sign_op(op, owner_key)
+
         while True:
             response = requests.post(self.bundler_url, json=request(
                 "eth_sendUserOperation", params=[op, self.EP_addr]))

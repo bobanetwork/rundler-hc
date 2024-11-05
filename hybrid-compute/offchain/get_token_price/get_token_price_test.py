@@ -18,7 +18,7 @@ def TestTokenPrice(aa, tokenSymbol):
     calldata = selector("fetchPrice(string)") + \
         ethabi.encode(['string'], [tokenSymbol])
 
-    op = aa.build_op(SA.address, TFP.address, 0, calldata, nKey)
+    op = aa.build_op(u_account, TFP.address, 0, calldata, nKey)
 
     (success, op) = estimateOp(aa, op)
     assert success

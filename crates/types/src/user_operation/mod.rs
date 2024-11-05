@@ -15,7 +15,7 @@ use std::{fmt::Debug, time::Duration};
 
 use ethers::{
     abi::AbiEncode,
-    types::{Address, Bytes, H256, U256},
+    types::{Address, Bytes, H256, U128, U256},
 };
 
 /// User Operation types for Entry Point v0.6
@@ -374,6 +374,22 @@ impl UserOperationOptionalGas {
             UserOperationOptionalGas::V0_7(op) => op.abi_encoded_size(),
         };
         abi_size + BUNDLE_BYTE_OVERHEAD + USER_OP_OFFSET_WORD_SIZE
+    }
+
+    /// Hash fields relevant to Hybrid Compute
+    pub fn hc_hash(&self) -> H256 {
+        match self {
+            UserOperationOptionalGas::V0_6(op) => op.hc_hash(),
+            UserOperationOptionalGas::V0_7(op) => op.hc_hash(),
+        }
+    }
+
+    /// Convert into UserOperationVariant type - needed for Hybrid Compute
+    pub fn into_variant(&self, cs: &ChainSpec) -> UserOperationVariant {
+        match self {
+            UserOperationOptionalGas::V0_6(op) => UserOperationVariant::V0_6(op.clone().into_user_operation(U256::from(0), U256::from(0))),
+            UserOperationOptionalGas::V0_7(op) => UserOperationVariant::V0_7(op.clone().into_user_operation_builder(cs, U128::from(0), U128::from(0), U128::from(0)).build()),
+        }
     }
 }
 

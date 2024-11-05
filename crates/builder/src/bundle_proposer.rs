@@ -530,6 +530,7 @@ where
         let mut gas_spent = self.settings.chain_spec.transaction_intrinsic_gas;
         let mut cleanup_keys: Vec<H256> = Vec::new();
         let mut constructed_bundle_size = BUNDLE_BYTE_OVERHEAD;
+
         for (po, simulation) in ops_with_simulations {
             let op = po.clone().uo;
             let simulation = match simulation {
@@ -637,7 +638,7 @@ where
             if hc_ent.is_some() {
                 gas_spent += hc_ent.clone().unwrap().oc_gas;
                 //println!("HC insert, hc_ent {:?}", hc_ent);
-                let u_op2: UserOperationVariant = hc_ent.clone().unwrap().user_op.into();
+                let u_op2: UserOperationVariant = hc_ent.clone().unwrap().user_op.into_variant(&self.settings.chain_spec);
 
                 let sim_result = self
                     .simulator
@@ -679,16 +680,17 @@ where
                 .get_nonce(cfg.sys_account, U256::zero())
                 .await
                 .unwrap();
+            let is_v7 = self.entry_point.address() == self.settings.chain_spec.entry_point_address_v0_7;
             let cleanup_op: UserOperationVariant =
-                hybrid_compute::rr_op(&cfg, c_nonce, cleanup_keys)
+                hybrid_compute::rr_op(&cfg, self.entry_point.address(), c_nonce, cleanup_keys, is_v7)
                     .await
-                    .into();
+                    .into_variant(&self.settings.chain_spec);
 
             let cleanup_sim = self
                 .simulator
                 .simulate_validation(cleanup_op.clone().into(), None, None)
                 .await
-                .expect("Failed to unwrap sim_result"); // FIXME
+                .expect("Failed to unwrap sim_result");
 
             context
                 .groups_by_aggregator

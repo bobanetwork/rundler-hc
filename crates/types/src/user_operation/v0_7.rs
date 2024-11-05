@@ -111,7 +111,10 @@ impl UserOperationTrait for UserOperation {
     }
 
     fn hc_hash(&self) -> H256 {
-        H256::zero() // Not yet implemented
+        keccak256(encode(&[Token::FixedBytes(
+            keccak256(self.pack_for_hc_hash()).to_vec(),
+        )]))
+        .into()
     }
 
     fn id(&self) -> UserOperationId {
@@ -254,7 +257,22 @@ impl UserOperation {
     pub fn packed(&self) -> &PackedUserOperation {
         &self.packed
     }
-}
+
+    /// Gets the byte array representation of the user operation to be used as HC key
+    pub fn pack_for_hc_hash(&self) -> Bytes {
+        let hash_init_code = keccak256(self.packed.init_code.clone());
+        let hash_call_data = keccak256(self.call_data.clone());
+        let hash_paymaster_and_data = keccak256(self.packed.paymaster_and_data.clone());
+
+        encode(&[
+            Token::Address(self.sender),
+            Token::Uint(self.nonce),
+            Token::FixedBytes(hash_init_code.to_vec()),
+            Token::FixedBytes(hash_call_data.to_vec()),
+            Token::FixedBytes(hash_paymaster_and_data.to_vec()), // ???
+        ])
+        .into()
+    }}
 
 impl From<UserOperationVariant> for UserOperation {
     /// Converts a UserOperationVariant to a UserOperation 0.7
@@ -503,6 +521,12 @@ impl UserOperationOptionalGas {
         let mut bytes = vec![0_u8; len];
         rand::thread_rng().fill_bytes(&mut bytes);
         bytes.into()
+    }
+
+    /// Hash fields relevant to Hybrid Compute
+    pub fn hc_hash(&self) -> H256 {
+        let cs = ChainSpec::default();
+        self.clone().into_user_operation_builder(&cs, U128::from(0), U128::from(0), U128::from(0)).build().hc_hash()
     }
 }
 

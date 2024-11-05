@@ -1,12 +1,13 @@
 from web3 import Web3
 import redis
 from eth_abi import abi as ethabi
-from offchain_utils import gen_response, parse_req
+from offchain_utils import gen_response_v7, parse_req
 
 
 def offchain_verifycaptcha(sk, src_addr, src_nonce, oo_nonce, payload, *args):
     print("  -> offchain_verifycaptcha handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
           src_addr, src_nonce, oo_nonce, payload, args))
+    assert ver == "0.3"
 
     try:
         req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
@@ -24,9 +25,9 @@ def offchain_verifycaptcha(sk, src_addr, src_nonce, oo_nonce, payload, *args):
             print("ismatch ", is_match)
             print('captcha input  ', captcha_input)
             print("key decoded ", key_in_redis.decode('utf-8'))
-            return gen_response(req, 0, ethabi.encode(["bool"], [is_match]))
+            return gen_response_v7(req, 0, ethabi.encode(["bool"], [is_match]))
         else:
-            return gen_response(req, 1, Web3.to_bytes(text="Error: uuid or to not found"))
+            return gen_response_v7(req, 1, Web3.to_bytes(text="Error: uuid or to not found"))
 
     except Exception as e:
         print("Error:", e)

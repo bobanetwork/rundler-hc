@@ -11,7 +11,7 @@ def TestWordGuess(aa, n, cheat):
     print("Pool balance before playing =", Web3.from_wei(
         TC.functions.Pool().call(), 'gwei'))
 
-    op = aa.build_op(SA.address, TC.address, n * per_entry, game_call, nKey)
+    op = aa.build_op(u_account, TC.address, n * per_entry, game_call, nKey)
 
     (success, op) = estimateOp(aa, op)
     assert success

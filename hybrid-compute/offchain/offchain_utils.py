@@ -90,6 +90,68 @@ def gen_response(req, err_code, resp_payload):
         "signature": Web3.to_hex(sig.signature)
     })
 
+def gen_response_v7(req, err_code, resp_payload):
+    resp2 = ethabi.encode(['address', 'uint256', 'uint32', 'bytes'], [
+                          req['srcAddr'], req['srcNonce'], err_code, resp_payload])
+    p_enc1 = selector("PutResponse(bytes32,bytes)") + \
+        ethabi.encode(['bytes32', 'bytes'], [req['skey'], resp2])  # dfc98ae8
+
+    p_enc2 = selector("execute(address,uint256,bytes)") + \
+        ethabi.encode(['address', 'uint256', 'bytes'], [
+             Web3.to_checksum_address(HelperAddr), 0, p_enc1]) # b61d27f6
+
+    limits = {
+        'verificationGasLimit': "0x10000",
+        'preVerificationGas': "0x10000",
+    }
+
+    # This call_gas formula is a "close enough" estimate for the initial implementation.
+    # A more accurate model, or a protocol enhancement to run an actual simulation, may
+    # be required in the future.
+    call_gas = 705*len(resp_payload) + 170000
+
+    print("call_gas calculation", len(resp_payload), 4+len(p_enc2), call_gas)
+
+    accountGasLimits = Web3.to_bytes(hexstr="0x00000000000000000000000000010000") + ethabi.encode(['uint128'],[call_gas])[16:32]
+    print("AGL", Web3.to_hex(accountGasLimits))
+    gasFees = Web3.to_bytes(hexstr="0x0000000000000000000000000000000000000000000000000000000000000000")
+
+    packed = ethabi.encode([
+        'address',
+        'uint256',
+        'bytes32',
+        'bytes32',
+        'bytes32',
+        'uint256',
+        'bytes32',
+        'bytes32',
+    ], [
+        HybridAcctAddr,
+        req['opNonce'],
+        Web3.keccak(Web3.to_bytes(hexstr='0x')),  # initCode
+        Web3.keccak(p_enc2),
+        accountGasLimits,
+        Web3.to_int(hexstr=limits['preVerificationGas']),
+        gasFees,
+        Web3.to_bytes(hexstr='0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'),
+#        Web3.keccak(Web3.to_bytes(hexstr='0x')),  # paymasterAndData
+    ])
+    oo_hash = Web3.keccak(ethabi.encode(['bytes32', 'address', 'uint256'], [
+                         Web3.keccak(packed), EntryPointAddr, HC_CHAIN]))
+
+    signer_acct = eth_account.account.Account.from_key(hc1_key)
+    e_msg = eth_account.messages.encode_defunct(oo_hash)
+    sig = signer_acct.sign_message(e_msg)
+
+    success = (err_code == 0)
+    print("Method returning success={} response={} signature={}".format(
+        success, Web3.to_hex(resp_payload), Web3.to_hex(sig.signature)))
+    return ({
+        "success": success,
+        "response": Web3.to_hex(resp_payload),
+        "signature": Web3.to_hex(sig.signature)
+    })
+
 def parse_req(sk, src_addr, src_nonce, oo_nonce, payload):
     req = {}
     req['skey'] = Web3.to_bytes(hexstr=sk)

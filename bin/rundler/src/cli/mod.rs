@@ -59,9 +59,7 @@ pub async fn run() -> anyhow::Result<()> {
         opt.common.hc_sys_account,
         opt.common.hc_sys_owner,
         opt.common.hc_sys_privkey,
-        //opt.common.entry_points[0].parse::<Address>().expect("Must provide an entry_point"),
-        cs.entry_point_address_v0_6,
-        cs.id,
+        cs.clone(),
         opt.common
             .node_http
             .clone()

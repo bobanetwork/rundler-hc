@@ -20,7 +20,7 @@ from userop_utils import *
 def TestCaptcha(user_addr):
     global estGas
     print("\n  - - - - TestCaptcha({}) - - - -".format(user_addr))
-    print("SA ADDRESS {}".format(SA.address))
+    print("SA ADDRESS {}".format(u_account))
     print("TestCaptcha begin")
 
     captcha = get_captcha(user_addr)
