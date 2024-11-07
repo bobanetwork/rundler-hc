@@ -33,6 +33,7 @@ use rundler_sim::{
     EstimationSettings, PrecheckSettings, PriorityFeeMode, SimulationSettings, MIN_CALL_GAS_LIMIT,
 };
 use rundler_types::hybrid_compute;
+use rundler_types::contracts::v0_7::hc_helper::HCHelper;
 
 /// Main entry point for the CLI
 ///
@@ -53,6 +54,10 @@ pub async fn run() -> anyhow::Result<()> {
 
     let cs = chain_spec::resolve_chain_spec(&opt.common.network, &opt.common.chain_spec);
     tracing::info!("Chain spec: {:#?}", cs);
+    let node_http = opt.common.node_http.clone().expect("must provide node_http");
+    let p2 = rundler_provider::new_provider(&node_http, None)?;
+    let hx = HCHelper::new(opt.common.hc_helper_addr, p2);
+    let slot_idx = hx.response_slot().await.expect("Failed to get ResponseSlot");
 
     hybrid_compute::init(
         opt.common.hc_helper_addr,
@@ -60,10 +65,8 @@ pub async fn run() -> anyhow::Result<()> {
         opt.common.hc_sys_owner,
         opt.common.hc_sys_privkey,
         cs.clone(),
-        opt.common
-            .node_http
-            .clone()
-            .expect("Must provide node_http"),
+        node_http,
+        slot_idx,
     );
 
     match opt.command {

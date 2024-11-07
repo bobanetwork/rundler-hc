@@ -198,7 +198,6 @@ impl EntryPointRouter {
             .get_nonce(addr, key)
             .await
             .map_err(Into::into)
-        //Ok(U256::from(0))
     }
 
     pub(crate) async fn check_signature(

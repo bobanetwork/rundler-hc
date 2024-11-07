@@ -3,22 +3,18 @@ pragma solidity ^0.8.12;
 
 import "account-abstraction/v0_7/interfaces/INonceManager.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract HCHelper {
+contract HCHelper is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
 
-    event OwnershipTransferred (address previousOwner, address newOwner);
     event SystemAccountSet(address oldAccount, address newAccount);
     event RegisteredUrl(address contract_addr, string url);
     event TokenWithdrawal(address withdrawTo, uint256 amount);
 
     // Response data is stored here by PutResponse() and then consumed by TryCallOffchain().
-    // The storage slot must not be changed unless the corresponding code is updated in the Bundler.
-    // In particular, using an external implementation of Ownable would mess with the slot order.
     mapping(bytes32=>bytes)  ResponseCache;
-
-    // Owner (creator) of this contract.
-    address public owner;
 
     // BOBA token address
     address public tokenAddr;
@@ -44,22 +40,19 @@ contract HCHelper {
     address immutable entryPoint;
 
     // Constructor
-    constructor(address _entryPoint, address _tokenAddr, address _owner) {
+    constructor(address _entryPoint, address _tokenAddr, address _owner) Ownable(_owner) {
 	entryPoint = _entryPoint;
 	tokenAddr = _tokenAddr;
-        owner = _owner;
     }
 
     // Change the SystemAccount address (used for error responses)
-    function SetSystemAccount(address _systemAccount) public {
-        require(msg.sender == owner, "Only owner");
+    function SetSystemAccount(address _systemAccount) public onlyOwner {
         emit SystemAccountSet(systemAccount, _systemAccount);
         systemAccount = _systemAccount;
     }
 
     // Temporary method, until an auto-registration protocol is developed.
-    function RegisterUrl(address contract_addr, string calldata url) public {
-        require(msg.sender == owner, "Only owner");
+    function RegisterUrl(address contract_addr, string calldata url) public onlyOwner {
         require(bytes(url).length > 0, "URL cannot be empty");
         RegisteredCallers[contract_addr].owner = msg.sender;
         RegisteredCallers[contract_addr].url = url;
@@ -68,31 +61,22 @@ contract HCHelper {
 
     // Set or change the per-call token price (0 is allowed). Does not affect
     // existing credit balances, only applies to new AddCredit() calls.
-    function SetPrice(uint256 _pricePerCall) public {
-        require(msg.sender == owner, "Only owner");
+    function SetPrice(uint256 _pricePerCall) public onlyOwner {
 	pricePerCall = _pricePerCall;
     }
 
     // Purchase credits allowing the specified contract to perform HC calls.
     // The token cost is (pricePerCall() * numCredits) and is non-refundable
-    function AddCredit(address contract_addr, uint256 numCredits) public {
+    function AddCredit(address contract_addr, uint256 numCredits) public nonReentrant {
         uint256 tokenPrice = numCredits * pricePerCall;
         RegisteredCallers[contract_addr].credits += numCredits;
         IERC20(tokenAddr).safeTransferFrom(msg.sender, address(this), tokenPrice);
     }
 
     // Allow the owner to withdraw tokens
-    function WithdrawTokens(uint256 amount, address withdrawTo) public {
-        require(msg.sender == owner, "Only owner");
+    function WithdrawTokens(uint256 amount, address withdrawTo) public onlyOwner nonReentrant {
         emit TokenWithdrawal(withdrawTo, amount);
         IERC20(tokenAddr).safeTransfer(withdrawTo, amount);
-    }
-
-    // Transer ownership
-    function transferOwnership(address newOwner) public {
-        require(msg.sender == owner, "Only owner");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
     }
 
     // Called from a HybridAccount contract, to populate the response which it will
@@ -204,5 +188,13 @@ contract HCHelper {
 	        }
 	    }
 	}
+    }
+
+    // Returns the slot index of ResponseCache, needed by the bundler.
+    // This index is affected by the OpenZeppelin libraries like Ownable.
+    function ResponseSlot() public pure returns (uint256 ret) {
+        assembly {
+            ret := ResponseCache.slot
+        }
     }
 }

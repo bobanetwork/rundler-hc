@@ -24,7 +24,8 @@ use jsonrpsee::{
 };
 use rundler_types::{
     chain::ChainSpec,
-    contracts::v0_6::{hc_helper::HCHelper as HH2, simple_account::SimpleAccount},
+    contracts::v0_6::{simple_account::SimpleAccount},
+    contracts::v0_7::{hc_helper::HCHelper},
     hybrid_compute,
     pool::Pool,
     UserOperation, UserOperationOptionalGas, UserOperationVariant,
@@ -186,7 +187,7 @@ where
         );
         let p2 = rundler_provider::new_provider(&self.hc.node_http, None)?;
 
-        let hx = HH2::new(self.hc.helper_addr, p2.clone());
+        let hx = HCHelper::new(self.hc.helper_addr, p2.clone());
         let url = hx.registered_callers(ep_addr).await.expect("url_decode").1;
         println!("HC registered_caller url {:?}", url);
 

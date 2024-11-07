@@ -104,6 +104,8 @@ pub struct HcCfg {
     pub node_http: String,
     /// Temporary workaround
     pub from_addr: Address,
+    /// Index of ResponseCache slot in HCHelper
+    pub slot_idx: U256,
 }
 
 //pub static mut HC_CONFIG: HcCfg = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:H256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new(), from_addr: Address::zero()};
@@ -118,6 +120,7 @@ pub static HC_CONFIG: Lazy<Mutex<HcCfg>> = Lazy::new(|| {
         chain_spec: ChainSpec::default(),
         node_http: String::new(),
         from_addr: Address::zero(),
+        slot_idx: U256::from(0),
     };
     Mutex::new(c)
 });
@@ -130,6 +133,7 @@ pub fn init(
     sys_privkey: H256,
     chain_spec: ChainSpec,
     node_http: String,
+    slot_idx: U256,
 ) {
     let mut cfg = HC_CONFIG.lock().unwrap();
 
@@ -139,6 +143,7 @@ pub fn init(
     cfg.sys_privkey = sys_privkey;
     cfg.chain_spec = chain_spec;
     cfg.node_http.clone_from(&node_http);
+    cfg.slot_idx = slot_idx;
 }
 
 /// Set the EOA address which the bundler is using. Erigon, but not geth, needs this for tx simulation
@@ -210,11 +215,11 @@ pub fn hc_map_key(revert_data: &Bytes) -> H256 {
 
 /// Calculates the HCHelper storage slot key for a ResponseCache entry
 pub fn hc_storage_key(map_key: H256) -> H256 {
-    let slot_idx = "0x0000000000000000000000000000000000000000000000000000000000000000"
-        .parse::<Bytes>()
-        .unwrap();
+    let cfg = HC_CONFIG.lock().unwrap();
+    let slot_idx_bytes:Bytes = cfg.slot_idx.encode().into();
+
     let storage_key: H256 =
-        keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx].concat()).into();
+        keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx_bytes].concat()).into();
     storage_key
 }
 
@@ -704,6 +709,7 @@ mod test {
                 .unwrap(),
             ChainSpec::default(),
             "http://test.local/rpc".to_string(),
+            U256::from(2),
         );
         set_signer(
             "0x0000000000000000000000000000000000000005"
@@ -729,6 +735,7 @@ mod test {
             from_addr: "0x0000000000000000000000000000000000000005"
                 .parse::<Address>()
                 .unwrap(),
+            slot_idx: U256::from(2),
         };
         let cfg: HcCfg = HC_CONFIG.lock().unwrap().clone();
         // chain_spec doesn't support PartialEq
@@ -843,6 +850,7 @@ mod test {
             from_addr: "0x0000000000000000000000000000000000000005"
                 .parse::<Address>()
                 .unwrap(),
+            slot_idx: U256::from(0),
         };
 
         let wallet = LocalWallet::from_bytes(&cfg.sys_privkey.to_fixed_bytes()).unwrap();
