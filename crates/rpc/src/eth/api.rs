@@ -24,8 +24,7 @@ use jsonrpsee::{
 };
 use rundler_types::{
     chain::ChainSpec,
-    contracts::v0_6::{simple_account::SimpleAccount},
-    contracts::v0_7::{hc_helper::HCHelper},
+    contracts::{v0_6::simple_account::SimpleAccount, v0_7::hc_helper::HCHelper},
     hybrid_compute,
     pool::Pool,
     UserOperation, UserOperationOptionalGas, UserOperationVariant,

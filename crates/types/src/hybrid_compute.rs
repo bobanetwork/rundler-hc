@@ -216,7 +216,7 @@ pub fn hc_map_key(revert_data: &Bytes) -> H256 {
 /// Calculates the HCHelper storage slot key for a ResponseCache entry
 pub fn hc_storage_key(map_key: H256) -> H256 {
     let cfg = HC_CONFIG.lock().unwrap();
-    let slot_idx_bytes:Bytes = cfg.slot_idx.encode().into();
+    let slot_idx_bytes: Bytes = cfg.slot_idx.encode().into();
 
     let storage_key: H256 =
         keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx_bytes].concat()).into();
