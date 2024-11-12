@@ -81,7 +81,7 @@ def gen_response(req, err_code, resp_payload):
     e_msg = eth_account.messages.encode_defunct(oo_hash)
     sig = signer_acct.sign_message(e_msg)
 
-    success = (err_code == 0)
+    success = err_code == 0
     print("Method returning success={} response={} signature={}".format(
         success, Web3.to_hex(resp_payload), Web3.to_hex(sig.signature)))
     return ({
@@ -112,9 +112,13 @@ def gen_response_v7(req, err_code, resp_payload):
 
     print("call_gas calculation", len(resp_payload), 4+len(p_enc2), call_gas)
 
-    accountGasLimits = Web3.to_bytes(hexstr="0x00000000000000000000000000010000") + ethabi.encode(['uint128'],[call_gas])[16:32]
-    print("AGL", Web3.to_hex(accountGasLimits))
-    gasFees = Web3.to_bytes(hexstr="0x0000000000000000000000000000000000000000000000000000000000000000")
+    account_gas_limits = \
+        ethabi.encode(['uint128'],[Web3.to_int(hexstr=limits['verificationGasLimit'])])[16:32] + \
+        ethabi.encode(['uint128'],[call_gas])[16:32]
+
+    gas_fees = Web3.to_bytes(
+        hexstr="0x0000000000000000000000000000000000000000000000000000000000000000"
+    )
 
     packed = ethabi.encode([
         'address',
@@ -130,11 +134,10 @@ def gen_response_v7(req, err_code, resp_payload):
         req['opNonce'],
         Web3.keccak(Web3.to_bytes(hexstr='0x')),  # initCode
         Web3.keccak(p_enc2),
-        accountGasLimits,
+        account_gas_limits,
         Web3.to_int(hexstr=limits['preVerificationGas']),
-        gasFees,
-        Web3.to_bytes(hexstr='0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'),
-#        Web3.keccak(Web3.to_bytes(hexstr='0x')),  # paymasterAndData
+        gas_fees,
+        Web3.keccak(Web3.to_bytes(hexstr='0x')), # paymasterAndData
     ])
     oo_hash = Web3.keccak(ethabi.encode(['bytes32', 'address', 'uint256'], [
                          Web3.keccak(packed), EntryPointAddr, HC_CHAIN]))
@@ -143,7 +146,7 @@ def gen_response_v7(req, err_code, resp_payload):
     e_msg = eth_account.messages.encode_defunct(oo_hash)
     sig = signer_acct.sign_message(e_msg)
 
-    success = (err_code == 0)
+    success = err_code == 0
     print("Method returning success={} response={} signature={}".format(
         success, Web3.to_hex(resp_payload), Web3.to_hex(sig.signature)))
     return ({

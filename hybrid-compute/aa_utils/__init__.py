@@ -44,16 +44,16 @@ class aa_utils:
         # The deploy-local script supplies the packed values prior to signature, as it bypasses the bundler.
         # For normal UserOperations the fields are derived here
         if 'accountGasLimits' not in op:
-            accountGasLimits  = ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['verificationGasLimit'])])[16:32] \
+            account_gas_limits  = ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['verificationGasLimit'])])[16:32] \
                 + ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['callGasLimit'])])[16:32]
         else:
-            accountGasLimits = Web3.to_bytes(hexstr=op['accountGasLimits'])
+            account_gas_limits = Web3.to_bytes(hexstr=op['accountGasLimits'])
 
         if 'gasFees' not in op:
-            gasFees = ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['maxPriorityFeePerGas'])])[16:32] \
+            gas_fees = ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['maxPriorityFeePerGas'])])[16:32] \
                 + ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['maxFeePerGas'])])[16:32]
         else:
-            gasFees = Web3.to_bytes(hexstr=op['gasFees'])
+            gas_fees = Web3.to_bytes(hexstr=op['gasFees'])
 
         if 'paymasterAndData' not in op:
             op['paymasterAndData'] = "0x"
@@ -63,9 +63,9 @@ class aa_utils:
               Web3.to_int(hexstr=op['nonce']),
               Web3.keccak(hexstr="0x"), # initcode
               Web3.keccak(hexstr=op['callData']),
-              accountGasLimits,
+              account_gas_limits,
               Web3.to_int(hexstr=op['preVerificationGas']),
-              gasFees,
+              gas_fees,
               Web3.keccak(hexstr=op['paymasterAndData']),
               ])
         pack2 = ethabi.encode(['bytes32','address','uint256'], [Web3.keccak(pack1), self.EP_addr, self.chain_id])
@@ -142,15 +142,15 @@ class aa_rpc(aa_utils):
             print("*** eth_estimateUserOperationGas failed")
             time.sleep(2)
             return False, op
-        else:
-            est_result = response.json()['result']
 
-            op['preVerificationGas'] = Web3.to_hex(Web3.to_int(
-                hexstr=est_result['preVerificationGas']) + extra_pvg)
-            op['verificationGasLimit'] = Web3.to_hex(Web3.to_int(
-                hexstr=est_result['verificationGasLimit']) + extra_vg)
-            op['callGasLimit'] = Web3.to_hex(Web3.to_int(
-                hexstr=est_result['callGasLimit']) + extra_cg)
+        est_result = response.json()['result']
+
+        op['preVerificationGas'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['preVerificationGas']) + extra_pvg)
+        op['verificationGasLimit'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['verificationGasLimit']) + extra_vg)
+        op['callGasLimit'] = Web3.to_hex(Web3.to_int(
+            hexstr=est_result['callGasLimit']) + extra_cg)
         return True, op
 
     def sign_submit_op(self, op, owner_key):
@@ -159,8 +159,8 @@ class aa_rpc(aa_utils):
         is_v7 = False
         if self.EP_addr == "0x0000000071727De22E5E9d8BAf0edAc6f37da032":
             is_v7 = True
-        elif self.EP_addr != "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789":
-            assert "unknown EntryPoint address"
+        else:
+            assert self.EP_addr == "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
 
         if is_v7:
             op = self.sign_v7_op(op, owner_key)
@@ -236,13 +236,13 @@ class eth_utils:
 
     def approve_token(self, token, spender, deploy_addr, deploy_key):
         """Perform an unlimited ERC20 token approval"""
-        approveCD = selector("approve(address,uint256)") + ethabi.encode(
+        approve_calldata = selector("approve(address,uint256)") + ethabi.encode(
             ['address','uint256'],
             [spender, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
 
         tx = {
             'from': deploy_addr,
-            'data': approveCD,
+            'data': approve_calldata,
             'to': token,
         }
         print("ERC20 approval of", token, "for", spender)
