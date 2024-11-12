@@ -18,7 +18,7 @@ boba_token = None
 parser = argparse.ArgumentParser()
 parser.add_argument("--boba-path", required=True, help="Path to your local Boba/Optimism repository")
 parser.add_argument("--deploy-salt", required=False, help="Salt value for contract deployment", default="0")
-parser.add_argument("--ep-version", required=False, help="EntryPoint contract version (0.6|0.7)", default="0.6")
+parser.add_argument("--ep-version", required=False, help="EntryPoint contract version (0.6|0.7)", default="0.7")
 
 cli_args = parser.parse_args()
 
