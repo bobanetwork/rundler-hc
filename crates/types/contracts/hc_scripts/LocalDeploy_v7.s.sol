@@ -29,14 +29,9 @@ contract LocalDeploy is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        {  // Limit variable scope to avoid "stack too deep"
-            address entryPointAddr = vm.envOr("ENTRY_POINTS", 0x0000000000000000000000000000000000000000); // Must be a single value despite the variable name
-            if (entryPointAddr != address(0) && entryPointAddr.code.length > 0) {
-                ept = EntryPoint(payable(entryPointAddr));
-            } else {
-                ept = new EntryPoint{salt: salt_val}();
-            }
-        }
+        // EntryPointAddr is hard-coded for the v0.7 implementation
+        ept = EntryPoint(payable(0x0000000071727De22E5E9d8BAf0edAc6f37da032));
+
         {
             address helperAddr = vm.envOr("HC_HELPER_ADDR", 0x0000000000000000000000000000000000000000);
             if (helperAddr != address(0) && helperAddr.code.length > 0) {
@@ -73,9 +68,9 @@ contract LocalDeploy is Script {
             helper.SetSystemAccount(address(ha0));
         }
 
-        (uint256 bal,,,,) = ept.deposits(address(ha0));
-        if (bal < min_deposit) {
-            ept.depositTo{value: min_deposit - bal}(address(ha0));
+        // Previous version deposited to EntryPoint, here we fund the acct directly
+        if (address(ha0).balance < min_deposit) {
+            payable(address(ha0)).transfer(min_deposit - address(ha0).balance);
         }
 
         vm.stopBroadcast();
