@@ -62,8 +62,9 @@ EP = w3.eth.contract(
 HH = w3.eth.contract(
     address=deployed['HCHelper']['address'], abi=deployed['HCHelper']['abi'])
 # This address is unique for each user, who deploys their own wallet account
-SA = w3.eth.contract(
-    address=u_account, abi=deployed['SimpleAccount']['abi'])
+#SA = w3.eth.contract(
+#    address=u_account, abi=deployed['SimpleAccount']['abi'])
+
 HA = w3.eth.contract(address=deployed['HybridAccount']
                      ['address'], abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
@@ -90,7 +91,7 @@ def showBalances():
     print("bnd", EP.functions.getDepositInfo(
         bundler_addr).call(), w3.eth.get_balance(bundler_addr))
     print("SA ", EP.functions.getDepositInfo(
-        SA.address).call(), w3.eth.get_balance(SA.address))
+        u_account).call(), w3.eth.get_balance(u_account))
     print("HA ", EP.functions.getDepositInfo(
         HA.address).call(), w3.eth.get_balance(HA.address))
     print("TC ", EP.functions.getDepositInfo(

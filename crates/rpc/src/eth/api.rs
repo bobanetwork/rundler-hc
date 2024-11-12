@@ -24,7 +24,7 @@ use jsonrpsee::{
 };
 use rundler_types::{
     chain::ChainSpec,
-    contracts::v0_6::{hc_helper::HCHelper as HH2, simple_account::SimpleAccount},
+    contracts::{v0_6::simple_account::SimpleAccount, v0_7::hc_helper::HCHelper},
     hybrid_compute,
     pool::Pool,
     UserOperation, UserOperationOptionalGas, UserOperationVariant,
@@ -156,22 +156,19 @@ where
         //      max_simulate_handle_ops_gas: 0,
         //      validation_estimation_gas_fee: 0,
         //};
-        let op6: rundler_types::v0_6::UserOperationOptionalGas = op.clone().into();
 
-        let hh = op6
-            .clone()
-            .into_user_operation(U256::from(0), U256::from(0))
-            .hc_hash();
+        let hh = op.hc_hash();
         println!("HC api.rs hh {:?}", hh);
+        let op_t: UserOperationVariant = op.into_variant(&self.chain_spec);
 
-        let ep_addr = hybrid_compute::hc_ep_addr(revert_data);
+        let ep_addr = hybrid_compute::hc_ha_addr(revert_data);
 
-        let n_key: U256 = op6.nonce >> 64;
-        let at_price = op6.max_priority_fee_per_gas;
-        //let hc_nonce = context.gas_estimator.entry_point.get_nonce(op6.sender, n_key).await.unwrap();
+        let n_key: U256 = op_t.nonce() >> 64;
+        let at_price = Some(op_t.max_priority_fee_per_gas());
+        //let hc_nonce = context.gas_estimator.entry_point.get_nonce(op_t.sender(), n_key).await.unwrap();
         let hc_nonce = self
             .router
-            .get_nonce(&entry_point, op6.sender, n_key)
+            .get_nonce(&entry_point, op_t.sender(), n_key)
             .await
             .unwrap();
 
@@ -182,11 +179,14 @@ where
             .unwrap();
         println!(
             "HC hc_nonce {:?} err_nonce {:?} op_nonce {:?} n_key {:?}",
-            hc_nonce, err_nonce, op6.nonce, n_key
+            hc_nonce,
+            err_nonce,
+            op_t.nonce(),
+            n_key
         );
         let p2 = rundler_provider::new_provider(&self.hc.node_http, None)?;
 
-        let hx = HH2::new(self.hc.helper_addr, p2.clone());
+        let hx = HCHelper::new(self.hc.helper_addr, p2.clone());
         let url = hx.registered_callers(ep_addr).await.expect("url_decode").1;
         println!("HC registered_caller url {:?}", url);
 
@@ -206,9 +206,10 @@ where
         let payload = hex::encode(hybrid_compute::hc_req_payload(revert_data));
         let n_bytes: [u8; 32] = (hc_nonce).into();
         let src_n = hex::encode(n_bytes);
-        let src_addr = hex::encode(op6.sender);
+        let src_addr = hex::encode(op_t.sender());
 
-        let oo_n_key: U256 = U256::from_big_endian(op6.sender.as_fixed_bytes());
+        let oo_n_key: U256 = U256::from_big_endian(op_t.sender().as_fixed_bytes());
+
         let oo_nonce = self
             .router
             .get_nonce(&entry_point, ep_addr, oo_n_key)
@@ -222,10 +223,31 @@ where
                 "Failed to look up HybridAccount owner"
             )));
         }
-        const REQ_VERSION: &str = "0.2";
+        // This version parameter tells the offchain RPC which version of the
+        // AA contracts are being used. This affects the hashing algorithm needed
+        // to generate an offchain signature.
+        const REQ_VERSION_V6: &str = "0.2";
+        const REQ_VERSION_V7: &str = "0.3";
+
+        let is_v7 = match self.router.get_ep_version(&entry_point)? {
+            rundler_types::EntryPointVersion::V0_7 => true,
+            rundler_types::EntryPointVersion::V0_6 => false,
+            rundler_types::EntryPointVersion::Unspecified => {
+                return Err(EthRpcError::Internal(anyhow::anyhow!(
+                    "HC04: Unknown EntryPoint version"
+                )))
+            }
+        };
 
         let mut params = ObjectParams::new();
-        let _ = params.insert("ver", REQ_VERSION);
+        let _ = params.insert(
+            "ver",
+            if is_v7 {
+                REQ_VERSION_V7
+            } else {
+                REQ_VERSION_V6
+            },
+        );
         let _ = params.insert("sk", sk_hex);
         let _ = params.insert("src_addr", src_addr);
         let _ = params.insert("src_nonce", src_n);
@@ -250,11 +272,11 @@ where
                     let resp_hex = resp["response"].as_str().unwrap();
                     let sig_hex: String = resp["signature"].as_str().unwrap().into();
                     let hc_res: Bytes = hex::decode(resp_hex).unwrap().into();
-                    //println!("HC api.rs do_op result sk {:?} success {:?} res {:?}", sub_key, op_success, hc_res);
 
                     err_hc = hybrid_compute::external_op(
+                        entry_point,
                         hh,
-                        op6.sender,
+                        op_t.sender(),
                         hc_nonce,
                         op_success,
                         &hc_res,
@@ -266,6 +288,7 @@ where
                         &self.hc,
                         ha_owner.unwrap(),
                         err_nonce,
+                        is_v7,
                     )
                     .await;
                 } else {
@@ -329,11 +352,12 @@ where
                 entry_point,
                 err_hc.clone(),
                 sub_key,
-                op6.sender,
+                op_t.sender(),
                 hc_nonce,
                 err_nonce,
                 map_key,
                 &self.hc,
+                is_v7,
             )
             .await;
         }
@@ -349,31 +373,19 @@ where
             println!("HC api.rs Ok gas result2 = {:?}", result2);
             let r3a = result2.unwrap();
             match r3a {
-                RpcGasEstimate::V0_6(abc) => {
-                    r3 = abc;
+                RpcGasEstimate::V0_6(est) => {
+                    r3 = est;
                 }
-                _ => {
-                    return Err(EthRpcError::Internal(anyhow::anyhow!(
-                        "HC04 user_op gas estimation failed"
-                    )));
+                RpcGasEstimate::V0_7(est) => {
+                    r3 = RpcGasEstimateV0_6 {
+                        pre_verification_gas: est.pre_verification_gas,
+                        call_gas_limit: est.call_gas_limit,
+                        verification_gas_limit: est.verification_gas_limit,
+                    };
                 }
             }
 
-            let op_tmp = hybrid_compute::get_hc_ent(hh).unwrap().user_op;
-            let op_tmp_2: rundler_types::v0_6::UserOperationOptionalGas =
-                rundler_types::v0_6::UserOperationOptionalGas {
-                    sender: op_tmp.sender,
-                    nonce: op_tmp.nonce,
-                    init_code: op_tmp.init_code,
-                    call_data: op_tmp.call_data,
-                    call_gas_limit: Some(op_tmp.call_gas_limit),
-                    verification_gas_limit: Some(op_tmp.verification_gas_limit),
-                    pre_verification_gas: Some(op_tmp.pre_verification_gas),
-                    max_fee_per_gas: Some(op_tmp.max_fee_per_gas),
-                    max_priority_fee_per_gas: Some(op_tmp.max_priority_fee_per_gas),
-                    paymaster_and_data: op_tmp.paymaster_and_data,
-                    signature: op_tmp.signature,
-                };
+            let op_tmp_2 = hybrid_compute::get_hc_ent(hh).unwrap().user_op;
 
             // The op_tmp_2 below specifies a 0 gas price, but we need to estimate the L1 fee at the
             // price offered by real userOperation which will be paying for it.
@@ -382,7 +394,7 @@ where
                 .router
                 .estimate_gas(
                     &entry_point,
-                    rundler_types::UserOperationOptionalGas::V0_6(op_tmp_2.clone()),
+                    op_tmp_2.clone(),
                     Some(spoof::State::default()),
                     at_price,
                 )
@@ -396,17 +408,17 @@ where
             };
 
             let r2: RpcGasEstimateV0_6 = match r2a? {
-                RpcGasEstimate::V0_6(estimate) => estimate,
-                _ => {
-                    return Err(EthRpcError::Internal(anyhow::anyhow!(
-                        "HC04 offchain_op gas estimation failed"
-                    )));
-                }
+                RpcGasEstimate::V0_6(est) => est,
+                RpcGasEstimate::V0_7(est) => RpcGasEstimateV0_6 {
+                    pre_verification_gas: est.pre_verification_gas,
+                    call_gas_limit: est.call_gas_limit,
+                    verification_gas_limit: est.verification_gas_limit,
+                },
             };
 
             // The current formula used to estimate gas usage in the offchain_rpc service
             // sometimes underestimates the true cost. For now all we can do is error here.
-            if r2.call_gas_limit > op_tmp_2.call_gas_limit.unwrap() {
+            if r2.call_gas_limit > op_tmp_2.into_variant(&self.chain_spec).call_gas_limit() {
                 println!("HC op_tmp_2 failed, call_gas_limit too low");
                 let msg = "HC04: Offchain call_gas_limit too low".to_string();
                 return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
@@ -421,38 +433,28 @@ where
                 .get_nonce(&entry_point, self.hc.sys_account, U256::zero())
                 .await
                 .unwrap();
-            let cleanup_op = hybrid_compute::rr_op(&self.hc, c_nonce, cleanup_keys.clone()).await;
-            let op_tmp_4: rundler_types::v0_6::UserOperationOptionalGas =
-                rundler_types::v0_6::UserOperationOptionalGas {
-                    sender: cleanup_op.sender,
-                    nonce: cleanup_op.nonce,
-                    init_code: cleanup_op.init_code,
-                    call_data: cleanup_op.call_data,
-                    call_gas_limit: Some(cleanup_op.call_gas_limit),
-                    verification_gas_limit: Some(cleanup_op.verification_gas_limit),
-                    pre_verification_gas: Some(cleanup_op.pre_verification_gas),
-                    max_fee_per_gas: Some(cleanup_op.max_fee_per_gas),
-                    max_priority_fee_per_gas: Some(cleanup_op.max_priority_fee_per_gas),
-                    paymaster_and_data: cleanup_op.paymaster_and_data,
-                    signature: cleanup_op.signature,
-                };
-            println!("HC op_tmp_4 {:?} {:?}", op_tmp_4, cleanup_keys);
+            let cleanup_op =
+                hybrid_compute::rr_op(&self.hc, entry_point, c_nonce, cleanup_keys.clone(), is_v7)
+                    .await;
+
+            println!("HC cleanup_op {:?} {:?}", cleanup_op, cleanup_keys);
             let r4a = self
                 .router
                 .estimate_gas(
                     &entry_point,
-                    rundler_types::UserOperationOptionalGas::V0_6(op_tmp_4),
+                    // rundler_types::UserOperationOptionalGas::V0_6(op_tmp_4),
+                    cleanup_op,
                     Some(spoof::State::default()),
                     at_price,
                 )
                 .await;
             let r4: RpcGasEstimateV0_6 = match r4a? {
-                RpcGasEstimate::V0_6(estimate) => estimate,
-                _ => {
-                    return Err(EthRpcError::Internal(anyhow::anyhow!(
-                        "HC04 cleanup_op gas estimation failed"
-                    )));
-                }
+                RpcGasEstimate::V0_6(est) => est,
+                RpcGasEstimate::V0_7(est) => RpcGasEstimateV0_6 {
+                    pre_verification_gas: est.pre_verification_gas,
+                    call_gas_limit: est.call_gas_limit,
+                    verification_gas_limit: est.verification_gas_limit,
+                },
             };
 
             let cleanup_gas =

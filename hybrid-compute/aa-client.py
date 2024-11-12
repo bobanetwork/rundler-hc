@@ -50,7 +50,7 @@ def build_op(to_contract, value_in_wei, initcode_hex, calldata_hex):
         'preVerificationGas': "0x0",
         'maxFeePerGas': Web3.to_hex(w3.eth.gas_price),
         'maxPriorityFeePerGas': Web3.to_hex(w3.eth.max_priority_fee),
-        'paymasterAndData':"0x",
+#        'paymasterAndData':"0x",
         'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
         }
     return p
@@ -187,7 +187,7 @@ else:
     EP_addr = response.json()['result'][0]
     vprint("Detected EntryPoint address", EP_addr)
 
-aa = aa_utils(EP_addr, w3.eth.chain_id)
+aa = aa_rpc(EP_addr, w3, args.bundler_rpc)
 
 vprint("gasPrices", w3.eth.gas_price, w3.eth.max_priority_fee)
 

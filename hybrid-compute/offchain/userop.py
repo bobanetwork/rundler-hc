@@ -18,9 +18,9 @@ load_dotenv()
 print("Starting Balances:")
 showBalances()
 balStart_bnd = w3.eth.get_balance(bundler_addr)
-balStart_sa = EP.functions.getDepositInfo(SA.address).call()[0] + w3.eth.get_balance(SA.address)
+balStart_sa = EP.functions.getDepositInfo(u_account).call()[0] + w3.eth.get_balance(u_account)
 
-print("TestCount(start)=", TC.functions.counters(SA.address).call())
+print("TestCount(start)=", TC.functions.counters(u_account).call())
 #print("TestFetchPrice(start)=", TFP.functions.counters(0).call())
 
 # ===============================================
@@ -28,6 +28,7 @@ print("TestCount(start)=", TC.functions.counters(SA.address).call())
 aa = aa_rpc(EP.address, w3, bundler_rpc)
 
 TestAddSub2(aa, 2, 1)   # Success
+
 TestAddSub2(aa, 2, 10)  # Underflow error, asserted
 TestAddSub2(aa, 2, 3)   # Underflow error, handled internally
 TestAddSub2(aa, 7, 0)   # Not HC
@@ -54,13 +55,13 @@ TestKyc(aa,False)
 
 # ===============================================
 
-print("TestCount(final)=", TC.functions.counters(SA.address).call())
+print("TestCount(final)=", TC.functions.counters(u_account).call())
 #print("TestFetchPrice(final)=", TFP.functions.counters(0).call())
 
 print("\nFinal Balances:")
 showBalances()
 balFinal_bnd = w3.eth.get_balance(bundler_addr)
-balFinal_sa = EP.functions.getDepositInfo(SA.address).call()[0] + w3.eth.get_balance(SA.address)
+balFinal_sa = EP.functions.getDepositInfo(u_account).call()[0] + w3.eth.get_balance(u_account)
 
 print("Net balance changes", balFinal_bnd - balStart_bnd, balFinal_sa - balStart_sa,
       (balFinal_bnd + balFinal_sa) - (balStart_bnd + balStart_sa), (gasFees['l1Fees'] + gasFees['l2Fees']))

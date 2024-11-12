@@ -198,7 +198,6 @@ impl EntryPointRouter {
             .get_nonce(addr, key)
             .await
             .map_err(Into::into)
-        //Ok(U256::from(0))
     }
 
     pub(crate) async fn check_signature(
@@ -213,7 +212,7 @@ impl EntryPointRouter {
             .map_err(Into::into)
     }
 
-    fn get_ep_version(&self, entry_point: &Address) -> EthResult<EntryPointVersion> {
+    pub(crate) fn get_ep_version(&self, entry_point: &Address) -> EthResult<EntryPointVersion> {
         if let Some((addr, _)) = self.v0_6 {
             if addr == *entry_point {
                 return Ok(EntryPointVersion::V0_6);

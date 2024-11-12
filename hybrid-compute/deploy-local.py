@@ -18,8 +18,16 @@ boba_token = None
 parser = argparse.ArgumentParser()
 parser.add_argument("--boba-path", required=True, help="Path to your local Boba/Optimism repository")
 parser.add_argument("--deploy-salt", required=False, help="Salt value for contract deployment", default="0")
+parser.add_argument("--ep-version", required=False, help="EntryPoint contract version (0.6|0.7)", default="0.7")
 
 cli_args = parser.parse_args()
+
+ep7 = False
+
+if cli_args.ep_version == "0.7":
+    ep7 = True
+elif cli_args.ep_version != "0.6":
+    assert "Invalid EntryPoint version (0.6 or 0.7 are supported)" == False
 
 with open(cli_args.boba_path + "/.devnet/addresses.json", "r", encoding="ascii") as f:
     jj = json.load(f)
@@ -66,7 +74,10 @@ l1_util = eth_utils(l1)
 l2_util = eth_utils(w3)
 
 contract_info = {}
-OUT_PREFIX = "../crates/types/contracts/out/"
+if ep7:
+    OUT_PREFIX = "../crates/types/contracts/out/hc0_7/"
+else:
+    OUT_PREFIX = "../crates/types/contracts/out/hc0_6/"
 
 def load_contract(w, name, path, address):
     """Loads a contract's JSON ABI"""
@@ -84,7 +95,7 @@ def load_contract(w, name, path, address):
     return w.eth.contract(abi=contract_info[name]['abi'], address=address)
 
 
-def submit_as_op(addr, calldata, signer_key):
+def submit_as_v6_op(addr, calldata, signer_key):
     """Wrapper to build and submit a UserOperation directly to the int. We don't
        have a Bundler to run gas estimation so the values are hard-coded. It might be
        necessary to change these values e.g. if simulating different L1 prices on the local devnet"""
@@ -125,6 +136,47 @@ def submit_as_op(addr, calldata, signer_key):
 
     return l2_util.sign_and_submit(ho, deploy_key)
 
+def submit_as_v7_op(addr, calldata, signer_key):
+    """Wrapper to build and submit a UserOperation directly to the EntryPoint. We don't
+       have a Bundler to run gas estimation so the values are hard-coded. It might be
+       necessary to change these values e.g. if simulating different L1 prices on the local devnet"""
+
+    gasLimits = "0x00000000000000000000000000016ed900000000000000000000000000053652"
+    gasFees   = "0x00000000000000000000000039d106800000000000000000000000025b9c274c"
+
+    op = {
+        'sender':addr,
+        'nonce': aa.aa_nonce(addr, 1235),
+        'initCode':"0x",
+        'callData': Web3.to_hex(calldata),
+        'accountGasLimits': gasLimits,
+        'preVerificationGas': "0xF0000",
+        'gasFees': gasFees,
+        'paymasterAndData':"0x",
+        'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
+    }
+
+    op = aa.sign_v7_op(op, signer_key)
+
+    # Because the bundler is not running yet we must call the EntryPoint directly.
+    ho = EP.functions.handleOps([(
+        op['sender'],
+        Web3.to_int(hexstr=op['nonce']),
+        op['initCode'],
+        op['callData'],
+        Web3.to_bytes(hexstr=op['accountGasLimits']),
+        Web3.to_int(hexstr=op['preVerificationGas']),
+        Web3.to_bytes(hexstr=op['gasFees']),
+        op['paymasterAndData'],
+        op['signature'],
+    )], deploy_addr).build_transaction({
+        'from': deploy_addr,
+        'value': 0,
+    })
+    ho['gas'] = int(w3.eth.estimate_gas(ho) * 1.2)
+
+    return l2_util.sign_and_submit(ho, deploy_key)
+
 def permit_caller(acct, caller):
     """Whitelist a contract to call a HybridAccount. Now implemented as
        a UserOperation rather than requiring the Owner to be an EOA."""
@@ -134,7 +186,10 @@ def permit_caller(acct, caller):
         calldata = selector("PermitCaller(address,bool)") + \
           ethabi.encode(['address','bool'], [caller, True])
 
-        submit_as_op(acct.address, calldata, env_vars['OC_PRIVKEY'])
+        if ep7:
+            submit_as_v7_op(acct.address, calldata, env_vars['OC_PRIVKEY'])
+        else:
+            submit_as_v6_op(acct.address, calldata, env_vars['OC_PRIVKEY'])
 
 def register_url(caller, url):
     """Associates a URL with the address of a HybridAccount contract"""
@@ -168,18 +223,6 @@ def fund_addr(addr):
             tx['gasPrice'] = Web3.to_wei(1, 'gwei')
         l2_util.sign_and_submit(tx, deploy_key)
 
-def fund_addr_ep(EP, addr):
-    """Deposit funds for an address into the EntryPoint"""
-    if EP.functions.deposits(addr).call()[0] < Web3.to_wei(0.005, 'ether'):
-        print("Funding acct (depositTo)", addr)
-        tx = EP.functions.depositTo(addr).build_transaction({
-            'from': deploy_addr,
-            'value': Web3.to_wei(0.01, "ether")
-        })
-        l2_util.sign_and_submit(tx, deploy_key)
-    print("Balances for", addr, Web3.from_wei(w3.eth.get_balance(addr), 'ether'),
-          Web3.from_wei(EP.functions.deposits(addr).call()[0], 'ether'))
-
 def deploy_account(factory, owner):
     """Deploy an account using a Factory contract"""
     calldata = selector("createAccount(address,uint256)") + ethabi.encode(['address','uint256'],[owner,0])
@@ -199,9 +242,15 @@ def deploy_forge(script, cmd_env):
     args = ["/home/enya/.foundry/bin/forge", "script", "--silent", "--json", "--broadcast"]
     args.append("--rpc-url=http://127.0.0.1:9545")
     args.append("--contracts")
-    args.append("src/hc0_6")
-    args.append("--remappings")
-    args.append("@openzeppelin/=lib/openzeppelin-contracts-versions/v4_9")
+    if ep7:
+        args.append("src/hc0_7")
+        args.append("--remappings")
+        args.append("@openzeppelin/=lib/openzeppelin-contracts-versions/v5_0")
+    else:
+        args.append("src/hc0_6")
+        args.append("--remappings")
+        args.append("@openzeppelin/=lib/openzeppelin-contracts-versions/v4_9")
+
     args.append(script)
     sys_env = os.environ.copy()
 
@@ -209,7 +258,14 @@ def deploy_forge(script, cmd_env):
     cmd_env['PRIVATE_KEY'] = deploy_key
     cmd_env['DEPLOY_ADDR'] = deploy_addr
     cmd_env['DEPLOY_SALT'] = cli_args.deploy_salt  # Update to force redeployment
-    cmd_env['ENTRY_POINTS'] = env_vars['ENTRY_POINTS']
+
+    if 'ENTRY_POINTS' in env_vars:
+        cmd_env['ENTRY_POINTS'] = env_vars['ENTRY_POINTS']
+    elif ep7:
+        cmd_env['ENTRY_POINTS'] = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+    else:
+        cmd_env['ENTRY_POINTS'] = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
+    print("Using EntryPoint address:", cmd_env['ENTRY_POINTS'])
 
     out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env,
         capture_output=True, check=True)
@@ -232,14 +288,22 @@ def deploy_base():
     cmd_env = {}
     cmd_env['HC_SYS_OWNER'] = env_vars['HC_SYS_OWNER']
     cmd_env['BOBA_TOKEN'] = boba_token
-    addrs = deploy_forge("hc_scripts/LocalDeploy.s.sol", cmd_env)
+    if ep7:
+        addrs = deploy_forge("hc_scripts/LocalDeploy_v7.s.sol", cmd_env)
+    else:
+        addrs = deploy_forge("hc_scripts/LocalDeploy_v6.s.sol", cmd_env)
+
     print("Deployed base contracts:", addrs)
     return addrs.split(',')
 
 def deploy_examples(hybrid_acct_addr):
     cmd_env = {}
     cmd_env['OC_HYBRID_ACCOUNT'] = hybrid_acct_addr
-    addrs = deploy_forge("hc_scripts/ExampleDeploy.s.sol", cmd_env)
+    if ep7:
+        addrs = deploy_forge("hc_scripts/ExampleDeploy_v7.s.sol", cmd_env)
+    else:
+        addrs = deploy_forge("hc_scripts/ExampleDeploy_v6.s.sol", cmd_env)
+
     print("Deployed example contracts:", addrs)
     return addrs.split(',')
 
@@ -259,7 +323,10 @@ def boba_balance(addr):
     bal = w3.eth.call({'to':boba_token, 'data':bal_calldata})
     return Web3.to_int(bal)
 
-EP = load_contract(w3, "EntryPoint", "../crates/types/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
+if ep7:
+    EP = load_contract(w3, "EntryPoint", "../crates/types/contracts/out/v0_7/EntryPoint.sol/EntryPoint.json", "0x0000000071727De22E5E9d8BAf0edAc6f37da032")
+else:
+    EP = load_contract(w3, "EntryPoint", "../crates/types/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
 
 assert l1.eth.get_balance(deploy_addr) > Web3.to_wei(1000, 'ether')
 
@@ -325,10 +392,10 @@ client_addr = deploy_account(saf_addr, env_vars['CLIENT_OWNER'])
 fund_addr(client_addr)
 
 ha1_addr = deploy_account(haf_addr, env_vars['OC_OWNER'])
-fund_addr_ep(EP, ha1_addr)
+fund_addr(ha1_addr)
 
 HA = load_contract(w3, 'HybridAccount', OUT_PREFIX + "HybridAccount.sol/HybridAccount.json", ha1_addr)
-SA = load_contract(w3, 'SimpleAccount', OUT_PREFIX + "SimpleAccount.sol/SimpleAccount.json", client_addr)
+#SA = load_contract(w3, 'SimpleAccount', OUT_PREFIX + "SimpleAccount.sol/SimpleAccount.json", client_addr)
 
 example_addrs = deploy_examples(ha1_addr)
 

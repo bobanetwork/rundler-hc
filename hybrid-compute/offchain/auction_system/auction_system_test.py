@@ -4,9 +4,9 @@ from userop_utils import *
 def TestAuction(aa):
     print("\n  - - - - TestAuction() - - - -")
 
-    start_auction_call = selector("createAuction(uint256,address)") + ethabi.encode(['uint256', 'address'], [300, SA.address])
+    start_auction_call = selector("createAuction(uint256,address)") + ethabi.encode(['uint256', 'address'], [300, u_account])
 
-    op = aa.build_op(SA.address, TEST_AUCTION.address, 0, start_auction_call, nKey)
+    op = aa.build_op(u_account, TEST_AUCTION.address, 0, start_auction_call, nKey)
 
     (success, op) = estimateOp(aa, op)
     assert success
@@ -22,7 +22,7 @@ def bid(aa, auctionId):
     print("\n  - - - - bid() - - - -")
     bid_call = selector("bid(uint256)") + ethabi.encode(['uint256'], [auctionId])
 
-    op = aa.build_op(SA.address, TEST_AUCTION.address, 6, bid_call, nKey)
+    op = aa.build_op(u_account, TEST_AUCTION.address, 6, bid_call, nKey)
 
     (success, op) = estimateOp(aa, op)
     assert success

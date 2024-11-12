@@ -176,10 +176,10 @@ impl From<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RpcGasEstimate {
-    pre_verification_gas: U256,
-    call_gas_limit: U256,
-    verification_gas_limit: U256,
-    paymaster_verification_gas_limit: Option<U256>,
+    pub(crate) pre_verification_gas: U256,
+    pub(crate) call_gas_limit: U256,
+    pub(crate) verification_gas_limit: U256,
+    pub(crate) paymaster_verification_gas_limit: Option<U256>,
 }
 
 impl From<GasEstimate> for RpcGasEstimate {

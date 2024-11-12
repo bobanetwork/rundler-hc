@@ -284,7 +284,7 @@ impl AsMut<UserOperation> for super::UserOperationVariant {
 }
 
 /// User operation with optional gas fields for gas estimation
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)] // PartialEq for hybrid_compute
 #[serde(rename_all = "camelCase")]
 pub struct UserOperationOptionalGas {
     /// Sender (required)
@@ -400,6 +400,13 @@ impl UserOperationOptionalGas {
         let mut bytes = vec![0_u8; len];
         rand::thread_rng().fill_bytes(&mut bytes);
         bytes.into()
+    }
+
+    /// Hash fields relevant to Hybrid Compute
+    pub fn hc_hash(&self) -> H256 {
+        self.clone()
+            .into_user_operation(U256::from(0), U256::from(0))
+            .hc_hash()
     }
 }
 

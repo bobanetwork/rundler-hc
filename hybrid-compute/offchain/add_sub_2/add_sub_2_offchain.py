@@ -1,13 +1,13 @@
 from web3 import Web3
 from eth_abi import abi as ethabi
-from offchain_utils import gen_response, parse_req
+from offchain_utils import gen_response_v7, parse_req
 
 def offchain_addsub2(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     print("  -> offchain_addsub2 handler called with ver={} subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(
         ver, sk, src_addr, src_nonce, oo_nonce, payload, args))
     err_code = 1
     resp = Web3.to_bytes(text="unknown error")
-    assert ver == "0.2"
+    assert ver == "0.3"
 
     try:
         req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
@@ -24,4 +24,4 @@ def offchain_addsub2(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     except Exception as e:
         print("DECODE FAILED", e)
 
-    return gen_response(req, err_code, resp)
+    return gen_response_v7(req, err_code, resp)
