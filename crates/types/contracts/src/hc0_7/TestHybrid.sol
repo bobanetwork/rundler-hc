@@ -1,24 +1,34 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.23;
 
-//sample "receiver" contract, for testing "exec" from account.
-
-//interface IHybridAccount {
-//  function CallOffchain(bytes32, bytes memory) external returns (uint32, bytes memory);
-//}
 import "./HybridAccount.sol";
 
 contract TestHybrid {
     mapping(address => uint256) public counters;
 
-    address payable immutable demoAddr;
+    address payable immutable hcAccount;
 
-    constructor(address payable _demoAddr) {
-      demoAddr = _demoAddr;
+    event CalledFrom(address sender);
+
+    constructor(address payable _hcAccount) {
+      hcAccount = _hcAccount;
+    }
+
+    // helper method to waste gas
+    // repeat - waste gas on writing storage in a loop
+    // junk - dynamic buffer to stress the function size.
+    mapping(uint256 => uint256) public xxx;
+    uint256 public offset;
+
+    function gasWaster(uint256 repeat, string calldata /*junk*/) external {
+        for (uint256 i = 1; i <= repeat; i++) {
+            offset++;
+            xxx[offset] = i;
+        }
     }
 
     function count(uint32 a, uint32 b) public {
-       HybridAccount HA = HybridAccount(demoAddr);
+       HybridAccount HA = HybridAccount(hcAccount);
        uint256 x;
        uint256 y;
        if (b == 0) {
@@ -42,7 +52,6 @@ contract TestHybrid {
            //revert(string(ret));
            counters[msg.sender] = counters[msg.sender] + 1000;
        }
-
     }
 
     function countFail() public pure {
@@ -53,21 +62,6 @@ contract TestHybrid {
         emit CalledFrom(msg.sender);
     }
 
-    event CalledFrom(address sender);
-
-    //helper method to waste gas
-    // repeat - waste gas on writing storage in a loop
-    // junk - dynamic buffer to stress the function size.
-    mapping(uint256 => uint256) public xxx;
-    uint256 public offset;
-
-    function gasWaster(uint256 repeat, string calldata /*junk*/) external {
-        for (uint256 i = 1; i <= repeat; i++) {
-            offset++;
-            xxx[offset] = i;
-        }
-    }
-
     /* This example is a word-guessing game. The user picks a four-letter word as their guess,
        and pays for the number of entries they wish to purchase. This wager is added to a pool.
        The offchain provider generates a random array of words and returns it as a string[]. If
@@ -76,13 +70,12 @@ contract TestHybrid {
        A boolean flag allows the user to cheat by guaranteeing that the word "frog" will appear
        in the list.
     */
-
     event GameResult(address indexed caller,uint256 indexed win, uint256 indexed Pool);
     uint256 public constant EntryCost = 2 gwei;
     uint256 public Pool = 0;
 
     function wordGuess(string calldata myGuess, bool cheat) public payable {
-        HybridAccount HA = HybridAccount(payable(demoAddr));
+        HybridAccount HA = HybridAccount(payable(hcAccount));
         uint256 entries = msg.value / EntryCost;
 	require(entries > 0, "No entries purchased");
 	require(entries <= 100, "Excess payment");
