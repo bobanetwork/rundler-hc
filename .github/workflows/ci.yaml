@@ -57,6 +57,8 @@ jobs:
         uses: bufbuild/buf-setup-action@v1
       - name: buf lint
         uses: bufbuild/buf-lint-action@v1
+        with:
+          token: ${{ secrets.GH_ACCESS_TOKEN }}
 
   doc-lint:
     runs-on: ubuntu-latest
