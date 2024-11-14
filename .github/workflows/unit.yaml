@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - boba-develop
   pull_request:
 
 
