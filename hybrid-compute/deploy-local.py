@@ -431,7 +431,7 @@ env_vars['SA_FACTORY_ADDR'] = saf_addr
 env_vars['HA_FACTORY_ADDR'] = haf_addr
 
 # Example contracts
-env_vars['TEST_COUNTER'] = TC.address
+env_vars['TEST_HYBRID'] = TC.address
 env_vars['TEST_AUCTION'] = TEST_AUCTION.address
 env_vars['TEST_RAINFALL_INSURANCE'] = RAINFALL_INSURANCE.address
 env_vars['TEST_SPORTS_BETTING'] = TEST_SPORTS_BETTING.address
