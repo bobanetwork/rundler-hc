@@ -60,27 +60,27 @@ with open("./contracts.json", "r") as f:
 EP = w3.eth.contract(
     address=ep_addr, abi=deployed['EntryPoint']['abi'])
 HH = w3.eth.contract(
-    address=deployed['HCHelper']['address'], abi=deployed['HCHelper']['abi'])
+    address=os.environ['HC_HELPER_ADDR'], abi=deployed['HCHelper']['abi'])
 # This address is unique for each user, who deploys their own wallet account
 #SA = w3.eth.contract(
 #    address=u_account, abi=deployed['SimpleAccount']['abi'])
 
-HA = w3.eth.contract(address=deployed['HybridAccount']
-                     ['address'], abi=deployed['HybridAccount']['abi'])
+HA = w3.eth.contract(address=os.environ['OC_HYBRID_ACCOUNT'],
+                     abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
-    address=deployed['TestHybrid']['address'], abi=deployed['TestHybrid']['abi'])
+    address=os.environ['TEST_HYBRID'], abi=deployed['TestHybrid']['abi'])
 KYC = w3.eth.contract(
-    address=deployed['TestKyc']['address'], abi=deployed['TestKyc']['abi'])
+    address=os.environ['TEST_KYC'], abi=deployed['TestKyc']['abi'])
 TFP = w3.eth.contract(
-    address=deployed['TestTokenPrice']['address'], abi=deployed['TestTokenPrice']['abi'])
+    address=os.environ['TEST_TOKEN_PRICE'], abi=deployed['TestTokenPrice']['abi'])
 #TCAPTCHA = w3.eth.contract(
 #    address=deployed['TestCaptcha']['address'], abi=deployed['TestCaptcha']['abi'])
 TEST_AUCTION = w3.eth.contract(
-    address=deployed['TestAuctionSystem']['address'], abi=deployed['TestAuctionSystem']['abi'])
+    address=os.environ['TEST_AUCTION'], abi=deployed['TestAuctionSystem']['abi'])
 TEST_SPORTS_BETTING = w3.eth.contract(
-    address=deployed['TestSportsBetting']['address'], abi=deployed['TestSportsBetting']['abi'])
+    address=os.environ['TEST_SPORTS_BETTING'], abi=deployed['TestSportsBetting']['abi'])
 TEST_RAINFALL_INSURANCE = w3.eth.contract(
-    address=deployed['TestRainfallInsurance']['address'], abi=deployed['TestRainfallInsurance']['abi'])
+    address=os.environ['TEST_RAINFALL_INSURANCE'], abi=deployed['TestRainfallInsurance']['abi'])
 
 print("EP at", EP.address)
 
