@@ -1,0 +1,75 @@
+# PlantUML diagram
+@startuml
+|Client|
+start
+:Prepare UserOperation;
+:RPC call to
+HC-enabled bundler;
+|Bundler|
+group eth_estimateUserOperationGas()
+:Calculate verification gas;
+:Calculate call gas
+(first attempt);
+|Sequencer|
+:Simulate EVM execution
+(Reverts);
+|Bundler|
+:Extract request parameters
+from revert data;
+:Call offchain
+to registered URL;
+|Offchain|
+:Parse JSON-RPC request;
+:Generate response payload
+for offchain UserOperation;
+:Return payload and signature;
+|Bundler|
+:Calculate call gas
+(second attempt);
+|Sequencer|
+:Simulate EVM execution
+with Storage override;
+|Bundler|
+:Update gas estimate,
+store response to cache;
+end group
+|Client|
+:Update UserOperation
+gas limits;
+:Sign and Submit;
+|Bundler|
+group eth_sendUserOperation()
+:Insert into
+proposed bundle;
+if (Check cache
+for HC data) then (found)
+:Prepend Offchain
+UserOperation;
+else
+endif
+:Submit bundle;
+|Sequencer|
+:EntryPoint contract
+processes bundle;
+if (HC?) then (yes)
+:HybridAccount calls
+PutResponse();
+:UserOperation execution
+calls GetResponse()
+through HybridAccount;
+else (no)
+:UserOperation
+executes normally;
+endif
+|Bundler|
+:Wait for block to be mined,
+parse transaction receipt;
+end group
+|Client|
+:Poll for result;
+|Bundler|
+:eth_getUserOperationReceipt();
+|Client|
+:Process receipt;
+stop
+@enduml
