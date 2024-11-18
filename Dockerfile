@@ -29,7 +29,7 @@ COPY --from=planner /app/recipe.json recipe.json
 
 # Set the build profile to be release
 ARG BUILD_PROFILE=release
-ENV BUILD_PROFILE $BUILD_PROFILE
+ENV BUILD_PROFILE=$BUILD_PROFILE
 
 # Builds dependencies
 RUN cargo chef cook --profile $BUILD_PROFILE --recipe-path recipe.json
@@ -55,3 +55,4 @@ COPY --from=builder /app/target/release/rundler /usr/local/bin
 
 EXPOSE 3000 8080
 ENTRYPOINT ["/usr/local/bin/rundler"]
+CMD ["node", "--disable_entry_point_v0_6"]

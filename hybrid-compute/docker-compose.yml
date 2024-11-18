@@ -32,7 +32,7 @@ services:
       - 3300:3300
     command: >
       node
-      --disable_entry_point_v0_7
+      --disable_entry_point_v0_6
       --builder.dropped_status_unsupported
 
   offchain-rpc:
