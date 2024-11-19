@@ -375,6 +375,8 @@ if boba_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
     print("Continuing")
 
 fund_addr(env_vars['BUNDLER_ADDR'])
+if 'BUNDLER_ADDR_V6' in env_vars:
+    fund_addr(env_vars['BUNDLER_ADDR_V6'])
 
 (ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr) = deploy_base()
 

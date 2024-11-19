@@ -55,4 +55,4 @@ COPY --from=builder /app/target/release/rundler /usr/local/bin
 
 EXPOSE 3000 8080
 ENTRYPOINT ["/usr/local/bin/rundler"]
-CMD ["node", "--disable_entry_point_v0_6"]
+CMD ["node"]
