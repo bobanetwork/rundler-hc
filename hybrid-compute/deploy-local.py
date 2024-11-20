@@ -239,7 +239,7 @@ def deploy_account(factory, owner):
     return acct_addr
 
 def deploy_forge(script, cmd_env):
-    args = ["/home/enya/.foundry/bin/forge", "script", "--silent", "--json", "--broadcast"]
+    args = ["forge", "script",  "--json", "--broadcast"]
     args.append("--rpc-url=http://127.0.0.1:9545")
     args.append("--contracts")
     if ep7:
