@@ -23,6 +23,7 @@ parser.add_argument("--calldata", required=True, help="Hex-encoded calldata")
 parser.add_argument("--initcode", default="0x", help="Hex-encoded initcode")
 parser.add_argument("--entry-point", required=False, help="EntryPoint address (overrides auto-detection)")
 parser.add_argument("--extra-pvg", default=0, help="Add to estimated preVerificationGas")
+parser.add_argument("--use-v7", default=True, help="Use v0.7 EntryPoint")
 
 args = parser.parse_args()
 
@@ -96,7 +97,10 @@ def estimate_op(p):
 
 def submitOp(op):
     """Wrapper to sign and submit a UserOperation, waiting for a receipt"""
-    op = aa.signOp(op, args.private_key)
+    if args.use_v7:
+        op = aa.sign_v7_op(op, args.private_key)
+    else:
+        op = aa.sign_v7_op(op, args.private_key)
 
     vprint("Op to submit:", op)
     vprint()
@@ -177,15 +181,22 @@ assert w3.is_connected
 
 if args.entry_point:
     EP_addr = Web3.to_checksum_address(args.entry_point)
+elif args.use_v7:
+    EP_addr = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+    print("Using v0.7 EntryPoint address:", EP_addr)
 else:
     response = requests.post(
         args.bundler_rpc, json=request("eth_supportedEntryPoints", params=[]), timeout=60)
-    print(response)
-    print(response.json())
+    #print(response)
+    #print(response.json())
     assert "result" in response.json()
-
-    EP_addr = response.json()['result'][0]
-    vprint("Detected EntryPoint address", EP_addr)
+    ep_list = response.json()['result']
+    if len(ep_list) == 1:
+        EP_addr = ep_list[0]
+        vprint("Detected EntryPoint address", EP_addr)
+    else:
+        print("Multiple EntryPoints detected, must select one:", ep_list)
+        sys.exit(1)
 
 aa = aa_rpc(EP_addr, w3, args.bundler_rpc)
 
