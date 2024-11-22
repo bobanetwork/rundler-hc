@@ -1,7 +1,7 @@
 # Adapted from https://github.com/paradigmxyz/reth/blob/main/Dockerfile
 # syntax=docker/dockerfile:1.4
 
-FROM --platform=$TARGETPLATFORM rust:1.79.0 AS chef-builder
+FROM --platform=$TARGETPLATFORM rust:1.82.0 AS chef-builder
 
 # Install system dependencies
 RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - && echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-
 SHELL ["/bin/bash", "-c"]
 RUN curl -L https://foundry.paradigm.xyz | bash
 ENV PATH="/root/.foundry/bin:${PATH}"
-RUN foundryup
+RUN foundryup -C 9d74675b # Pin to a seemingly good version
 
 RUN cargo install cargo-chef --locked
 
