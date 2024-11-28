@@ -239,7 +239,7 @@ def deploy_account(factory, owner):
     return acct_addr
 
 def deploy_forge(script, cmd_env):
-    args = ["forge", "script", "--json", "--broadcast"]
+    args = ["forge", "script", "--silent", "--json", "--broadcast"]
     args.append("--rpc-url=http://127.0.0.1:9545")
     args.append("--contracts")
     if ep7:
@@ -276,13 +276,11 @@ def deploy_forge(script, cmd_env):
       print(out)
     assert out.returncode == 0
 
-    #jstr = out.stdout.split(b'\n')[0].decode('ascii')
-    jstr = out.stdout.split(b'\n')[1].decode('ascii')
+    jstr = out.stdout.split(b'\n')[0].decode('ascii')
+    # Currently assumes Forge 2044faec
     # Forge 9d74675b is broken, no longer gives a clean .json output.
-    # Unfortunately newer versions are even more broken. Fix this once
-    # we find a good one.
+    # Newer versions were more broken.
 
-    print("DBG", jstr)
     ret_json = json.loads(jstr)
     addrs_raw = ret_json['returns']['0']['value']
     # Need to parse the 'internal_type': 'address[5]' value

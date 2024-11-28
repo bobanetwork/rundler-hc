@@ -13,7 +13,7 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-
 SHELL ["/bin/bash", "-c"]
 RUN curl -L https://foundry.paradigm.xyz | bash
 ENV PATH="/root/.foundry/bin:${PATH}"
-RUN foundryup -C 9d74675b # Pin to a seemingly good version
+RUN foundryup -C 2044faec # Pin to a seemingly good version
 
 RUN cargo install cargo-chef --locked
 
