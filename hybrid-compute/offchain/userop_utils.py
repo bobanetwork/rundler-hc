@@ -1,8 +1,8 @@
 from random import *
 import json
 import os
-from dotenv import load_dotenv, find_dotenv
 import sys
+from dotenv import load_dotenv, find_dotenv
 
 from web3 import Web3
 import eth_account
@@ -54,7 +54,7 @@ assert (w3.is_connected)
 
 l2_util = eth_utils(w3)
 
-with open("./contracts.json", "r") as f:
+with open("./contracts.json", "r", encoding="ascii") as f:
     deployed = json.loads(f.read())
 
 EP = w3.eth.contract(
@@ -85,26 +85,13 @@ TEST_RAINFALL_INSURANCE = w3.eth.contract(
 print("EP at", EP.address)
 
 
-def showBalances():
-    print("u  ", EP.functions.getDepositInfo(
-        u_addr).call(), w3.eth.get_balance(u_addr))
-    print("bnd", EP.functions.getDepositInfo(
-        bundler_addr).call(), w3.eth.get_balance(bundler_addr))
-    print("SA ", EP.functions.getDepositInfo(
+def show_balances():
+    print("CLIENT_ADDR", EP.functions.getDepositInfo(
         u_account).call(), w3.eth.get_balance(u_account))
-    print("HA ", EP.functions.getDepositInfo(
+    print("BUNDLER_ADDR", EP.functions.getDepositInfo(
+        bundler_addr).call(), w3.eth.get_balance(bundler_addr))
+    print("OC_HYBRID_ACCOUNT ", EP.functions.getDepositInfo(
         HA.address).call(), w3.eth.get_balance(HA.address))
-    print("TC ", EP.functions.getDepositInfo(
-        TC.address).call(), w3.eth.get_balance(TC.address))
-    print("TFP", EP.functions.getDepositInfo(
-        TFP.address).call(), w3.eth.get_balance(TFP.address))
-    print("AUCTION_SYSTEM", EP.functions.getDepositInfo(TEST_AUCTION.address).call(), w3.eth.get_balance(TEST_AUCTION.address))
-#    print("TCAPTCHA", EP.functions.getDepositInfo(
-#        TCAPTCHA.address).call(), w3.eth.get_balance(TCAPTCHA.address))
-    print("TEST_RAINFALL_INSURANCE", EP.functions.getDepositInfo(
-        TEST_RAINFALL_INSURANCE.address).call(), w3.eth.get_balance(TEST_RAINFALL_INSURANCE.address))
-    print("SPORTS BETTING", EP.functions.getDepositInfo(
-        TEST_SPORTS_BETTING.address).call(), w3.eth.get_balance(TEST_SPORTS_BETTING.address))
 
 # -------------------------------------------------------------
 
@@ -129,30 +116,35 @@ nKey = int(1200 + (w3.eth.get_transaction_count(u_addr) % 7))
 # nKey = 0
 # print("nKey", nKey)
 
-def ParseReceipt(opReceipt, logTopic=None):
+def ParseReceipt(op_receipt, log_topic=None):
     """Parses an operation receipt to extract gas information. Can optionally look
        for one specified log topic and return a matching entry. Sufficient for the
        current examples but not intended as a general solution."""
     global gasFees
-    txRcpt = opReceipt['receipt']
+    tx_rcpt = op_receipt['receipt']
     log_ret = None
 
     n = 0
-    for i in txRcpt['logs']:
+    for i in tx_rcpt['logs']:
         print("log", n, i['topics'][0], i['data'])
-        if logTopic and Web3.to_hex(logTopic) == i['topics'][0]:
+        if log_topic and Web3.to_hex(log_topic) == i['topics'][0]:
             log_ret = (i['topics'], i['data'])
         n += 1
-    print("Total tx gas stats:",
-          "gasUsed", Web3.to_int(hexstr=txRcpt['gasUsed']),
-          "effectiveGasPrice", Web3.to_int(hexstr=txRcpt['effectiveGasPrice']),
-          "l1GasUsed", Web3.to_int(hexstr=txRcpt['l1GasUsed']),
-          "l1Fee", Web3.to_int(hexstr=txRcpt['l1Fee']))
-    opGas = Web3.to_int(hexstr=opReceipt['actualGasUsed'])
-    print("opReceipt gas used", opGas, "unused", gasFees['estGas'] - opGas)
+    if 'l1GasUsed' not in tx_rcpt:
+        tx_rcpt['l1GasUsed'] = "0x0"
+    if 'l1Fee' not in tx_rcpt:
+        tx_rcpt['l1Fee'] = "0x0"
 
-    egPrice = Web3.to_int(hexstr=txRcpt['effectiveGasPrice'])
-    gasFees['l2Fees'] += Web3.to_int(hexstr=txRcpt['gasUsed']) * egPrice
-    gasFees['l1Fees'] += Web3.to_int(hexstr=txRcpt['l1Fee'])
+    print("Total tx gas stats:",
+          "gasUsed", Web3.to_int(hexstr=tx_rcpt['gasUsed']),
+          "effectiveGasPrice", Web3.to_int(hexstr=tx_rcpt['effectiveGasPrice']),
+          "l1GasUsed", Web3.to_int(hexstr=tx_rcpt['l1GasUsed']),
+          "l1Fee", Web3.to_int(hexstr=tx_rcpt['l1Fee']))
+    op_gas = Web3.to_int(hexstr=op_receipt['actualGasUsed'])
+    print("op_receipt gas used", op_gas, "unused", gasFees['estGas'] - op_gas)
+
+    eg_price = Web3.to_int(hexstr=tx_rcpt['effectiveGasPrice'])
+    gasFees['l2Fees'] += Web3.to_int(hexstr=tx_rcpt['gasUsed']) * eg_price
+    gasFees['l1Fees'] += Web3.to_int(hexstr=tx_rcpt['l1Fee'])
 
     return log_ret

@@ -16,7 +16,7 @@ import os
 load_dotenv()
 
 print("Starting Balances:")
-showBalances()
+show_balances()
 balStart_bnd = w3.eth.get_balance(bundler_addr)
 balStart_sa = EP.functions.getDepositInfo(u_account).call()[0] + w3.eth.get_balance(u_account)
 
@@ -59,7 +59,7 @@ print("TestCount(final)=", TC.functions.counters(u_account).call())
 #print("TestFetchPrice(final)=", TFP.functions.counters(0).call())
 
 print("\nFinal Balances:")
-showBalances()
+show_balances()
 balFinal_bnd = w3.eth.get_balance(bundler_addr)
 balFinal_sa = EP.functions.getDepositInfo(u_account).call()[0] + w3.eth.get_balance(u_account)
 
