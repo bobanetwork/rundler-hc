@@ -19,11 +19,12 @@ parser.add_argument("--private-key", required=True, help="Private key to sign th
 parser.add_argument("--account", required=True, help="Account address")
 parser.add_argument("--target", required=True, help="Target contract address")
 parser.add_argument("--value", type=int, default=0, help="Value of ETH (in wei) to send with call")
-parser.add_argument("--calldata", required=True, help="Hex-encoded calldata")
+parser.add_argument("--calldata", required=False, default="0x", help="Hex-encoded calldata")
 parser.add_argument("--initcode", default="0x", help="Hex-encoded initcode")
-parser.add_argument("--entry-point", required=False, help="EntryPoint address (overrides auto-detection)")
+parser.add_argument("--entry-point", required=False, help="Override EntryPoint address (or 'detect')")
 parser.add_argument("--extra-pvg", default=0, help="Add to estimated preVerificationGas")
-parser.add_argument("--use-v7", default=True, help="Use v0.7 EntryPoint")
+parser.add_argument("--ep-version", default="v7", choices=["v6","v7"], help="Specify EntryPoint version (v6 | v7)")
+parser.add_argument("--estimate-only", action="store_true", help="Debug option: exit after gas estimation")
 
 args = parser.parse_args()
 
@@ -39,37 +40,55 @@ def vprint(*a):
 
 def build_op(to_contract, value_in_wei, initcode_hex, calldata_hex):
     """Wrapper to build a UserOperation"""
-    exCall = selector("execute(address,uint256,bytes)") + \
+
+    ex_call = selector("execute(address,uint256,bytes)") + \
           ethabi.encode(['address', 'uint256', 'bytes'], [to_contract, value_in_wei, Web3.to_bytes(hexstr=calldata_hex)])
-    p = {
-        'sender':u_addr,
-        'nonce': aa.aa_nonce(u_addr, 1235),
-        'initCode':initcode_hex,
-        'callData': Web3.to_hex(exCall),
-        'callGasLimit': "0x0",
-        'verificationGasLimit': Web3.to_hex(0),
-        'preVerificationGas': "0x0",
-        'maxFeePerGas': Web3.to_hex(w3.eth.gas_price),
-        'maxPriorityFeePerGas': Web3.to_hex(w3.eth.max_priority_fee),
-#        'paymasterAndData':"0x",
-        'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
-        }
+
+    if args.ep_version == "v7":
+        p = {
+            'sender':u_addr,
+            'nonce': aa.aa_nonce(u_addr, 0),
+            'initCode':initcode_hex,
+            'callData': Web3.to_hex(ex_call),
+            'callGasLimit': "0x0",
+            'verificationGasLimit': "0x0",
+            'preVerificationGas': "0x0",
+            'maxFeePerGas': Web3.to_hex(w3.eth.gas_price),
+            'maxPriorityFeePerGas': Web3.to_hex(w3.eth.max_priority_fee),
+    #        'paymasterAndData':"0x",
+            'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
+            }
+    else:
+        p = {
+            'sender':u_addr,
+            'nonce': aa.aa_nonce(u_addr, 0),
+            'initCode':initcode_hex,
+            'callData': Web3.to_hex(ex_call),
+            'callGasLimit': "0x0",
+            'verificationGasLimit': "0x0",
+            'preVerificationGas': "0x0",
+            'maxFeePerGas': Web3.to_hex(w3.eth.gas_price),
+            'maxPriorityFeePerGas': Web3.to_hex(w3.eth.max_priority_fee),
+            'paymasterAndData':"0x",
+            'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
+            }
+    vprint(f"Built op {p} for EP {args.ep_version}")
     return p
 
 
 def estimate_op(p):
     """Wrapper to estimate gas usage for a UserOperation"""
     gas_total = 0
-    est_params = [p, EP_addr]
+    est_params = [p, ep_addr]
     vprint(f"estimation params {est_params}")
     vprint()
 
     response = requests.post(
-        args.bundler_rpc, json=request("eth_estimateUserOperationGas", params=est_params))
+        args.bundler_rpc, json=request("eth_estimateUserOperationGas", params=est_params), timeout=600)
     try:
         print("estimateGas response", response.json())
-    except:
-        print("*** Can't decode as JSON:", response.text)
+    except Exception as e:
+        print("*** Can't decode as JSON:", response.text, e)
         sys.exit(1)
 
     if 'error' in response.json():
@@ -95,19 +114,19 @@ def estimate_op(p):
             gas_total += Web3.to_int(hexstr=est_result['verificationGas'])
     return p, gas_total
 
-def submitOp(op):
+def submit_op(base_op):
     """Wrapper to sign and submit a UserOperation, waiting for a receipt"""
-    if args.use_v7:
-        op = aa.sign_v7_op(op, args.private_key)
+    if args.ep_version == "v7":
+        signed_op = aa.sign_v7_op(base_op, args.private_key)
     else:
-        op = aa.sign_v7_op(op, args.private_key)
+        signed_op = aa.sign_op(base_op, args.private_key)
 
-    vprint("Op to submit:", op)
+    vprint("Op to submit:", signed_op)
     vprint()
 
     while True:
         response = requests.post(args.bundler_rpc, json=request(
-            "eth_sendUserOperation", params=[op, EP_addr]))
+            "eth_sendUserOperation", params=[signed_op, ep_addr]), timeout=600)
         if 'result' in response.json():
             break
         if 'error' in response.json():
@@ -122,83 +141,92 @@ def submitOp(op):
         print("*** eth_sendUserOperation failed")
         sys.exit(1)
 
-    opHash = {}
-    opHash['hash'] = response.json()['result']
+    op_hash = {}
+    op_hash['hash'] = response.json()['result']
     timeout = True
 
     for _ in range(100):
-        vprint("Waiting for opHash {} receipt...".format(opHash))
+        vprint(f"Waiting for op_hash {op_hash} receipt...")
         time.sleep(10)
-        opReceipt = requests.post(args.bundler_rpc, json=request(
-            "eth_getUserOperationReceipt", params=[opHash['hash']]))
+        op_receipt = requests.post(args.bundler_rpc, json=request(
+            "eth_getUserOperationReceipt", params=[op_hash['hash']]), timeout=600)
         try:
-            opReceipt = opReceipt.json()['result']
-        except:
-            print("*** Could not decode receipt:", opReceipt.text)
+            op_receipt = op_receipt.json()['result']
+        except Exception as e:
+            print("*** Could not decode receipt:", op_receipt.text, e)
             sys.exit(1)
 
-        if opReceipt is not None:
-            #print("opReceipt", opReceipt)
-            assert opReceipt['receipt']['status'] == "0x1"
-            print("operation success={}, txHash={}".format(
-                opReceipt['success'],
-                opReceipt['receipt']['transactionHash']))
-            ParseReceipt(opReceipt)
+        if op_receipt is not None:
+            #print("op_receipt", op_receipt)
+            assert op_receipt['receipt']['status'] == "0x1"
+            print(f"operation success={ op_receipt['success']}, txHash={op_receipt['receipt']['transactionHash']}")
+            parse_receipt(op_receipt)
             timeout = False
-            assert opReceipt['success']
+            assert op_receipt['success']
             break
     if timeout:
         print("*** Previous operation timed out")
         sys.exit(1)
 
-def ParseReceipt(opReceipt):
+def parse_receipt(op_receipt):
     """ Extract log info and gas usage from the receipt"""
     for i in range(100):
-        txRcpt = w3.eth.get_transaction_receipt(opReceipt['receipt']['transactionHash'])
-        if txRcpt:
+        tx_rcpt = w3.eth.get_transaction_receipt(op_receipt['receipt']['transactionHash'])
+        if tx_rcpt:
             break
         vprint("Waiting for txReceipt...")
         time.sleep(10)
 
     n = 0
-    for i in txRcpt['logs']:
+    for i in tx_rcpt['logs']:
         vprint("log", n, Web3.to_hex(i['topics'][0]), Web3.to_hex(i['data']))
         n += 1
-    vprint("Total tx gas stats:",
-        "gasUsed", Web3.to_int(text=txRcpt['gasUsed']),
-	"effectiveGasPrice", Web3.to_int(text=txRcpt['effectiveGasPrice']),
-	"l1GasUsed", Web3.to_int(hexstr=txRcpt['l1GasUsed']),
-	"l1Fee", Web3.to_int(hexstr=txRcpt['l1Fee']))
-    opGas = Web3.to_int(hexstr=opReceipt['actualGasUsed'])
-    vprint("opReceipt gas used", opGas)
+    vprint("Total tx gas stats:")
+    vprint("    gasUsed", Web3.to_int(text=tx_rcpt['gasUsed']))
+    vprint("effectiveGasPrice", Web3.to_int(text=tx_rcpt['effectiveGasPrice']))
+    if 'l1GasUsed' in tx_rcpt:
+        vprint("l1GasUsed", Web3.to_int(hexstr=tx_rcpt['l1GasUsed']))
+    if 'l1Fee' in tx_rcpt:
+        vprint("l1Fee", Web3.to_int(hexstr=tx_rcpt['l1Fee']))
+    op_gas = Web3.to_int(hexstr=op_receipt['actualGasUsed'])
+    vprint("op_receipt gas used", op_gas)
 
 # ---------------------------------------------------------------------------------------
 
-vprint("Will connect to {args.bundler_rpc} (Bundler), {args.eth_rpc} (Eth)")
+vprint(f"Will connect to {args.bundler_rpc} (Bundler), {args.eth_rpc} (Eth)")
 
 w3 = Web3(Web3.HTTPProvider(args.eth_rpc))
 assert w3.is_connected
 
-if args.entry_point:
-    EP_addr = Web3.to_checksum_address(args.entry_point)
-elif args.use_v7:
-    EP_addr = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
-    print("Using v0.7 EntryPoint address:", EP_addr)
-else:
-    response = requests.post(
+# Start with the default addresses
+if args.ep_version == "v7":
+    ep_addr = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+elif args.ep_version == "v6":
+    ep_addr = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
+
+# Allow overrides
+if args.entry_point == "detect":
+    detect_response = requests.post(
         args.bundler_rpc, json=request("eth_supportedEntryPoints", params=[]), timeout=60)
-    #print(response)
-    #print(response.json())
-    assert "result" in response.json()
-    ep_list = response.json()['result']
+
+    assert "result" in detect_response.json()
+    ep_list = detect_response.json()['result']
     if len(ep_list) == 1:
-        EP_addr = ep_list[0]
-        vprint("Detected EntryPoint address", EP_addr)
+        ep_addr = ep_list[0]
+        vprint("Detected EntryPoint address", ep_addr)
     else:
         print("Multiple EntryPoints detected, must select one:", ep_list)
         sys.exit(1)
+elif args.entry_point:
+    ep_addr = Web3.to_checksum_address(args.entry_point)
+    print(f"WARN: User forced EntryPoint address {ep_addr}")
 
-aa = aa_rpc(EP_addr, w3, args.bundler_rpc)
+if args.ep_version == "v7":
+    vprint(f"Using v0.7 EntryPoint address: {ep_addr}")
+else:
+    vprint(f"Using v0.6 EntryPoint address: {ep_addr}")
+
+aa = aa_rpc(ep_addr, w3, args.bundler_rpc)
 
 vprint("gasPrices", w3.eth.gas_price, w3.eth.max_priority_fee)
 
@@ -206,14 +234,31 @@ owner_wallet = Web3().eth.account.from_key(args.private_key)
 u_addr = Web3.to_checksum_address(args.account)
 u_owner = owner_wallet.address
 
-vprint(f"Using Account contract {u_addr} with owner {u_owner} balance {w3.eth.get_balance(u_addr)}")
+acct_balance = w3.eth.get_balance(u_addr)
+vprint(f"Using Account contract {u_addr} with owner {u_owner} balance {acct_balance}")
 
 acct_owner_hex = Web3.to_hex(w3.eth.call({'to':u_addr,'data':selector("owner()")}))
-assert Web3.to_checksum_address("0x" + str(acct_owner_hex)[26:]) == u_owner # Make sure the account owner is valid
+acct_owner = Web3.to_checksum_address("0x" + str(acct_owner_hex)[26:])
+if acct_owner != u_owner:
+    print(f"ERROR: Account owner() {acct_owner} does not match private key for {u_owner}")
+    sys.exit(1)
+
+acct_ep_hex = Web3.to_hex(w3.eth.call({'to':u_addr,'data':selector("entryPoint()")}))
+acct_ep = Web3.to_checksum_address("0x" + str(acct_ep_hex)[26:])
+if acct_ep != ep_addr:
+    print(f"ERROR: Account entryPoint() {acct_ep} does not match {ep_addr}")
+    sys.exit(1)
+
+if acct_balance < args.value:
+    print(f"ERROR: Balance {acct_balance} is less then requested value {args.value}")
+    sys.exit(1)
 
 target_addr = Web3.to_checksum_address(args.target)
 op = build_op(target_addr, args.value, args.initcode, args.calldata)
 op, gas_est = estimate_op(op)
 vprint("Total gas estimate for op =", gas_est)
-submitOp(op)
+if args.estimate_only:
+    print("Exiting after gas estimation")
+else:
+    submit_op(op)
 vprint("Done")
