@@ -8,8 +8,7 @@ import requests
 from jsonrpcclient import request
 from web3 import Web3
 from eth_abi import abi as ethabi
-
-from aa_utils import *
+import eth_account
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-v", "--verbose", action="store_true", help="Print additional details")
@@ -30,8 +29,83 @@ args = parser.parse_args()
 
 # "https://gateway.tenderly.co/public/boba-sepolia"
 # "https://bundler-hc.sepolia.boba.network"
+# +------------------------------------------------------+
+# This section is copy/pasted from "aa_utils" (with necessary edits)
+# so that this program can be used as a standalone utility.
 
-aa = None
+def selector(name):
+    """Return a Solidity-style function selector, e.g. 0x1234abcd = keccak256("something(uint,bool")"""
+    name_hash = Web3.to_hex(Web3.keccak(text=name))
+    return Web3.to_bytes(hexstr=str(name_hash)[:10])
+
+def aa_nonce(addr, key):
+    """Returns the keyed AA nonce for an address"""
+    calldata = selector("getNonce(address,uint192)") + ethabi.encode(['address','uint192'],[addr, key])
+    ret = w3.eth.call({'to':ep_addr,'data':calldata})
+    return Web3.to_hex(ret)
+
+def sign_v6_op(op, signer_key):
+    """Signs a UserOperation, returning a modified op containing a 'signature' field."""
+    pack1 = ethabi.encode(['address','uint256','bytes32','bytes32','uint256','uint256','uint256','uint256','uint256','bytes32'], \
+          [op['sender'],
+          Web3.to_int(hexstr=op['nonce']),
+          Web3.keccak(hexstr=op['initCode']),
+          Web3.keccak(hexstr=op['callData']),
+          Web3.to_int(hexstr=op['callGasLimit']),
+          Web3.to_int(hexstr=op['verificationGasLimit']),
+          Web3.to_int(hexstr=op['preVerificationGas']),
+          Web3.to_int(hexstr=op['maxFeePerGas']),
+          Web3.to_int(hexstr=op['maxPriorityFeePerGas']),
+          Web3.keccak(hexstr=op['paymasterAndData']),
+          ])
+    pack2 = ethabi.encode(['bytes32','address','uint256'], [Web3.keccak(pack1), ep_addr, w3.eth.chain_id])
+    e_msg = eth_account.messages.encode_defunct(Web3.keccak(pack2))
+    signer_acct = eth_account.account.Account.from_key(signer_key)
+    sig = signer_acct.sign_message(e_msg)
+    op['signature'] = Web3.to_hex(sig.signature)
+    return op
+
+def sign_v7_op(user_op, signer_key):
+    """Signs a UserOperation, returning a modified op containing a 'signature' field."""
+    op = dict(user_op) # Derived fields are added to 'op' prior to hashing
+
+    assert 'paymaster' not in op # not yet implemented
+
+    # The deploy-local script supplies the packed values prior to signature, as it bypasses the bundler.
+    # For normal UserOperations the fields are derived here
+    if 'accountGasLimits' not in op:
+        account_gas_limits  = ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['verificationGasLimit'])])[16:32] \
+            + ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['callGasLimit'])])[16:32]
+    else:
+        account_gas_limits = Web3.to_bytes(hexstr=op['accountGasLimits'])
+
+    if 'gasFees' not in op:
+        gas_fees = ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['maxPriorityFeePerGas'])])[16:32] \
+            + ethabi.encode(['uint128'],[Web3.to_int(hexstr=op['maxFeePerGas'])])[16:32]
+    else:
+        gas_fees = Web3.to_bytes(hexstr=op['gasFees'])
+
+    if 'paymasterAndData' not in op:
+        op['paymasterAndData'] = "0x"
+
+    pack1 = ethabi.encode(['address','uint256','bytes32','bytes32','bytes32','uint256','bytes32','bytes32'], \
+          [op['sender'],
+          Web3.to_int(hexstr=op['nonce']),
+          Web3.keccak(hexstr="0x"), # initcode
+          Web3.keccak(hexstr=op['callData']),
+          account_gas_limits,
+          Web3.to_int(hexstr=op['preVerificationGas']),
+          gas_fees,
+          Web3.keccak(hexstr=op['paymasterAndData']),
+          ])
+    pack2 = ethabi.encode(['bytes32','address','uint256'], [Web3.keccak(pack1), ep_addr, w3.eth.chain_id])
+    e_msg = eth_account.messages.encode_defunct(Web3.keccak(pack2))
+    signer_acct = eth_account.account.Account.from_key(signer_key)
+    sig = signer_acct.sign_message(e_msg)
+    user_op['signature'] = Web3.to_hex(sig.signature)
+    return user_op
+
+# +------------------------------------------------------+
 
 def vprint(*a):
     """Conditionally print console messages"""
@@ -47,7 +121,7 @@ def build_op(to_contract, value_in_wei, initcode_hex, calldata_hex):
     if args.ep_version == "v7":
         p = {
             'sender':u_addr,
-            'nonce': aa.aa_nonce(u_addr, 0),
+            'nonce': aa_nonce(u_addr, 0),
             'initCode':initcode_hex,
             'callData': Web3.to_hex(ex_call),
             'callGasLimit': "0x0",
@@ -61,7 +135,7 @@ def build_op(to_contract, value_in_wei, initcode_hex, calldata_hex):
     else:
         p = {
             'sender':u_addr,
-            'nonce': aa.aa_nonce(u_addr, 0),
+            'nonce': aa_nonce(u_addr, 0),
             'initCode':initcode_hex,
             'callData': Web3.to_hex(ex_call),
             'callGasLimit': "0x0",
@@ -117,9 +191,9 @@ def estimate_op(p):
 def submit_op(base_op):
     """Wrapper to sign and submit a UserOperation, waiting for a receipt"""
     if args.ep_version == "v7":
-        signed_op = aa.sign_v7_op(base_op, args.private_key)
+        signed_op = sign_v7_op(base_op, args.private_key)
     else:
-        signed_op = aa.sign_op(base_op, args.private_key)
+        signed_op = sign_v6_op(base_op, args.private_key)
 
     vprint("Op to submit:", signed_op)
     vprint()
@@ -225,8 +299,6 @@ if args.ep_version == "v7":
     vprint(f"Using v0.7 EntryPoint address: {ep_addr}")
 else:
     vprint(f"Using v0.6 EntryPoint address: {ep_addr}")
-
-aa = aa_rpc(ep_addr, w3, args.bundler_rpc)
 
 vprint("gasPrices", w3.eth.gas_price, w3.eth.max_priority_fee)
 
