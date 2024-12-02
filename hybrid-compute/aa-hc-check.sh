@@ -28,7 +28,7 @@ REG=`cast call --rpc-url=$NODE_HTTP $HC_HELPER_ADDR "RegisteredCallers(address)"
 cast abi-decode "function()(address,string,uint256)" $REG
 
 # Arbitrary bytes32 key
-SOME_B32 = 0xd80bf0a36ceac0f76e27b53ef27184753b88e8e3964eab6fbfe5783c888e10dc
+SOME_B32=0xd80bf0a36ceac0f76e27b53ef27184753b88e8e3964eab6fbfe5783c888e10dc
 
 echo -n "Should be unregistered caller: "
 cast call --rpc-url=$NODE_HTTP $HC_HELPER_ADDR \
