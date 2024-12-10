@@ -444,6 +444,9 @@ env_vars['TEST_SPORTS_BETTING'] = TEST_SPORTS_BETTING.address
 env_vars['TEST_KYC'] = KYC.address
 env_vars['TEST_TOKEN_PRICE'] = TEST_TOKEN_PRICE.address
 
+# Other
+env_vars['BOBA_TOKEN'] = boba_token
+
 with open(".env", "w", encoding="ascii") as f:
     for k in env_vars.items():
         f.write(f"{k[0]}={k[1]}\n")

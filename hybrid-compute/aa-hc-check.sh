@@ -3,6 +3,7 @@
 set -e
 
 echo "Using environment variables:"
+echo "BOBA_TOKEN=$BOBA_TOKEN"
 echo "DEPLOY_ADDR=$DEPLOY_ADDR"
 echo "CLIENT_ADDR=$CLIENT_ADDR"
 echo "NODE_HTTP=$NODE_HTTP"
@@ -10,17 +11,25 @@ echo "HC_HELPER_ADDR=$HC_HELPER_ADDR"
 echo "OC_HYBRID_ACCOUNT=$OC_HYBRID_ACCOUNT"
 echo "TEST_HYBRID=$TEST_HYBRID"
 
-echo "Checking Client account"
+echo "\n***Checking Client account***"
 echo -n "Owner: "
 cast call --rpc-url=$NODE_HTTP $CLIENT_ADDR "owner()"
-echo -n "Balance: "
+echo -n "ETH Balance: "
 cast balance -e --rpc-url=$NODE_HTTP $CLIENT_ADDR
+echo -n "BOBA Balance (wei): "
+cast call --rpc-url=$NODE_HTTP $BOBA_TOKEN "balanceOf(address)" $CLIENT_ADDR
 echo -n "EntryPoint: "
 cast call --rpc-url=$NODE_HTTP $CLIENT_ADDR "entryPoint()"
 
 echo "\n*** Checking HCHelper ***"
 echo -n "Owner: "
 cast call --rpc-url=$NODE_HTTP $HC_HELPER_ADDR "owner()"
+echo -n "ETH Balance: "
+cast balance -e --rpc-url=$NODE_HTTP $HC_HELPER_ADDR
+echo -n "BOBA Balance (wei): "
+cast call --rpc-url=$NODE_HTTP $BOBA_TOKEN "balanceOf(address)" $HC_HELPER_ADDR
+echo -n "Price per credit (wei): "
+cast call --rpc-url=$NODE_HTTP $HC_HELPER_ADDR "pricePerCall()"
 
 echo "HybridAccount Registration (owner / URL / credits): "
 REG=`cast call --rpc-url=$NODE_HTTP $HC_HELPER_ADDR "RegisteredCallers(address)" \
@@ -49,7 +58,14 @@ cast call --rpc-url=$NODE_HTTP $HC_HELPER_ADDR \
     || true
 
 echo "\n*** Checking HybridAccount ***"
-
+echo -n "Owner: "
+cast call --rpc-url=$NODE_HTTP $OC_HYBRID_ACCOUNT "owner()"
+echo -n "ETH Balance: "
+cast balance -e --rpc-url=$NODE_HTTP $OC_HYBRID_ACCOUNT
+echo -n "BOBA Balance (wei): "
+cast call --rpc-url=$NODE_HTTP $BOBA_TOKEN "balanceOf(address)" $OC_HYBRID_ACCOUNT
+echo -n "EntryPoint: "
+cast call --rpc-url=$NODE_HTTP $OC_HYBRID_ACCOUNT "entryPoint()"
 echo -n "Should be Permission denied: "
 cast call --rpc-url=$NODE_HTTP $OC_HYBRID_ACCOUNT \
     --from $DEPLOY_ADDR \
