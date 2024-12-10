@@ -37,7 +37,8 @@ use super::{
     router::EntryPointRouter,
 };
 use crate::types::{
-    RpcGasEstimate, RpcGasEstimateV0_6, RpcUserOperationByHash, RpcUserOperationReceipt,
+    RpcGasEstimate, RpcGasEstimateV0_6, RpcGasEstimateV0_7, RpcUserOperationByHash,
+    RpcUserOperationReceipt,
 };
 
 /// Settings for the `eth_` API
@@ -62,7 +63,7 @@ impl Settings {
 const VG_PAD: i32 = 20000;
 
 // FIXME - Workaround for another occasional failure.
-const PVG_PAD: i32 = 5000;
+const PVG_PAD: i32 = 10000;
 
 pub(crate) struct EthApi<P> {
     pub(crate) chain_spec: ChainSpec,
@@ -525,9 +526,18 @@ where
             Ok(ref estimate) => {
                 if let RpcGasEstimate::V0_6(estimate6) = estimate {
                     return Ok(RpcGasEstimateV0_6 {
-                        pre_verification_gas: estimate6.pre_verification_gas,
+                        pre_verification_gas: estimate6.pre_verification_gas + PVG_PAD,
                         verification_gas_limit: estimate6.verification_gas_limit + VG_PAD,
                         call_gas_limit: estimate6.call_gas_limit,
+                    }
+                    .into());
+                } else if let RpcGasEstimate::V0_7(estimate7) = estimate {
+                    return Ok(RpcGasEstimateV0_7 {
+                        pre_verification_gas: estimate7.pre_verification_gas + PVG_PAD,
+                        verification_gas_limit: estimate7.verification_gas_limit + VG_PAD,
+                        call_gas_limit: estimate7.call_gas_limit,
+                        paymaster_verification_gas_limit: estimate7
+                            .paymaster_verification_gas_limit,
                     }
                     .into());
                 }
@@ -552,6 +562,8 @@ where
                         let msg = "HC04: Failed to verify trigger event".to_owned();
                         return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
                     }
+                } else {
+                    println!("HC trigger prefix not detected in revert data");
                 }
             }
             Err(_) => {}
