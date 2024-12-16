@@ -84,6 +84,13 @@ TEST_RAINFALL_INSURANCE = w3.eth.contract(
 
 print("EP at", EP.address)
 
+boba_token = os.environ['BOBA_TOKEN']
+
+def boba_balance(addr):
+    """Returns the Boba token balance of an address"""
+    bal_calldata = selector("balanceOf(address)") + ethabi.encode(['address'], [addr])
+    bal = w3.eth.call({'to':boba_token, 'data':bal_calldata})
+    return Web3.to_int(bal)
 
 def show_balances():
     print("CLIENT_ADDR", EP.functions.getDepositInfo(
@@ -92,6 +99,9 @@ def show_balances():
         bundler_addr).call(), w3.eth.get_balance(bundler_addr))
     print("OC_HYBRID_ACCOUNT ", EP.functions.getDepositInfo(
         HA.address).call(), w3.eth.get_balance(HA.address))
+    print("Helper BOBA token:", boba_balance(HH.address))
+    print("HybridAcct BOBA token:", boba_balance(HA.address))
+    print("Client BOBA token:", boba_balance(u_account))
 
 # -------------------------------------------------------------
 

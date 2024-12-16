@@ -174,6 +174,10 @@ class aa_rpc(aa_utils):
                 break
             if 'error' in response.json():
                 emsg = response.json()['error']['message']
+                if emsg == "replacement underpriced":
+                    print("*** Retrying with increased maxPriorityFeePerGas")
+                    op['maxPriorityFeePerGas'] += 1
+                    time.sleep(5)
                 # Workaround for sending debug_traceCall to unsynced node
                 if not re.search(r'message: block 0x.{64} not found', emsg):
                     break
@@ -188,7 +192,7 @@ class aa_rpc(aa_utils):
         op_hash = {}
         op_hash['hash'] = response.json()['result']
         timeout = True
-        for _ in range(100):
+        for _ in range(500):
             print("Waiting for receipt...")
             time.sleep(10)
             op_receipt = requests.post(self.bundler_url, json=request(
