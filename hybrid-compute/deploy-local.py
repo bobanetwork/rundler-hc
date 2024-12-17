@@ -389,7 +389,7 @@ aa = aa_rpc(ep_addr, w3, None)
 HH = load_contract(w3, 'HCHelper', OUT_PREFIX + "HCHelper.sol/HCHelper.json", hh_addr)
 l2_util.approve_token(boba_token, HH.address, deploy_addr, deploy_key)
 
-tx = HH.functions.SetPrice(Web3.to_wei(0.1,'ether')). build_transaction({
+tx = HH.functions.SetPaymentInfo(boba_token, Web3.to_wei(0.1,'ether'), 1000000). build_transaction({
     'from': deploy_addr,
 })
 l2_util.sign_and_submit(tx, deploy_key)

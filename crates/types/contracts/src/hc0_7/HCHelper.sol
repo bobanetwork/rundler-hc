@@ -4,9 +4,10 @@ pragma solidity ^0.8.12;
 import "account-abstraction/v0_7/interfaces/INonceManager.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
-contract HCHelper is ReentrancyGuard, Ownable {
+contract HCHelper is ReentrancyGuard, UUPSUpgradeable, Initializable {
     using SafeERC20 for IERC20;
 
     event SystemAccountSet(address oldAccount, address newAccount);
@@ -16,15 +17,26 @@ contract HCHelper is ReentrancyGuard, Ownable {
     // Response data is stored here by PutResponse() and then consumed by TryCallOffchain().
     mapping(bytes32=>bytes)  ResponseCache;
 
+    // AA EntryPoint
+    address public immutable entryPoint;
+
+    // Owner
+    address public owner;
+
+    // Account which is used to insert system error responses. Currently a single
+    // address but could be extended to a list of authorized accounts if needed.
+    address public systemAccount;
+
     // BOBA token address
     address public tokenAddr;
 
     // Token amount required to purchase each prepaid credit (may be 0 for testing)
     uint256 public pricePerCall;
 
-    // Account which is used to insert system error responses. Currently a single
-    // address but could be extended to a list of authorized accounts if needed.
-    address public systemAccount;
+    // Limit on the maximum credit balance which an account may hold, enforced
+    // when purchasing credits. This allows system testing or temporary promotions
+    // with a low or zero credit price.
+    uint64 public maxCredits;
 
     // Data stored per RegisteredCaller
     struct callerInfo {
@@ -36,13 +48,29 @@ contract HCHelper is ReentrancyGuard, Ownable {
     // Contracts which are allowed to use Hybrid Compute.
     mapping(address=>callerInfo) public RegisteredCallers;
 
-    // AA EntryPoint
-    address immutable entryPoint;
+
+    modifier onlyOwner() {
+        _onlyOwner();
+        _;
+    }
+    function _onlyOwner() internal view {
+        require(msg.sender == owner || msg.sender == address(this), "only owner");
+    }
 
     // Constructor
-    constructor(address _entryPoint, address _tokenAddr, address _owner) Ownable(_owner) {
+    constructor(address _entryPoint) {
 	entryPoint = _entryPoint;
-	tokenAddr = _tokenAddr;
+    }
+
+    // Set the initial owner
+    function initialize(address _owner) public virtual initializer {
+        owner = _owner;
+    }
+
+    // Allow upgrade through UUPSUpgradeable
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        (newImplementation);
+        _onlyOwner();
     }
 
     // Change the SystemAccount address (used for error responses)
@@ -59,17 +87,22 @@ contract HCHelper is ReentrancyGuard, Ownable {
         emit RegisteredUrl(contract_addr, url);
     }
 
-    // Set or change the per-call token price (0 is allowed). Does not affect
-    // existing credit balances, only applies to new AddCredit() calls.
-    function SetPrice(uint256 _pricePerCall) public onlyOwner {
+    // Set or change the per-call token price (0 is allowed), token,
+    // and maximum credit balance. Does not affect existing balances,
+    // only new AddCredit() purchases.
+    function SetPaymentInfo(address _tokenAddr, uint256 _pricePerCall, uint64 _maxCredits) public onlyOwner {
+	tokenAddr = _tokenAddr;
 	pricePerCall = _pricePerCall;
+        maxCredits = _maxCredits;
     }
 
     // Purchase credits allowing the specified contract to perform HC calls.
     // The token cost is (pricePerCall() * numCredits) and is non-refundable
     function AddCredit(address contract_addr, uint256 numCredits) public nonReentrant {
+        require(tokenAddr != address(0), "Payment info not initialized");
         uint256 tokenPrice = numCredits * pricePerCall;
         RegisteredCallers[contract_addr].credits += numCredits;
+        require(RegisteredCallers[contract_addr].credits <= maxCredits, "Purchase exceeds maxCredits limit");
         IERC20(tokenAddr).safeTransferFrom(msg.sender, address(this), tokenPrice);
     }
 

@@ -1,27 +1,28 @@
 // SPDX-License-Identifier: UNLICENSED
+// forge script --json --broadcast --via-ir --rpc-url <url> --contracts src/hc0_7 \
+//   --remappings @openzeppelin/=lib/openzeppelin-contracts-versions/v5_0
+//   --verifier-url <vfy> \
+//   hc_scripts/CoreDeploy_v7.sol
+
 pragma solidity ^0.8.23;
 
 import "forge-std/Script.sol";
 import "lib/account-abstraction-versions/v0_7/contracts/core/EntryPoint.sol";
 import "src/hc0_7/HCHelper.sol";
 import "src/hc0_7/HybridAccountFactory.sol";
-import "lib/account-abstraction-versions/v0_7/contracts/samples/SimpleAccountFactory.sol";
+
 import "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
-contract LocalDeploy is Script {
+contract CoreDeploy is Script {
     function run() external
-        returns (address[5] memory) {
+        returns (address[4] memory) {
         address deployAddr = vm.envAddress("DEPLOY_ADDR");
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address hcSysOwner = vm.envAddress("HC_SYS_OWNER");
-        require (hcSysOwner != address(0), "HC_SYS_OWNER not set");
-        uint256 deploySalt = vm.envOr("DEPLOY_SALT",uint256(0)); // Change this to force redeployment of contracts
-
-        address bobaAddr = vm.envOr("BOBA_TOKEN", 0x4200000000000000000000000000000000000023);
+        uint256 deploySalt = vm.envUint("DEPLOY_SALT");
 
         EntryPoint ept;
         HCHelper helper;
-        SimpleAccountFactory saf;
         HybridAccountFactory haf;
         HybridAccount ha0;
 
@@ -33,35 +34,21 @@ contract LocalDeploy is Script {
         // EntryPointAddr is hard-coded for the v0.7 implementation
         ept = EntryPoint(payable(0x0000000071727De22E5E9d8BAf0edAc6f37da032));
 
-        {
-            address helperAddr = vm.envOr("HC_HELPER_ADDR", 0x0000000000000000000000000000000000000000);
-            if (helperAddr != address(0) && helperAddr.code.length > 0) {
-                helper = HCHelper(helperAddr);
-            } else {
-                HCHelper helperImpl = new HCHelper{salt: salt_val}(address(ept));
+        HCHelper helperImpl = new HCHelper{salt: salt_val}(address(ept));
 
-                TransparentUpgradeableProxy hProxy = new TransparentUpgradeableProxy(
-                  address(helperImpl),
-                  hcSysOwner,
-                  abi.encodeCall(HCHelper.initialize, (deployAddr))
-                );
-                helper = HCHelper(address(hProxy));
-            }
-        }
-        {
-            address safAddr = vm.envOr("SA_FACTORY_ADDR", 0x0000000000000000000000000000000000000000);
-            if (safAddr != address(0) && safAddr.code.length > 0) {
-                saf = SimpleAccountFactory(safAddr);
-            } else {
-                saf = new SimpleAccountFactory(ept);
-            }
-        }
+        TransparentUpgradeableProxy hProxy = new TransparentUpgradeableProxy{salt: salt_val}(
+          address(helperImpl),
+          hcSysOwner,
+          abi.encodeCall(HCHelper.initialize, (deployAddr))
+        );
+        helper = HCHelper(address(hProxy));
+
         {
             address hafAddr = vm.envOr("HA_FACTORY_ADDR", 0x0000000000000000000000000000000000000000);
             if (hafAddr != address(0) && hafAddr.code.length > 0) {
                 haf = HybridAccountFactory(hafAddr);
             } else {
-                haf = new HybridAccountFactory(ept, address(helper));
+                haf = new HybridAccountFactory{salt: salt_val}(ept, address(helper));
             }
         }
         {
@@ -82,6 +69,6 @@ contract LocalDeploy is Script {
         }
 
         vm.stopBroadcast();
-        return [address(ept),address(helper), address(saf), address(haf), address(ha0)];
+        return [address(ept),address(helper), address(haf), address(ha0)];
     }
 }
