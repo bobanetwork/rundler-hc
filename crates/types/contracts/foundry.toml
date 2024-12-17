@@ -13,3 +13,6 @@ remappings = [
     'account-abstraction/v0_6=lib/account-abstraction-versions/v0_6/contracts/',
     'account-abstraction/v0_7=lib/account-abstraction-versions/v0_7/contracts/',
 ]
+
+[etherscan]
+boba_sepolia = {key = "verifyContract", chain = 28882, url = "https://api.routescan.io/v2/network/testnet/evm/28882/etherscan" }
