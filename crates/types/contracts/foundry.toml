@@ -16,3 +16,4 @@ remappings = [
 
 [etherscan]
 boba_sepolia = {key = "verifyContract", chain = 28882, url = "https://api.routescan.io/v2/network/testnet/evm/28882/etherscan" }
+boba_mainnet = {key = "verifyContract", chain = 288, url = "https://api.routescan.io/v2/network/mainnet/evm/288/etherscan" }
