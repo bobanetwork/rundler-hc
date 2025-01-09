@@ -5,12 +5,13 @@ import "forge-std/Script.sol";
 import "lib/account-abstraction-versions/v0_7/contracts/core/EntryPoint.sol";
 import "src/hc0_7/HCHelper.sol";
 import "src/hc0_7/HybridAccountFactory.sol";
+import "src/hc0_7/SimplePaymaster.sol";
 import "lib/account-abstraction-versions/v0_7/contracts/samples/SimpleAccountFactory.sol";
 import "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 contract LocalDeploy is Script {
     function run() external
-        returns (address[5] memory) {
+        returns (address[6] memory) {
         address deployAddr = vm.envAddress("DEPLOY_ADDR");
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address hcSysOwner = vm.envAddress("HC_SYS_OWNER");
@@ -24,9 +25,11 @@ contract LocalDeploy is Script {
         SimpleAccountFactory saf;
         HybridAccountFactory haf;
         HybridAccount ha0;
+        SimplePaymaster pm;
 
         bytes32 salt_val = bytes32(deploySalt);
         uint112 min_deposit = 0.001 ether;
+        uint256 pm_fund = 0.1 ether; // Currently uses this same value for staking
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -81,7 +84,21 @@ contract LocalDeploy is Script {
             payable(address(ha0)).transfer(min_deposit - address(ha0).balance);
         }
 
+        {
+            SimplePaymaster.TokenPaymasterConfig memory pm_cfg;
+            pm_cfg.priceMarkup = 1e26;
+            pm_cfg.minEntryPointBalance = 0;
+            pm_cfg.refundPostopCost = 10; // TODO figure out a suitable value
+            pm_cfg.priceMaxAge = type(uint48).max;
+
+            pm = new SimplePaymaster{salt: salt_val}(IERC20Metadata(address(0)),ept,IERC20(address(0)),pm_cfg,deployAddr, IERC20(bobaAddr));
+            pm.setPrice(5e25);
+            payable(address(pm)).transfer(pm_fund);
+            ept.depositTo{value:pm_fund}(address(pm));
+            pm.addStake{value:pm_fund}(3600);
+        }
+
         vm.stopBroadcast();
-        return [address(ept),address(helper), address(saf), address(haf), address(ha0)];
+        return [address(ept),address(helper), address(saf), address(haf), address(ha0), address(pm)];
     }
 }

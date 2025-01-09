@@ -41,6 +41,10 @@ U_ACCT = os.environ['CLIENT_ADDR']
 assert len(U_ACCT) == 42
 u_account = Web3.to_checksum_address(U_ACCT)
 
+PM_ADDR = os.environ['SIMPLE_PM']
+if PM_ADDR:
+  assert PM_ADDR == Web3.to_checksum_address(PM_ADDR)
+
 # -------------------------------------------------------------
 
 gasFees = {}

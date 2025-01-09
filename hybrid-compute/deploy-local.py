@@ -360,7 +360,7 @@ if boba_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
         ['address','address','uint256','uint32','bytes'], [
           boba_l1_addr,
           boba_token,
-          Web3.to_wei(2 * FUND_MIN,'ether'),
+          Web3.to_wei(200 * FUND_MIN,'ether'),
           4000000,
           Web3.to_bytes(hexstr="0x")
         ])
@@ -382,7 +382,7 @@ fund_addr(env_vars['BUNDLER_ADDR'])
 if 'BUNDLER_ADDR_V6' in env_vars:
     fund_addr(env_vars['BUNDLER_ADDR_V6'])
 
-(ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr) = deploy_base()
+(ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr, pm_addr) = deploy_base()
 
 aa = aa_rpc(ep_addr, w3, None)
 
@@ -396,6 +396,15 @@ l2_util.sign_and_submit(tx, deploy_key)
 
 client_addr = deploy_account(saf_addr, env_vars['CLIENT_OWNER'])
 fund_addr(client_addr)
+
+t_calldata = selector("transfer(address,uint256)") + \
+    ethabi.encode(['address','uint256'], [client_addr, Web3.to_wei(10,'ether')])
+t_tx = {
+    'from':deploy_addr,
+    'data':t_calldata,
+    'to':boba_token,
+}
+r = l2_util.sign_and_submit(t_tx, deploy_key)
 
 ha1_addr = deploy_account(haf_addr, env_vars['OC_OWNER'])
 fund_addr(ha1_addr)
@@ -415,6 +424,13 @@ TEST_TOKEN_PRICE = load_contract(w3, 'TestTokenPrice', OUT_PREFIX + "TestTokenPr
 
 for a in example_addrs:
     permit_caller(HA, a)
+
+# Approve paymaster
+    approve_calldata = selector("approve(address,uint256)") + \
+        ethabi.encode(['address','uint256'], [pm_addr, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
+    ex_calldata = selector("execute(address,uint256,bytes)") + \
+        ethabi.encode(['address','uint256','bytes'], [boba_token, 0, approve_calldata])
+    submit_as_v7_op(client_addr, ex_calldata, env_vars['CLIENT_PRIVKEY'])
 
 LOCAL_URL = "http://" + str(local_ip) + ":1234/hc"
 register_url(ha1_addr, LOCAL_URL)
@@ -446,6 +462,7 @@ env_vars['TEST_TOKEN_PRICE'] = TEST_TOKEN_PRICE.address
 
 # Other
 env_vars['BOBA_TOKEN'] = boba_token
+env_vars['SIMPLE_PM'] = pm_addr
 
 with open(".env", "w", encoding="ascii") as f:
     for k in env_vars.items():

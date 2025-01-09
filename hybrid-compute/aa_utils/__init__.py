@@ -39,7 +39,11 @@ class aa_utils:
         """Signs a UserOperation, returning a modified op containing a 'signature' field."""
         op = dict(user_op) # Derived fields are added to 'op' prior to hashing
 
-        assert 'paymaster' not in op # not yet implemented
+        if 'paymaster' in op:
+            op['paymasterAndData'] = op['paymaster'] + \
+                op['paymasterVerificationGasLimit'][2:].zfill(32) + \
+                op['paymasterPostOpGasLimit'][2:].zfill(32)
+            # TODO - append paymasterData if present
 
         # The deploy-local script supplies the packed values prior to signature, as it bypasses the bundler.
         # For normal UserOperations the fields are derived here
@@ -88,7 +92,7 @@ class aa_rpc(aa_utils):
         ret = self.w3.eth.call({'to':self.EP_addr,'data':calldata})
         return Web3.to_hex(ret)
 
-    def build_op(self, sender, target, value, calldata, nonce_key=0):
+    def build_op(self, sender, target, value, calldata, nonce_key=0, paymaster=None):
         """Builds a UserOperation to call an account's Execute method, passing specified parameters."""
 
         # Note - currently Tip affects the preVerificationGas estimate due to
@@ -117,13 +121,14 @@ class aa_rpc(aa_utils):
            'preVerificationGas': "0x0",
            'maxFeePerGas': Web3.to_hex(fee),
            'maxPriorityFeePerGas': Web3.to_hex(tip),
-           #paymaster - none
-           #paymasterVerificationGasLimit - none
-           #paymasterPostOpGasLimit - none
-           #paymasterData - none
            # Dummy signature, per Alchemy AA documentation
            'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
         }
+        if paymaster:
+          op['paymaster'] = paymaster
+          op['paymasterData'] = "0x"
+          op['paymasterVerificationGasLimit'] = "0x10002"
+          op['paymasterPostOpGasLimit'] = "0x10000"
         print("Built userOperation", op)
         return op
 
@@ -131,7 +136,6 @@ class aa_rpc(aa_utils):
         """ Wrapper to call eth_estimateUserOperationGas() and update the op.
             Allows limits to be increased in cases where a bundler is
             providing insufficient estimates. Returns success flag + new op"""
-        
         est_params = [op, self.EP_addr]
 
         response = requests.post(
