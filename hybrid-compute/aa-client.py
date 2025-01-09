@@ -309,17 +309,20 @@ u_owner = owner_wallet.address
 acct_balance = w3.eth.get_balance(u_addr)
 vprint(f"Using Account contract {u_addr} with owner {u_owner} balance {acct_balance}")
 
-acct_owner_hex = Web3.to_hex(w3.eth.call({'to':u_addr,'data':selector("owner()")}))
-acct_owner = Web3.to_checksum_address("0x" + str(acct_owner_hex)[26:])
-if acct_owner != u_owner:
-    print(f"ERROR: Account owner() {acct_owner} does not match private key for {u_owner}")
-    sys.exit(1)
+try: # Fails if account isn't deployed yet
+    acct_owner_hex = Web3.to_hex(w3.eth.call({'to':u_addr,'data':selector("owner()")}))
+    acct_owner = Web3.to_checksum_address("0x" + str(acct_owner_hex)[26:])
+    if acct_owner != u_owner:
+        print(f"ERROR: Account owner() {acct_owner} does not match private key for {u_owner}")
+        sys.exit(1)
+    acct_ep_hex = Web3.to_hex(w3.eth.call({'to':u_addr,'data':selector("entryPoint()")}))
+    acct_ep = Web3.to_checksum_address("0x" + str(acct_ep_hex)[26:])
+    if acct_ep != ep_addr:
+        print(f"ERROR: Account entryPoint() {acct_ep} does not match {ep_addr}")
+        sys.exit(1)
+except Exception as e:
+    print("failed:", e)
 
-acct_ep_hex = Web3.to_hex(w3.eth.call({'to':u_addr,'data':selector("entryPoint()")}))
-acct_ep = Web3.to_checksum_address("0x" + str(acct_ep_hex)[26:])
-if acct_ep != ep_addr:
-    print(f"ERROR: Account entryPoint() {acct_ep} does not match {ep_addr}")
-    sys.exit(1)
 
 if acct_balance < args.value:
     print(f"ERROR: Balance {acct_balance} is less then requested value {args.value}")
