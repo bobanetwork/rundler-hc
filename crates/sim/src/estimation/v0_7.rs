@@ -82,7 +82,6 @@ where
             .map_err(anyhow::Error::from)?;
 
         let pre_verification_gas = self.estimate_pre_verification_gas(&op).await?;
-
         let full_op = op
             .clone()
             .into_user_operation_builder(
@@ -268,7 +267,6 @@ where
                 .verification_gas_limit(gas)
                 .max_fee_per_gas(fee)
                 .max_priority_fee_per_gas(fee)
-                .paymaster_post_op_gas_limit(U128::zero())
                 .call_gas_limit(U128::zero())
                 .build()
         };
@@ -313,7 +311,6 @@ where
                 .max_fee_per_gas(fee)
                 .max_priority_fee_per_gas(fee)
                 .paymaster_verification_gas_limit(gas)
-                .paymaster_post_op_gas_limit(U128::zero())
                 .call_gas_limit(U128::zero())
                 .build()
         };
