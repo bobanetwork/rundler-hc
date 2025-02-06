@@ -17,6 +17,8 @@ contract LocalDeploy is Script {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
 
         address payable ha1Addr = payable(vm.envAddress("OC_HYBRID_ACCOUNT"));
+        bytes32 ocRandomKeyHash = bytes32(vm.envUint("OC_RANDOM_KEYHASH"));
+        require(ocRandomKeyHash != bytes32(0), "randomKeyHash missing");
         HybridAccount ha1;
 
         address[7] memory ret;
@@ -25,7 +27,7 @@ contract LocalDeploy is Script {
 
         ret[0] = address(new AuctionFactory(ha1Addr));
         ret[1] = address(new TestCaptcha(ha1Addr));
-        ret[2] = address(new TestHybrid(ha1Addr));
+        ret[2] = address(new TestHybrid(ha1Addr,ocRandomKeyHash));
         ret[3] = address(new RainfallInsurance(ha1Addr));
         ret[4] = address(new SportsBetting(ha1Addr));
         ret[5] = address(new TestKyc(ha1Addr));

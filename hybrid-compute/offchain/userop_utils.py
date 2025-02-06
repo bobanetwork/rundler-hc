@@ -141,7 +141,7 @@ def ParseReceipt(op_receipt, log_topic=None):
     n = 0
     for i in tx_rcpt['logs']:
         print("log", n, i['topics'][0], i['data'])
-        if log_topic and Web3.to_hex(log_topic) == i['topics'][0]:
+        if log_topic and log_topic == Web3.to_int(hexstr=i['topics'][0]):
             log_ret = (i['topics'], i['data'])
         n += 1
     if 'l1GasUsed' not in tx_rcpt:

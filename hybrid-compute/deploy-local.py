@@ -300,9 +300,14 @@ def deploy_base():
     print("Deployed base contracts:", addrs)
     return addrs.split(',')
 
+# Used for HC_VRF inside TestHybrid
+oc_random_secret  = "0x091bda8b27b681ee8de4d0c2e6743e1339b986e22041a2de2cd5d57857a77d65"
+oc_random_keyhash = "0x42856baa9213a4e84d230e72c7a67ed6627d8872cc2f3cfcd4982b90ede8b70d"
+
 def deploy_examples(hybrid_acct_addr):
     cmd_env = {}
     cmd_env['OC_HYBRID_ACCOUNT'] = hybrid_acct_addr
+    cmd_env['OC_RANDOM_KEYHASH'] = oc_random_keyhash
     if ep7:
         addrs = deploy_forge("hc_scripts/ExampleDeploy_v7.s.sol", cmd_env)
     else:
@@ -463,6 +468,8 @@ env_vars['TEST_TOKEN_PRICE'] = TEST_TOKEN_PRICE.address
 # Other
 env_vars['BOBA_TOKEN'] = boba_token
 env_vars['SIMPLE_PM'] = pm_addr
+env_vars['OC_RANDOM_SECRET']  = oc_random_secret
+env_vars['OC_RANDOM_KEYHASH'] = oc_random_keyhash
 
 with open(".env", "w", encoding="ascii") as f:
     for k in env_vars.items():

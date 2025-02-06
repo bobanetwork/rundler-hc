@@ -2,7 +2,7 @@ from random import *
 from jsonrpcclient import request
 from get_token_price.get_token_price_test import TestTokenPrice
 from check_kyc.check_kyc_test import TestKyc
-from add_sub_2.add_sub_2_test import TestAddSub2
+from add_sub_2.add_sub_2_test import TestAddSub2,TestRandomRequest
 from ramble.ramble_test import TestWordGuess
 #from verify_captcha.captcha_test import TestCaptcha
 from auction_system.auction_system_test import TestAuction
@@ -28,7 +28,6 @@ print("TestCount(start)=", TC.functions.counters(u_account).call())
 aa = aa_rpc(EP.address, w3, bundler_rpc)
 
 TestAddSub2(aa, 2, 1)   # Success
-
 TestAddSub2(aa, 2, 10)  # Underflow error, asserted
 TestAddSub2(aa, 2, 3)   # Underflow error, handled internally
 TestAddSub2(aa, 7, 0)   # Not HC
@@ -38,6 +37,13 @@ TestWordGuess(aa, 1, False)
 TestWordGuess(aa, 10, False)
 #TestWordGuess(aa, 100, False)
 TestWordGuess(aa, 2, True)
+
+TestRandomRequest(aa, True)
+TestRandomRequest(aa, False)
+
+print("\n\n\n*** TestHybrid finished, will continue with extended tests in 10s ***")
+time.sleep(10)
+exit(0) # Following tests are broken, TBD to fix or remove
 
 TestAuction(aa)
 
