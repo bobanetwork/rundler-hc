@@ -2,7 +2,7 @@
 pragma solidity ^0.8.23;
 
 import "./HybridAccount.sol";
-import "./VRF.sol";
+import "../../lib/chainlink/VRF.sol";
 
 contract TestHybrid is VRF {
     mapping(address => uint256) public counters;
