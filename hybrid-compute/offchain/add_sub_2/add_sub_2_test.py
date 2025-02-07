@@ -21,8 +21,6 @@ def TestAddSub2(aa, a, b):
 
 def TestRandomRequest(aa, joint_random):
     print(f"\n  - - - - TestRandomRequest() - - - -")
-    print("TestCount(begin)=", TC.functions.counters(u_account).call())
-
 
     clientRandom = Web3.to_int(hexstr="0x0000111100000000000000000000000000000000000000000000000000001111")
     clientHash   = Web3.keccak(ethabi.encode(['uint256'],[clientRandom]))
@@ -33,7 +31,7 @@ def TestRandomRequest(aa, joint_random):
     else:
         count_call = selector("requestRandomWord()")
 
-    op = aa.build_op(u_account, TC.address, 0, count_call, nKey, PM_ADDR)
+    op = aa.build_op(u_account, VRF.address, 0, count_call, nKey, PM_ADDR)
 
     (success, op) = estimateOp(aa, op)
     if not success:
@@ -54,7 +52,7 @@ def TestRandomRequest(aa, joint_random):
         count_call = selector("revealRandomWord(bytes32)") + \
                      ethabi.encode(['bytes32'], [rid])
 
-    op = aa.build_op(u_account, TC.address, 0, count_call, nKey, PM_ADDR)
+    op = aa.build_op(u_account, VRF.address, 0, count_call, nKey, PM_ADDR)
 
     (success, op) = estimateOp(aa, op)
     if not success:
@@ -63,7 +61,3 @@ def TestRandomRequest(aa, joint_random):
     rcpt = aa.sign_submit_op(op, u_key)
     logs = ParseReceipt(rcpt, Web3.to_int(hexstr="0xe07ca074488e9cf5d6eceebff847343d15e3cfcf58a1707a9f29f26d9e05c63d"))
     print("Result = ", logs[0][2])
-
-
-
-    print("TestCount(end)=", TC.functions.counters(u_account).call())

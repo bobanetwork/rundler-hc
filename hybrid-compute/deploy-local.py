@@ -426,6 +426,7 @@ RAINFALL_INSURANCE = load_contract(w3, 'TestRainfallInsurance', OUT_PREFIX + "Te
 TEST_SPORTS_BETTING = load_contract(w3, 'TestSportsBetting', OUT_PREFIX + "TestSportsBetting.sol/SportsBetting.json", example_addrs[4])
 KYC = load_contract(w3, 'TestKyc', OUT_PREFIX + "TestKyc.sol/TestKyc.json", example_addrs[5])
 TEST_TOKEN_PRICE = load_contract(w3, 'TestTokenPrice', OUT_PREFIX + "TestTokenPrice.sol/TestTokenPrice.json", example_addrs[6])
+TEST_RANDOM = load_contract(w3, 'TestRandom', OUT_PREFIX + "TestRandom.sol/TestRandom.json", example_addrs[7])
 
 for a in example_addrs:
     permit_caller(HA, a)
@@ -464,6 +465,7 @@ env_vars['TEST_RAINFALL_INSURANCE'] = RAINFALL_INSURANCE.address
 env_vars['TEST_SPORTS_BETTING'] = TEST_SPORTS_BETTING.address
 env_vars['TEST_KYC'] = KYC.address
 env_vars['TEST_TOKEN_PRICE'] = TEST_TOKEN_PRICE.address
+env_vars['TEST_RANDOM'] = TEST_RANDOM.address
 
 # Other
 env_vars['BOBA_TOKEN'] = boba_token

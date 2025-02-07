@@ -73,6 +73,8 @@ HA = w3.eth.contract(address=os.environ['OC_HYBRID_ACCOUNT'],
                      abi=deployed['HybridAccount']['abi'])
 TC = w3.eth.contract(
     address=os.environ['TEST_HYBRID'], abi=deployed['TestHybrid']['abi'])
+VRF = w3.eth.contract(
+    address=os.environ['TEST_RANDOM'], abi=deployed['TestRandom']['abi'])
 KYC = w3.eth.contract(
     address=os.environ['TEST_KYC'], abi=deployed['TestKyc']['abi'])
 TFP = w3.eth.contract(

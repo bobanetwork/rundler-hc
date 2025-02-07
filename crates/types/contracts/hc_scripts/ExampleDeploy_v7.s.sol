@@ -10,10 +10,11 @@ import "src/hc0_7/TestRainfallInsurance.sol";
 import "src/hc0_7/TestSportsBetting.sol";
 import "src/hc0_7/TestKyc.sol";
 import "src/hc0_7/TestTokenPrice.sol";
+import "src/hc0_7/TestRandom.sol";
 
 contract LocalDeploy is Script {
     function run() external
-        returns (address[7] memory) {
+        returns (address[8] memory) {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
 
         address payable ha1Addr = payable(vm.envAddress("OC_HYBRID_ACCOUNT"));
@@ -21,17 +22,18 @@ contract LocalDeploy is Script {
         require(ocRandomKeyHash != bytes32(0), "randomKeyHash missing");
         HybridAccount ha1;
 
-        address[7] memory ret;
+        address[8] memory ret;
 
         vm.startBroadcast(deployerPrivateKey);
 
         ret[0] = address(new AuctionFactory(ha1Addr));
         ret[1] = address(new TestCaptcha(ha1Addr));
-        ret[2] = address(new TestHybrid(ha1Addr,ocRandomKeyHash));
+        ret[2] = address(new TestHybrid(ha1Addr));
         ret[3] = address(new RainfallInsurance(ha1Addr));
         ret[4] = address(new SportsBetting(ha1Addr));
         ret[5] = address(new TestKyc(ha1Addr));
         ret[6] = address(new TestTokenPrice(ha1Addr));
+        ret[7] = address(new TestRandom(ha1Addr,ocRandomKeyHash));
 
         vm.stopBroadcast();
         return ret;
