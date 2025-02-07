@@ -208,6 +208,14 @@ def register_url(caller, url):
         })
         l2_util.sign_and_submit(tx, deploy_key)
 
+def random_fees(fee, pay):
+    """Sets the token fee charged/paid by the VRF contract"""
+    print("Setting VRF fees")
+    tx = TEST_RANDOM.functions.SetFees(fee, pay).build_transaction({
+        'from': deploy_addr,
+    })
+    l2_util.sign_and_submit(tx, deploy_key)
+
 def fund_addr(addr):
     """Transfer funds to an address directly"""
     if w3.eth.get_balance(addr) == 0:
@@ -307,6 +315,7 @@ oc_random_keyhash = "0x42856baa9213a4e84d230e72c7a67ed6627d8872cc2f3cfcd4982b90e
 def deploy_examples(hybrid_acct_addr):
     cmd_env = {}
     cmd_env['OC_HYBRID_ACCOUNT'] = hybrid_acct_addr
+    cmd_env['BOBA_TOKEN'] = boba_token
     cmd_env['OC_RANDOM_KEYHASH'] = oc_random_keyhash
     if ep7:
         addrs = deploy_forge("hc_scripts/ExampleDeploy_v7.s.sol", cmd_env)
@@ -432,14 +441,23 @@ for a in example_addrs:
     permit_caller(HA, a)
 
 # Approve paymaster
-    approve_calldata = selector("approve(address,uint256)") + \
-        ethabi.encode(['address','uint256'], [pm_addr, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
-    ex_calldata = selector("execute(address,uint256,bytes)") + \
-        ethabi.encode(['address','uint256','bytes'], [boba_token, 0, approve_calldata])
-    submit_as_v7_op(client_addr, ex_calldata, env_vars['CLIENT_PRIVKEY'])
+approve_calldata = selector("approve(address,uint256)") + \
+    ethabi.encode(['address','uint256'], [pm_addr, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
+ex_calldata = selector("execute(address,uint256,bytes)") + \
+    ethabi.encode(['address','uint256','bytes'], [boba_token, 0, approve_calldata])
+submit_as_v7_op(client_addr, ex_calldata, env_vars['CLIENT_PRIVKEY'])
 
 LOCAL_URL = "http://" + str(local_ip) + ":1234/hc"
 register_url(ha1_addr, LOCAL_URL)
+
+# Approve random contract
+approve_calldata = selector("approve(address,uint256)") + \
+    ethabi.encode(['address','uint256'], [TEST_RANDOM.address, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
+ex_calldata = selector("execute(address,uint256,bytes)") + \
+    ethabi.encode(['address','uint256','bytes'], [boba_token, 0, approve_calldata])
+submit_as_v7_op(client_addr, ex_calldata, env_vars['CLIENT_PRIVKEY'])
+
+random_fees(Web3.to_wei(0.02, "ether"), Web3.to_wei(0.01, "ether"))
 
 with open("./contracts.json", "w", encoding="ascii") as f:
     f.write(json.dumps(deployed))

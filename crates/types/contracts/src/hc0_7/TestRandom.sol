@@ -3,24 +3,41 @@ pragma solidity ^0.8.23;
 
 import "./HybridAccount.sol";
 import "../../lib/chainlink/VRF.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
-contract TestRandom is VRF {
+contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
+    using SafeERC20 for IERC20;
+
+    // Constraints on the block distance between request and reveal
+    uint256 constant MIN_DISTANCE = 2;
+    uint256 constant MAX_DISTANCE = 255;
+
     address payable immutable hcAccount;
+    IERC20 immutable bobaToken;
+
+    address public owner;
+
+    // Payment is currently structured to collect a fixed token fee
+    // per request, and to pay a fixed amount to the HybridAccount
+    // prior to retrieving the offchain response. These amounts may
+    // be set to zero. The payPerCall mechanism is a workaround for
+    // a HybridAccount which is not configured to pull payments from
+    // its callers.
+    uint256 feePerCall;
+    uint256 payPerCall;
 
     event RandomRequest(bytes32 indexed requestId, address indexed clientAddress);
     event RandomResult (bytes32 indexed requestId, uint256 indexed result);
+    event TokenWithdrawal(address withdrawTo, uint256 amount);
 
     uint256 randIndex;
 
     // Key to verify VRF responses.
     // TODO: add a mechanism to update key, or add/remove in a list
     bytes32 randomKeyHash;
-
-    constructor(address payable _hcAccount, bytes32 _randomKeyHash) {
-      hcAccount = _hcAccount;
-      randIndex = 1;
-      randomKeyHash = _randomKeyHash;
-    }
 
     struct randRequest {
         uint256 blockNumber;
@@ -31,12 +48,49 @@ contract TestRandom is VRF {
     }
 
     mapping(bytes32=>randRequest) randRequests;
+    modifier onlyOwner() {
+        _onlyOwner();
+        _;
+    }
+
+    function _onlyOwner() internal view {
+        require(msg.sender == owner || msg.sender == address(this), "only owner");
+    }
+
+    //constructor
+    constructor(address payable _hcAccount, address _bobaToken) {
+        hcAccount = _hcAccount;
+        bobaToken = IERC20(_bobaToken);
+        randIndex = 1;
+    }
+
+    // Set the initial owner
+    function initialize(address _owner, bytes32 _randomKeyHash) public virtual initializer {
+        owner = _owner;
+        randomKeyHash = _randomKeyHash;
+    }
+
+    // Allow upgrade through UUPSUpgradeable
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        (newImplementation);
+        _onlyOwner();
+    }
+
+    // Set the Boba token prices per call
+    function SetFees(uint256 newFee, uint256 newPay) public onlyOwner {
+        feePerCall = newFee;
+        payPerCall = newPay;
+    }
 
     // Registers a jointly generated VRF request to be satisfied in a later block.
     // In this protocol the client provides its own random value which is XOR-ed
     // into the final result when revealed. The request contains a hash of the
     // client's random value.
-    function requestJointRandomWord(bytes32 clientHash) public returns (bytes32 requestId) {
+    function requestJointRandomWord(bytes32 clientHash) public nonReentrant returns (bytes32 requestId) {
+        if (feePerCall > 0) {
+            bobaToken.safeTransferFrom(msg.sender, address(this), feePerCall);
+        }
+
         // TODO: Collect payment in Boba token or other mechanism, cost TBD
         require(randomKeyHash != bytes32(0), "Public key hash not registered");
 
@@ -67,7 +121,7 @@ contract TestRandom is VRF {
 
     // Calls offchain VRF to satisfy a previous request. Verifies the proof using code
     // copied from Chainlink, then returns the computed result.
-    function revealJointRandomWord(bytes32 requestId, uint256 clientRandom) public returns (uint256 result)
+    function revealJointRandomWord(bytes32 requestId, uint256 clientRandom) public nonReentrant returns (uint256 result)
     {
         HybridAccount HA = HybridAccount(hcAccount);
         bytes32 userKey = bytes32(abi.encode(msg.sender, requestId));
@@ -75,8 +129,8 @@ contract TestRandom is VRF {
         randRequest memory req = randRequests[requestId];
         delete randRequests[requestId];
         require (req.blockNumber != 0, "Invalid requestId");
-        require (req.blockNumber + 4 <= block.number, "Insufficient block distance from request");
-        require (req.blockNumber + 1000 > block.number, "Stale request");
+        require (req.blockNumber + MIN_DISTANCE <= block.number, "Insufficient block distance from request");
+        require (req.blockNumber + MAX_DISTANCE > block.number, "Stale request");
         require (req.clientAddress == msg.sender, "Unauthorized caller");
 
         if (req.clientCommitment != bytes32(0)) {
@@ -86,6 +140,9 @@ contract TestRandom is VRF {
         }
 
         bytes memory hc_req = abi.encodeWithSignature("random(uint256,bytes32)", req.blockNumber, req.seed);
+        if (payPerCall > 0) {
+            bobaToken.safeTransfer(address(HA), payPerCall);
+        }
         (uint32 error, bytes memory ret) = HA.CallOffchain(userKey, hc_req);
 
         if (error != 0) {
@@ -109,5 +166,11 @@ contract TestRandom is VRF {
     function revealRandomWord(bytes32 requestId) public returns (uint256 result)
     {
         return revealJointRandomWord(requestId, 0);
+    }
+
+    // Allow the owner to withdraw tokens
+    function WithdrawTokens(uint256 amount, address withdrawTo) public onlyOwner nonReentrant {
+        emit TokenWithdrawal(withdrawTo, amount);
+        bobaToken.safeTransfer(withdrawTo, amount);
     }
 }
