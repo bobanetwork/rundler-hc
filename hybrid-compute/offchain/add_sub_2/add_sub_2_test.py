@@ -38,7 +38,7 @@ def TestRandomRequest(aa, joint_random):
         return
 
     rcpt = aa.sign_submit_op(op, u_key)
-    logs = ParseReceipt(rcpt, Web3.to_int(Web3.keccak(text="RandomRequest(bytes32,address)")))
+    logs = ParseReceipt(rcpt, Web3.keccak(text="RandomRequest(bytes32,address)"))
     rid = Web3.to_bytes(hexstr=logs[0][1])
     print("RID", Web3.to_hex(rid))
 
@@ -59,5 +59,5 @@ def TestRandomRequest(aa, joint_random):
         return
 
     rcpt = aa.sign_submit_op(op, u_key)
-    logs = ParseReceipt(rcpt, Web3.to_int(hexstr="0xe07ca074488e9cf5d6eceebff847343d15e3cfcf58a1707a9f29f26d9e05c63d"))
+    logs = ParseReceipt(rcpt, Web3.keccak(text="RandomResult(bytes32,uint256)"))
     print("Result = ", logs[0][2])

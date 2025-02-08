@@ -43,7 +43,6 @@ TestRandomRequest(aa, False)
 
 print("\n\n\n*** TestHybrid finished, will continue with extended tests in 10s ***")
 time.sleep(10)
-exit(0) # Following tests are broken, TBD to fix or remove
 
 TestAuction(aa)
 
