@@ -10,7 +10,11 @@ from fastecdsa import curve,keys,util,point
 from eth_keys import keys as ethkeys
 
 rand_key_hex = os.environ['OC_RANDOM_SECRET']
+oc_node_http = os.environ['OC_NODE_HTTP']
+
 assert len(rand_key_hex) == 66
+w3 = Web3(Web3.HTTPProvider(oc_node_http, request_kwargs={'timeout': 900}))
+assert w3.is_connected
 
 G = curve.secp256k1.G
 FIELD_SIZE = Web3.to_int(hexstr="0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F")
@@ -251,9 +255,6 @@ def offchain_random(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
 
         bn = dec[0]
         req_seed = Web3.to_hex(dec[1])
-
-        w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:9545", request_kwargs={'timeout': 900}))
-        assert w3.is_connected
 
         bh = Web3.to_hex(w3.eth.get_block(bn).hash)
         print("Block", bn, "Hash", bh, "req_seed", req_seed)

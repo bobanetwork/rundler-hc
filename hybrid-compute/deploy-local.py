@@ -490,6 +490,7 @@ env_vars['BOBA_TOKEN'] = boba_token
 env_vars['SIMPLE_PM'] = pm_addr
 env_vars['OC_RANDOM_SECRET']  = oc_random_secret
 env_vars['OC_RANDOM_KEYHASH'] = oc_random_keyhash
+env_vars['OC_NODE_HTTP'] = env_vars['NODE_HTTP']
 
 with open(".env", "w", encoding="ascii") as f:
     for k in env_vars.items():
