@@ -31,14 +31,16 @@ contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
 
     event RandomRequest(bytes32 indexed requestId, address indexed clientAddress);
     event RandomResult (bytes32 indexed requestId, uint256 indexed result);
+    event StaleRequestRemoved(bytes32 indexed requestId);
     event TokenWithdrawal(address withdrawTo, uint256 amount);
+    event KeyHashChanged(bytes32 indexed newKeyHash);
 
     uint256 randIndex;
 
     // Key to verify VRF responses.
-    // TODO: add a mechanism to update key, or add/remove in a list
     bytes32 randomKeyHash;
 
+    // Store the parameters of a random request
     struct randRequest {
         uint256 blockNumber;
         bytes32 pubkeyHash;
@@ -47,7 +49,9 @@ contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
         address clientAddress;
     }
 
+    // Pending requests
     mapping(bytes32=>randRequest) randRequests;
+
     modifier onlyOwner() {
         _onlyOwner();
         _;
@@ -74,6 +78,12 @@ contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
     function _authorizeUpgrade(address newImplementation) internal view override {
         (newImplementation);
         _onlyOwner();
+    }
+
+    // Replaces the public key hash. Does not affect existing requests.
+    function newKeyHash (bytes32 newHash) public onlyOwner {
+        randomKeyHash = newHash;
+        emit KeyHashChanged(newHash);
     }
 
     // Set the Boba token prices per call
@@ -166,6 +176,20 @@ contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
     function revealRandomWord(bytes32 requestId) public returns (uint256 result)
     {
         return revealJointRandomWord(requestId, 0);
+    }
+
+    // Administrative function to remove requests which were not satisfied
+    // and are no longer valid due to block distance from the request.
+    // Although not strictly required, this does provide a mechanism to reduce
+    // wasted storage space on the chain.
+    function RemoveStaleRequests(bytes32[] calldata requestIds) public onlyOwner {
+        uint256 i;
+        for (i=0; i < requestIds.length; i++) {
+            bytes32 req_id = requestIds[i];
+            require (randRequests[req_id].blockNumber + MAX_DISTANCE < block.number, "Request is not stale");
+            delete randRequests[req_id];
+            emit StaleRequestRemoved(req_id);
+        }
     }
 
     // Allow the owner to withdraw tokens
