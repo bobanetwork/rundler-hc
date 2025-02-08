@@ -208,6 +208,14 @@ def register_url(caller, url):
         })
         l2_util.sign_and_submit(tx, deploy_key)
 
+def random_fees(fee, pay):
+    """Sets the token fee charged/paid by the VRF contract"""
+    print("Setting VRF fees")
+    tx = TEST_RANDOM.functions.SetFees(fee, pay).build_transaction({
+        'from': deploy_addr,
+    })
+    l2_util.sign_and_submit(tx, deploy_key)
+
 def fund_addr(addr):
     """Transfer funds to an address directly"""
     if w3.eth.get_balance(addr) == 0:
@@ -300,9 +308,15 @@ def deploy_base():
     print("Deployed base contracts:", addrs)
     return addrs.split(',')
 
+# Used for HC_VRF inside TestHybrid
+oc_random_secret  = "0x091bda8b27b681ee8de4d0c2e6743e1339b986e22041a2de2cd5d57857a77d65"
+oc_random_keyhash = "0x42856baa9213a4e84d230e72c7a67ed6627d8872cc2f3cfcd4982b90ede8b70d"
+
 def deploy_examples(hybrid_acct_addr):
     cmd_env = {}
     cmd_env['OC_HYBRID_ACCOUNT'] = hybrid_acct_addr
+    cmd_env['BOBA_TOKEN'] = boba_token
+    cmd_env['OC_RANDOM_KEYHASH'] = oc_random_keyhash
     if ep7:
         addrs = deploy_forge("hc_scripts/ExampleDeploy_v7.s.sol", cmd_env)
     else:
@@ -421,19 +435,29 @@ RAINFALL_INSURANCE = load_contract(w3, 'TestRainfallInsurance', OUT_PREFIX + "Te
 TEST_SPORTS_BETTING = load_contract(w3, 'TestSportsBetting', OUT_PREFIX + "TestSportsBetting.sol/SportsBetting.json", example_addrs[4])
 KYC = load_contract(w3, 'TestKyc', OUT_PREFIX + "TestKyc.sol/TestKyc.json", example_addrs[5])
 TEST_TOKEN_PRICE = load_contract(w3, 'TestTokenPrice', OUT_PREFIX + "TestTokenPrice.sol/TestTokenPrice.json", example_addrs[6])
+TEST_RANDOM = load_contract(w3, 'TestRandom', OUT_PREFIX + "TestRandom.sol/TestRandom.json", example_addrs[7])
 
 for a in example_addrs:
     permit_caller(HA, a)
 
 # Approve paymaster
-    approve_calldata = selector("approve(address,uint256)") + \
-        ethabi.encode(['address','uint256'], [pm_addr, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
-    ex_calldata = selector("execute(address,uint256,bytes)") + \
-        ethabi.encode(['address','uint256','bytes'], [boba_token, 0, approve_calldata])
-    submit_as_v7_op(client_addr, ex_calldata, env_vars['CLIENT_PRIVKEY'])
+approve_calldata = selector("approve(address,uint256)") + \
+    ethabi.encode(['address','uint256'], [pm_addr, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
+ex_calldata = selector("execute(address,uint256,bytes)") + \
+    ethabi.encode(['address','uint256','bytes'], [boba_token, 0, approve_calldata])
+submit_as_v7_op(client_addr, ex_calldata, env_vars['CLIENT_PRIVKEY'])
 
 LOCAL_URL = "http://" + str(local_ip) + ":1234/hc"
 register_url(ha1_addr, LOCAL_URL)
+
+# Approve random contract
+approve_calldata = selector("approve(address,uint256)") + \
+    ethabi.encode(['address','uint256'], [TEST_RANDOM.address, Web3.to_int(hexstr="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
+ex_calldata = selector("execute(address,uint256,bytes)") + \
+    ethabi.encode(['address','uint256','bytes'], [boba_token, 0, approve_calldata])
+submit_as_v7_op(client_addr, ex_calldata, env_vars['CLIENT_PRIVKEY'])
+
+random_fees(Web3.to_wei(0.02, "ether"), Web3.to_wei(0.01, "ether"))
 
 with open("./contracts.json", "w", encoding="ascii") as f:
     f.write(json.dumps(deployed))
@@ -459,10 +483,13 @@ env_vars['TEST_RAINFALL_INSURANCE'] = RAINFALL_INSURANCE.address
 env_vars['TEST_SPORTS_BETTING'] = TEST_SPORTS_BETTING.address
 env_vars['TEST_KYC'] = KYC.address
 env_vars['TEST_TOKEN_PRICE'] = TEST_TOKEN_PRICE.address
+env_vars['TEST_RANDOM'] = TEST_RANDOM.address
 
 # Other
 env_vars['BOBA_TOKEN'] = boba_token
 env_vars['SIMPLE_PM'] = pm_addr
+env_vars['OC_RANDOM_SECRET']  = oc_random_secret
+env_vars['OC_RANDOM_KEYHASH'] = oc_random_keyhash
 
 with open(".env", "w", encoding="ascii") as f:
     for k in env_vars.items():

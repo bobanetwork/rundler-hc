@@ -18,7 +18,7 @@ contract LocalDeploy is Script {
         require (hcSysOwner != address(0), "HC_SYS_OWNER not set");
         uint256 deploySalt = vm.envOr("DEPLOY_SALT",uint256(0)); // Change this to force redeployment of contracts
 
-        address bobaAddr = vm.envOr("BOBA_TOKEN", 0x4200000000000000000000000000000000000023);
+        address bobaAddr = vm.envAddress("BOBA_TOKEN");
 
         EntryPoint ept;
         HCHelper helper;

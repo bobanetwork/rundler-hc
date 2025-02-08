@@ -2,7 +2,7 @@ import os
 from web3 import Web3
 from jsonrpclib.SimpleJSONRPCServer import SimpleJSONRPCServer, SimpleJSONRPCRequestHandler
 
-from add_sub_2.add_sub_2_offchain import offchain_addsub2
+from add_sub_2.add_sub_2_offchain import offchain_addsub2,offchain_random
 from ramble.ramble_offchain import offchain_ramble
 from check_kyc.check_kyc_offchain import offchain_checkkyc
 from get_token_price.get_token_price_offchain import offchain_getprice
@@ -45,6 +45,8 @@ def server_loop():
         offchain_auction, selector_hex("verifyBidder(address)"))
     server.register_function(
         offchain_getrainfall, selector_hex("get_rainfall(string)"))
+    server.register_function(
+        offchain_random, selector_hex("random(uint256,bytes32)"))
 
     server.serve_forever()
 

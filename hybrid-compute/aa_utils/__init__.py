@@ -86,6 +86,10 @@ class aa_rpc(aa_utils):
         self.bundler_url = _bundler_url
         aa_utils.__init__(self, _EP_addr, self.w3.eth.chain_id)
 
+
+    def blockhash(self, num):
+        return self.w3.eth.get_block(num).hash
+
     def aa_nonce(self, addr, key):
         """Returns the keyed AA nonce for an address"""
         calldata = selector("getNonce(address,uint192)") + ethabi.encode(['address','uint192'],[addr, key])
