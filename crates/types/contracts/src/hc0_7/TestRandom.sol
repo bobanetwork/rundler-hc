@@ -121,7 +121,7 @@ contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
 
     // Registers a server-only VRF request to be satisfied in a later block.
     function requestRandomWord() public returns (bytes32 requestId) {
-        requestJointRandomWord(bytes32(0));
+        return requestJointRandomWord(bytes32(0));
     }
 
     // Needed to convert an in-memory Proof into calldata
