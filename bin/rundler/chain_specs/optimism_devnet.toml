@@ -1,0 +1,6 @@
+base = "optimism"
+
+name = "Boba/Optimism Local Devnet"
+id = 901
+
+min_max_priority_fee_per_gas = "0x0F4240" # 1_000_000
