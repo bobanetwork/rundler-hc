@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{ruint::FromUintError, Address, Bytes, B256, U256};
+use alloy_primitives::{keccak256, ruint::FromUintError, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolValue};
 pub use rundler_contracts::v0_6::UserOperation as ContractUserOperation;
 use rundler_utils::random::{random_bytes, random_bytes_array};
@@ -170,6 +170,12 @@ impl UserOperationTrait for UserOperation {
         alloy_primitives::keccak256(encoded.abi_encode())
     }
 
+    fn hc_hash(&self) -> B256 {
+        let packed: B256 = keccak256(self.pack_for_hc_hash());
+        //        keccak256(packed).into()
+        packed
+    }
+
     fn id(&self) -> UserOperationId {
         UserOperationId {
             sender: self.sender,
@@ -309,6 +315,22 @@ impl From<UserOperation> for ContractUserOperation {
     }
 }
 
+sol! {
+    /// Packed for hashing into hc_hash
+    struct hc_packed_2 {
+        /// address
+        address sender;
+        /// nonce
+        uint256 nonce;
+        /// init_code hash
+        bytes32 h_init_code;
+        /// call_data hash
+        bytes32 h_call_data;
+        /// paymaster info hash
+        bytes32 h_paymaster_and_data;
+    }
+}
+
 impl UserOperation {
     fn get_address_from_field(data: &Bytes) -> Option<Address> {
         if data.len() < 20 {
@@ -316,6 +338,23 @@ impl UserOperation {
         } else {
             Some(Address::from_slice(&data[..20]))
         }
+    }
+
+    /// Gets the byte array representation of the user operation to be used as HC key
+    pub fn pack_for_hc_hash(&self) -> Bytes {
+        let hash_init_code = keccak256(self.init_code.clone());
+        let hash_call_data = keccak256(self.call_data.clone());
+        let hash_paymaster_and_data = keccak256(self.paymaster_and_data.clone());
+
+        let p = hc_packed_2 {
+            sender: self.sender,
+            nonce: self.nonce,
+            h_init_code: hash_init_code,
+            h_call_data: hash_call_data,
+            h_paymaster_and_data: hash_paymaster_and_data,
+        };
+
+        p.abi_encode().into()
     }
 
     fn entity_address(&self, entity: EntityType) -> Option<Address> {
@@ -373,7 +412,7 @@ impl AsMut<UserOperation> for super::UserOperationVariant {
 }
 
 /// User operation with optional gas fields for gas estimation
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)] // PartialEq for hybrid_compute
 #[serde(rename_all = "camelCase")]
 pub struct UserOperationOptionalGas {
     /// Sender (required)
@@ -531,6 +570,14 @@ impl UserOperationOptionalGas {
             + super::byte_array_abi_len(&self.call_data)
             + super::byte_array_abi_len(&self.paymaster_and_data)
             + super::byte_array_abi_len(&self.signature)
+    }
+
+    /// Hash fields relevant to Hybrid Compute
+    pub fn hc_hash(&self, cs: &ChainSpec) -> B256 {
+        self.clone()
+            .into_user_operation_builder(cs, 0, 0)
+            .build()
+            .hc_hash()
     }
 }
 

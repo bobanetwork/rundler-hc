@@ -139,6 +139,7 @@ where
                 .await?
                 .map_err(GasEstimationError::RevertInValidation)?
                 .target_result;
+            println!("HC estimate_call_gas revert data {:?}", target_revert_data);
 
             let decoded = CallGasEstimationProxyErrors::abi_decode(&target_revert_data, false)
                 .context("should decode revert data")?;
@@ -148,6 +149,7 @@ where
                         .numRounds
                         .try_into()
                         .context("num rounds return overflow")?;
+                    println!("HC estimation.rs Ok result");
 
                     num_rounds += ret_num_rounds;
                     tracing::debug!(
@@ -161,6 +163,7 @@ where
                         .context("gasEstimate return overflow")?);
                 }
                 CallGasEstimationProxyErrors::EstimateCallGasRevertAtMax(revert) => {
+                    println!("HC estimation.rs RevertAtMax");
                     let error = if let Ok(revert) = Revert::abi_decode(&revert.revertData, false) {
                         GasEstimationError::RevertInCallWithMessage(revert.reason)
                     } else {
@@ -169,6 +172,7 @@ where
                     return Err(error);
                 }
                 CallGasEstimationProxyErrors::EstimateCallGasContinuation(continuation) => {
+                    println!("HC estimation.rs Ok continuation");
                     let ret_min_gas = continuation
                         .minGas
                         .try_into()

@@ -79,6 +79,7 @@ pub trait GasEstimator: Send + Sync {
         &self,
         op: Self::UserOperationOptionalGas,
         state_override: StateOverride,
+        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError>;
 }
 

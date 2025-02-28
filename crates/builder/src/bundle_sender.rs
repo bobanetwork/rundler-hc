@@ -28,6 +28,7 @@ use rundler_task::TaskSpawner;
 use rundler_types::{
     builder::BundlingMode,
     chain::ChainSpec,
+    hybrid_compute,
     pool::{NewHead, Pool},
     EntityUpdate, UserOperation,
 };
@@ -157,6 +158,7 @@ where
         let mut state =
             SenderMachineState::new(sender_trigger, self.transaction_tracker.take().unwrap());
 
+        println!("HC starting bundle_sender loop");
         loop {
             if let Err(e) = self.step_state(&mut state).await {
                 error!("Error in bundle sender loop: {e:#?}");
@@ -582,6 +584,7 @@ where
             ));
             return Ok(SendBundleAttemptResult::NoOperationsAfterSimulation);
         };
+        println!("HC before BundleTx op_hashes {:?}", bundle_tx.op_hashes);
         let BundleTx {
             tx,
             expected_storage,
@@ -691,6 +694,7 @@ where
             bundle.entity_updates.len()
         );
         let op_hashes: Vec<_> = bundle.iter_ops().map(|op| self.op_hash(op)).collect();
+        println!("HC bundle_sender bundle {:?} OH {:?}", bundle, op_hashes);
         let mut tx = self.entry_point.get_send_bundle_transaction(
             bundle.ops_per_aggregator,
             self.sender_eoa,
@@ -1052,6 +1056,7 @@ impl Trigger for BundleSenderTrigger {
         let mut send_bundle_response: Option<oneshot::Sender<SendBundleResult>> = None;
 
         loop {
+            hybrid_compute::expire_hc_cache();
             // 3 triggers for loop logic:
             // 1 - new block
             //      - If auto mode, send next bundle

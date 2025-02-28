@@ -13,7 +13,7 @@
 
 use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{aliases::U192, Address, B256, U256};
 use rundler_provider::{EntryPoint, SimulationProvider, StateOverride};
 use rundler_sim::{GasEstimationError, GasEstimator};
 use rundler_types::{
@@ -145,6 +145,7 @@ impl EntryPointRouter {
         entry_point: &Address,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
+        at_price: Option<u128>,
     ) -> EthResult<RpcGasEstimate> {
         match self.get_ep_version(entry_point)? {
             EntryPointVersion::V0_6 => {
@@ -160,7 +161,7 @@ impl EntryPointRouter {
                     .as_ref()
                     .unwrap()
                     .1
-                    .estimate_gas(uo, state_override)
+                    .estimate_gas(uo, state_override, at_price)
                     .await?;
 
                 Ok(RpcGasEstimateV0_6::from(e).into())
@@ -178,13 +179,25 @@ impl EntryPointRouter {
                     .as_ref()
                     .unwrap()
                     .1
-                    .estimate_gas(uo, state_override)
+                    .estimate_gas(uo, state_override, at_price)
                     .await?;
 
                 Ok(RpcGasEstimateV0_7::from(e).into())
             }
             EntryPointVersion::Unspecified => unreachable!("unspecified entry point version"),
         }
+    }
+
+    pub(crate) async fn get_nonce(
+        &self,
+        entry_point: &Address,
+        addr: Address,
+        key: U192,
+    ) -> EthResult<U256> {
+        self.get_route(entry_point)?
+            .get_nonce(addr, key)
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn check_signature(
@@ -198,7 +211,7 @@ impl EntryPointRouter {
             .map_err(Into::into)
     }
 
-    fn get_ep_version(&self, entry_point: &Address) -> EthResult<EntryPointVersion> {
+    pub(crate) fn get_ep_version(&self, entry_point: &Address) -> EthResult<EntryPointVersion> {
         if let Some((addr, _)) = self.v0_6 {
             if addr == *entry_point {
                 return Ok(EntryPointVersion::V0_6);
@@ -242,9 +255,11 @@ pub(crate) trait EntryPointRoute: Send + Sync {
         &self,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
+        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError>;
 
     async fn check_signature(&self, uo: UserOperationVariant) -> anyhow::Result<bool>;
+    async fn get_nonce(&self, addr: Address, key: U192) -> anyhow::Result<U256>;
 }
 
 #[derive(Debug)]
@@ -287,10 +302,26 @@ where
         &self,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
+        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
-        self.gas_estimator
-            .estimate_op_gas(uo.into(), state_override.unwrap_or_default())
-            .await
+        println!(
+            "HC router estimate_gas op {:?} state {:?}",
+            uo, state_override
+        );
+        let ret = self
+            .gas_estimator
+            .estimate_op_gas(uo.into(), state_override.unwrap_or_default(), at_price)
+            .await;
+        println!("HC router estimate_gas ret {:?}", ret);
+        ret
+    }
+
+    async fn get_nonce(&self, addr: Address, key: U192) -> anyhow::Result<U256> {
+        let output = self.entry_point.get_nonce(addr, key).await;
+        if let Ok(nonce) = output {
+            return Ok(nonce);
+        }
+        Err(anyhow::anyhow!("get_nonce() failed"))
     }
 
     async fn check_signature(&self, uo: UserOperationVariant) -> anyhow::Result<bool> {

@@ -126,7 +126,7 @@ sol!(
 
         event BeforeExecution();
 
-    event SignatureAggregatorChanged(address indexed aggregator);
+        event SignatureAggregatorChanged(address indexed aggregator);
 
         error FailedOp(uint256 opIndex, string reason);
 
@@ -158,6 +158,34 @@ sol!(
         ) external view returns (DepositInfo memory info);
 
         function balanceOf(address account) external view returns (uint256);
+
+        function getNonce(address account, uint192 key) external view returns (uint256);
+    }
+
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    #[derive(Default, Debug, PartialEq, Eq)]
+    interface IHCHelper {
+        struct callerInfo {
+            address owner;
+            string url;
+            uint256 credits;
+        }
+        // FIXME - doesn't decode callerInfo properly.
+        function RegisteredCallers(address addr) external view returns (address owner, string url, uint256 credits);
+        function ResponseSlot() external view returns (uint256);
+    }
+
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    #[derive(Default, Debug, PartialEq, Eq)]
+    interface ISimpleAccount {
+        struct callerInfo {
+            address owner;
+            string url;
+            uint256 credits;
+        }
+        function owner() external view returns (address);
     }
 
     #[allow(missing_docs)]

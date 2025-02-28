@@ -4766,6 +4766,7 @@ name = "rundler"
 version = "0.5.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-signer",
  "anyhow",
  "aws-config",
  "aws-sdk-s3",
@@ -4783,6 +4784,7 @@ dependencies = [
  "paste",
  "reth-tasks",
  "rundler-builder",
+ "rundler-contracts",
  "rundler-pool",
  "rundler-provider",
  "rundler-rpc",
@@ -4963,6 +4965,8 @@ dependencies = [
  "alloy-json-rpc",
  "alloy-network",
  "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
  "alloy-sol-types",
  "anyhow",
  "async-trait",
@@ -5050,6 +5054,10 @@ version = "0.5.0"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-signer",
+ "alloy-signer-local",
+ "alloy-sol-macro",
  "alloy-sol-types",
  "anyhow",
  "async-trait",
@@ -5062,6 +5070,7 @@ dependencies = [
  "metrics-derive",
  "mockall",
  "num_enum",
+ "once_cell",
  "parse-display",
  "rand",
  "rundler-contracts",
@@ -5071,6 +5080,7 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

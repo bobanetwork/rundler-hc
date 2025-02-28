@@ -53,6 +53,19 @@ pub async fn estimate_pre_verification_gas<UO: UserOperation, E: DAGasProvider<U
         0
     };
 
+    /*
+        let dynamic_gas = entry_point
+            .calc_l1_gas(entry_point.address(), random_op.clone(), gas_price)
+            .await?;
+
+        println!(
+            "HC estimate_pre_verification_gas {} = {} + {} price {}",
+            static_gas + dynamic_gas,
+            static_gas,
+            dynamic_gas,
+            gas_price
+        );
+    */
     // Currently assume 1 op bundle
     Ok(full_op.required_pre_verification_gas(chain_spec, 1, da_gas))
 }
@@ -67,6 +80,12 @@ pub async fn calc_required_pre_verification_gas<UO: UserOperation, E: DAGasProvi
     block: BlockHashOrNumber,
     base_fee: u128,
 ) -> anyhow::Result<(u128, DAGasUOData)> {
+    println!(
+        "HC entering calc_pre_verification_gas, base_fee {} op_fees {} {}",
+        base_fee,
+        op.max_priority_fee_per_gas(),
+        op.max_fee_per_gas()
+    );
     let (da_gas, uo_data) = if chain_spec.da_pre_verification_gas {
         let (da_gas, uo_data, _) = entry_point
             .calc_da_gas(op.clone(), block, op.gas_price(base_fee))

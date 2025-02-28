@@ -214,11 +214,13 @@ where
             )),
             ..Default::default()
         };
+        println!("HC trace_find_user_operation pre");
         let trace = self
             .provider
             .debug_trace_transaction(tx_hash, trace_options)
             .await
             .context("should have fetched trace from provider")?;
+        println!("HC trace_find_user_operation post {:?}", trace);
 
         // breadth first search for the user operation in the trace
         let mut frame_queue = VecDeque::new();

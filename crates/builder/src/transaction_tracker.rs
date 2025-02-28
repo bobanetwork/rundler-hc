@@ -246,6 +246,11 @@ where
             self.provider.get_transaction_by_hash(tx_hash),
             self.provider.get_transaction_receipt(tx_hash),
         )?;
+
+        println!(
+            "HC get_mined_tx_gas_info looking for hash {:?} got tx {:?} receipt {:?}",
+            tx_hash, tx, tx_receipt
+        );
         let gas_limit = tx.map(|t| t.inner.gas_limit()).or_else(|| {
             warn!("failed to fetch transaction data for tx: {}", tx_hash);
             None
@@ -285,6 +290,7 @@ where
         expected_storage: &ExpectedStorage,
     ) -> TransactionTrackerResult<B256> {
         self.validate_transaction(&tx)?;
+        println!("HC send_transaction will send tx {:?}", tx.clone());
         let gas_fees = GasFees {
             max_fee_per_gas: tx.max_fee_per_gas.unwrap_or(0),
             max_priority_fee_per_gas: tx.max_priority_fee_per_gas.unwrap_or(0),
@@ -296,6 +302,7 @@ where
             tx.gas.unwrap_or(0),
         );
         let sent_tx = self.sender.send_transaction(tx, expected_storage).await;
+        println!("HC send_transaction result {:?}", sent_tx);
 
         self.update_metrics();
 
@@ -424,6 +431,10 @@ where
     async fn check_for_update(&mut self) -> TransactionTrackerResult<Option<TrackerUpdate>> {
         let external_nonce = self.get_external_nonce().await?;
         if self.nonce < external_nonce {
+            println!(
+                "HC check_for_update_now at self.nonce {:?} external_nonce {:?}",
+                self.nonce, external_nonce
+            );
             // The nonce has changed. Check to see which of our transactions has
             // mined, if any.
             info!(
@@ -438,6 +449,10 @@ where
                     .get_transaction_status(tx.tx_hash)
                     .await
                     .context("tracker should check transaction status when the nonce changes")?;
+                println!(
+                    "HC check_for_update_now status after nonce change {:?}",
+                    status
+                );
                 info!("Status of tx {:?}: {:?}", tx.tx_hash, status);
                 if let TxStatus::Mined { block_number } = status {
                     let (gas_limit, gas_used, gas_price, is_success) =

@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{aliases::U192, Address, Bytes, U256};
 use rundler_types::{
     da::{DAGasBlockData, DAGasUOData},
     GasFees, Timestamp, UserOperation, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
@@ -103,6 +103,9 @@ pub trait EntryPoint: Send + Sync {
 
     /// Get the balances of a list of addresses in order
     async fn get_balances(&self, addresses: Vec<Address>) -> ProviderResult<Vec<U256>>;
+
+    /// Return the AA nonce for the given sender and key
+    async fn get_nonce(&self, address: Address, key: U192) -> ProviderResult<U256>;
 }
 
 /// Trait for handling signature aggregators
@@ -221,6 +224,14 @@ pub trait SimulationProvider: Send + Sync {
     /// Returns true if this entry point uses reverts to communicate simulation
     /// results.
     fn simulation_should_revert(&self) -> bool;
+
+    /*    /// Return the AA nonce for the given sender and key
+        async fn get_nonce(
+            &self,
+            address: Address,
+            key: U256,
+        ) -> Result<U256, String>;
+    */
 }
 
 /// Trait for a provider that provides all entry point functionality

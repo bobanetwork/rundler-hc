@@ -68,6 +68,7 @@ where
         &self,
         op: UserOperationOptionalGas,
         state_override: StateOverride,
+        _at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
         self.check_provided_limits(&op)?;
 
@@ -627,7 +628,7 @@ mod tests {
         optional_op.verification_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default())
+            .estimate_op_gas(optional_op, StateOverride::default(), None)
             .await
             .err()
             .unwrap();
@@ -647,7 +648,7 @@ mod tests {
         optional_op.paymaster_verification_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default())
+            .estimate_op_gas(optional_op, StateOverride::default(), None)
             .await
             .err()
             .unwrap();
@@ -670,7 +671,7 @@ mod tests {
         optional_op.call_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default())
+            .estimate_op_gas(optional_op, StateOverride::default(), None)
             .await
             .err()
             .unwrap();
@@ -690,7 +691,7 @@ mod tests {
         optional_op.paymaster_post_op_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default())
+            .estimate_op_gas(optional_op, StateOverride::default(), None)
             .await
             .err()
             .unwrap();
@@ -735,7 +736,7 @@ mod tests {
         optional_op.paymaster_post_op_gas_limit = Some(10000);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op.clone(), StateOverride::default())
+            .estimate_op_gas(optional_op.clone(), StateOverride::default(), None)
             .await
             .unwrap();
 
@@ -793,7 +794,7 @@ mod tests {
         optional_op.verification_gas_limit = Some(10000);
 
         let estimation_error = estimator
-            .estimate_op_gas(optional_op.clone(), StateOverride::default())
+            .estimate_op_gas(optional_op.clone(), StateOverride::default(), None)
             .await
             .err()
             .unwrap();
@@ -851,7 +852,7 @@ mod tests {
         };
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default())
+            .estimate_op_gas(optional_op, StateOverride::default(), None)
             .await
             .err()
             .unwrap();

@@ -13,7 +13,7 @@
 
 use std::{fmt::Debug, time::Duration};
 
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, /*U128,*/ U256};
 use alloy_sol_types::SolValue;
 
 /// User Operation types for Entry Point v0.6
@@ -121,6 +121,9 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     /// The hash is used to uniquely identify a user operation in the entry point.
     /// It does not include the signature field.
     fn hash(&self, entry_point: Address, chain_id: u64) -> B256;
+
+    /// Identifies a user operation for Hybrid Compute purposes
+    fn hc_hash(&self) -> B256;
 
     /// Get the user operation id
     fn id(&self) -> UserOperationId;
@@ -367,6 +370,13 @@ impl UserOperation for UserOperationVariant {
         }
     }
 
+    fn hc_hash(&self) -> B256 {
+        match self {
+            UserOperationVariant::V0_6(op) => op.hc_hash(),
+            UserOperationVariant::V0_7(op) => op.hc_hash(),
+        }
+    }
+
     fn id(&self) -> UserOperationId {
         match self {
             UserOperationVariant::V0_6(op) => op.id(),
@@ -556,6 +566,26 @@ impl UserOperationOptionalGas {
             UserOperationOptionalGas::V0_7(op) => op.abi_encoded_size(),
         };
         abi_size + BUNDLE_BYTE_OVERHEAD + USER_OP_OFFSET_WORD_SIZE
+    }
+
+    /// Hash fields relevant to Hybrid Compute
+    pub fn hc_hash(&self, cs: &ChainSpec) -> B256 {
+        match self {
+            UserOperationOptionalGas::V0_6(op) => op.hc_hash(cs),
+            UserOperationOptionalGas::V0_7(op) => op.hc_hash(),
+        }
+    }
+
+    /// Convert into UserOperationVariant type - needed for Hybrid Compute
+    pub fn into_variant(&self, cs: &ChainSpec) -> UserOperationVariant {
+        match self {
+            UserOperationOptionalGas::V0_6(op) => {
+                UserOperationVariant::V0_6(op.clone().into_user_operation_builder(cs, 0, 0).build())
+            }
+            UserOperationOptionalGas::V0_7(op) => UserOperationVariant::V0_7(
+                op.clone().into_user_operation_builder(cs, 0, 0, 0).build(),
+            ),
+        }
     }
 }
 

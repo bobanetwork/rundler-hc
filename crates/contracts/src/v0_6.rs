@@ -128,6 +128,8 @@ sol! {
 
         function balanceOf(address account) external view returns (uint256);
 
+        function getNonce(address account, uint192 key) external view returns (uint256);
+
         function simulateValidation(UserOperation calldata userOp) external;
 
         function simulateHandleOp(UserOperation calldata op, address target, bytes calldata targetCallData) external;

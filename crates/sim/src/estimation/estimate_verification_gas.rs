@@ -108,6 +108,10 @@ where
         // Make one attempt at max gas, to see if success is possible.
         // Capture the gas usage of this attempt and use as the initial guess in the binary search
         let initial_op = get_op(max_guess);
+        println!(
+            "HC estimate_verification initial_op {:?}",
+            initial_op.clone()
+        );
         let call = self
             .entry_point
             .get_simulate_handle_op_call(initial_op, local_state_override.clone());
@@ -117,6 +121,10 @@ where
             .get_gas_used(call)
             .await
             .context("failed to run initial guess")?;
+        println!(
+            "HC estimate_verification SimulateHandleOp initial guess gas_used UNKNOWN" //,
+                                                                                       //gas_used
+        );
 
         if gas_used.success {
             if self.entry_point.simulation_should_revert() {
@@ -125,6 +133,7 @@ where
                 ))?;
             }
         } else if let Some(revert) = E::decode_simulate_handle_ops_revert(&gas_used.result)?.err() {
+            println!("HC estimate_verification GasEstimationError {}", revert);
             return Err(GasEstimationError::RevertInValidation(revert));
         }
 
@@ -179,6 +188,10 @@ where
             }
             guess = max_failure_gas.saturating_add(min_success_gas) / 2;
         }
+        println!(
+            "HC after verification gas estimation loop max_fail {:?} min_success {:?}",
+            max_failure_gas, min_success_gas
+        );
 
         tracing::debug!(
             "binary search for verification gas took {num_rounds} rounds, {}ms",
@@ -191,6 +204,7 @@ where
         if op.paymaster().is_none() {
             min_success_gas += self.chain_spec.deposit_transfer_overhead();
         }
+        println!("HC verification min_success_gas {:?}", min_success_gas);
 
         Ok(min_success_gas)
     }

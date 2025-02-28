@@ -65,6 +65,17 @@ fn generate_v0_6_bindings() -> Result<(), Box<dyn error::Error>> {
         "generate ABIs",
     )?;
 
+    // hybrid compute
+    run_command(
+        forge_build("hc0_6")
+            .arg("--remappings")
+            .arg("@openzeppelin/=lib/openzeppelin-contracts-versions/v4_9")
+            .arg("--remappings")
+            .arg("@gnosis.pm/safe-contracts=lib/safe-smart-account"),
+        "https://getfoundry.sh/",
+        "generate ABIs",
+    )?;
+
     Ok(())
 }
 
@@ -79,6 +90,16 @@ fn generate_v0_7_bindings() -> Result<(), Box<dyn error::Error>> {
 
     write_deployed_bytecode!(CallGasEstimationProxy);
     write_deployed_bytecode!(EntryPointSimulations);
+
+    run_command(
+        forge_build("hc0_7")
+            .arg("--remappings")
+            .arg("@openzeppelin/=lib/openzeppelin-contracts-versions/v5_0")
+            .arg("--remappings")
+            .arg("@gnosis.pm/safe-contracts=lib/safe-smart-account"),
+        "https://getfoundry.sh/",
+        "generate ABIs",
+    )?;
 
     Ok(())
 }

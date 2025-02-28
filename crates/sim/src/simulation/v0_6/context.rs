@@ -56,6 +56,7 @@ where
         let factory_address = op.factory();
         let sender_address = op.sender;
         let paymaster_address = op.paymaster();
+        println!("HC simulation get_context op {:?}", op.clone());
         let tracer_out = self
             .simulate_validation_tracer
             .trace_simulate_validation(op.clone(), block_id)
@@ -139,6 +140,7 @@ where
             op,
             ..
         } = &context;
+        println!("HC trace entry_point_out {:?}", entry_point_out);
 
         if context.op.paymaster().is_some()
             && !entry_point_out.return_info.paymaster_context.is_empty()

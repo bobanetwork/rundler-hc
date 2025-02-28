@@ -14,7 +14,7 @@
 use alloy_contract::Error as ContractError;
 use alloy_eips::eip7702::SignedAuthorization;
 use alloy_json_rpc::ErrorPayload;
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{aliases::U192, Address, Bytes, U256};
 use alloy_provider::{network::TransactionBuilder7702, Provider as AlloyProvider};
 use alloy_rpc_types_eth::{
     state::{AccountOverride, StateOverride},
@@ -122,6 +122,11 @@ where
             .await
             .map_err(Into::into)
             .map(|r| r.info.into())
+    }
+
+    async fn get_nonce(&self, address: Address, key: U192) -> ProviderResult<U256> {
+        let ret = self.i_entry_point.getNonce(address, key).call().await?;
+        Ok(ret._0)
     }
 
     async fn get_balances(&self, addresses: Vec<Address>) -> ProviderResult<Vec<U256>> {

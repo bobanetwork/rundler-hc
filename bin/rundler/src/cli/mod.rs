@@ -13,9 +13,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use alloy_primitives::U256;
+use alloy_primitives::{Address, B256, U256};
 use anyhow::{bail, Context};
 use clap::{builder::PossibleValuesParser, Args, Parser, Subcommand};
+use rundler_contracts::v0_7::IHCHelper;
 
 mod builder;
 mod chain_spec;
@@ -40,8 +41,8 @@ use rundler_sim::{
     EstimationSettings, PrecheckSettings, PriorityFeeMode, SimulationSettings, MIN_CALL_GAS_LIMIT,
 };
 use rundler_types::{
-    chain::ChainSpec, da::DAGasOracleType, v0_6::UserOperation as UserOperationV0_6,
-    v0_7::UserOperation as UserOperationV0_7,
+    chain::ChainSpec, da::DAGasOracleType, hybrid_compute,
+    v0_6::UserOperation as UserOperationV0_6, v0_7::UserOperation as UserOperationV0_7,
 };
 
 /// Main entry point for the CLI
@@ -68,6 +69,29 @@ pub async fn run() -> anyhow::Result<()> {
 
     let cs = chain_spec::resolve_chain_spec(&opt.common.network, &opt.common.chain_spec);
     tracing::info!("Chain spec: {:#?}", cs);
+    let node_http = opt
+        .common
+        .node_http
+        .clone()
+        .expect("must provide node_http");
+    let p2 = rundler_provider::new_alloy_provider(&node_http, 120)?;
+    let hx = IHCHelper::new(opt.common.hc_helper_addr, p2);
+    let slot_idx = hx
+        .ResponseSlot()
+        .call()
+        .await
+        .expect("Failed to get ResponseSlot")
+        ._0;
+
+    hybrid_compute::init(
+        opt.common.hc_helper_addr,
+        opt.common.hc_sys_account,
+        opt.common.hc_sys_owner,
+        opt.common.hc_sys_privkey,
+        cs.clone(),
+        node_http,
+        slot_idx,
+    );
 
     match opt.command {
         Command::Node(args) => {
@@ -361,6 +385,30 @@ pub struct CommonArgs {
         env = "MAX_EXPECTED_STORAGE_SLOTS"
     )]
     pub max_expected_storage_slots: Option<usize>,
+
+    #[arg(
+        long = "hc_helper_addr",
+        name = "hc_helper_addr",
+        env = "HC_HELPER_ADDR"
+    )]
+    hc_helper_addr: Address,
+
+    #[arg(
+        long = "hc_sys_account",
+        name = "hc_sys_account",
+        env = "HC_SYS_ACCOUNT"
+    )]
+    hc_sys_account: Address,
+
+    #[arg(long = "hc_sys_owner", name = "hc_sys_owner", env = "HC_SYS_OWNER")]
+    hc_sys_owner: Address,
+
+    #[arg(
+        long = "hc_sys_privkey",
+        name = "hc_sys_privkey",
+        env = "HC_SYS_PRIVKEY"
+    )]
+    hc_sys_privkey: B256,
 }
 
 const SIMULATION_GAS_OVERHEAD: u64 = 100_000;

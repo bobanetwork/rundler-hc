@@ -1,6 +1,11 @@
 [advisories]
 version = 2
+yanked = "warn"
 ignore = [
+#    {id = "RUSTSEC-2021-0141", reason = "Unmaintained dependency inherited from upstream"},
+#    {id = "RUSTSEC-2022-0071", reason = "Unmaintained dependency inherited from upstream"},
+#    {id = "RUSTSEC-2024-0320", reason = "Unmaintained dependency inherited from upstream"},
+#    {id = "RUSTSEC-2024-0336", reason = "Dependency inherited from upstream"},
 ]
 
 [bans]
@@ -39,7 +44,7 @@ exceptions = [
     { allow = ["CC0-1.0"], name = "tiny-keccak" },
     { allow = ["Unicode-DFS-2016"], name = "unicode-ident" },
     { allow = ["OpenSSL"], name = "ring" },
-    { allow = ["OpenSSL"], name = "aws-lc-sys" }
+    { allow = ["OpenSSL"], name = "aws-lc-sys" } # Inherited dependency via rustls
 ]
 
 [[licenses.clarify]]

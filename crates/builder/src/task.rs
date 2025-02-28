@@ -23,7 +23,8 @@ use rundler_sim::{
 };
 use rundler_task::TaskSpawnerExt;
 use rundler_types::{
-    chain::ChainSpec, pool::Pool as PoolT, EntryPointVersion, UserOperation, UserOperationVariant,
+    chain::ChainSpec, hybrid_compute, pool::Pool as PoolT, EntryPointVersion, UserOperation,
+    UserOperationVariant,
 };
 use rundler_utils::emit::WithEntryPoint;
 use tokio::{
@@ -354,6 +355,8 @@ where
             ret
         };
         let sender_eoa = signer.address();
+        hybrid_compute::set_signer(signer.address());
+
         let proposer_settings = bundle_proposer::Settings {
             chain_spec: self.args.chain_spec.clone(),
             max_bundle_size: self.args.max_bundle_size,

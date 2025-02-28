@@ -15,7 +15,10 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use futures_util::FutureExt;
-use http::{header::CONTENT_TYPE, HeaderValue};
+//use anyhow::bail;
+//use async_trait::async_trait;
+use http::header;
+use http::{header::CONTENT_TYPE, HeaderValue, Method};
 use jsonrpsee::{
     server::{middleware::http::ProxyGetRequestLayer, RpcServiceBuilder, ServerBuilder},
     RpcModule,
@@ -30,6 +33,8 @@ use rundler_task::{
     TaskSpawner,
 };
 use rundler_types::{builder::Builder as BuilderT, chain::ChainSpec, pool::Pool as PoolT};
+//use tokio_util::sync::CancellationToken;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use crate::{
@@ -190,6 +195,17 @@ where
         let health_checker = HealthChecker::new(servers);
         module.merge(health_checker.into_rpc())?;
 
+        // Add a CORS middleware for handling HTTP requests.
+        // This middleware does affect the response, including appropriate
+        // headers to satisfy CORS. Because any origins are allowed, the
+        // "Access-Control-Allow-Origin: *" header is appended to the response.
+        let cors = CorsLayer::new()
+            // Allow `POST` when accessing the resource
+            .allow_methods([Method::OPTIONS, Method::POST, Method::GET])
+            // Allow requests from any origin
+            .allow_origin(Any)
+            .allow_headers([header::CONTENT_TYPE]);
+
         // Set up health check endpoint via GET /health registers the jsonrpc handler
         let http_middleware = tower::ServiceBuilder::new()
             .option_layer(self.args.corsdomain.map(|layers| {
@@ -217,8 +233,8 @@ where
             .timeout(self.args.rpc_timeout)
             .layer(HttpMetricMiddlewareLayer::new(
                 "rundler-rpc-service-http".to_string(),
-            ));
-
+            ))
+            .layer(cors);
         let rpc_metric_middleware = RpcServiceBuilder::new().layer(RpcMetricsMiddlewareLayer::new(
             "rundler-rpc-service".to_string(),
         ));
@@ -250,6 +266,7 @@ where
         );
 
         info!("Started RPC server");
+        println!("Started RPC server");
 
         Ok(())
     }

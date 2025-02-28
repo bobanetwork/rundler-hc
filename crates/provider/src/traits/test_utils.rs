@@ -12,7 +12,7 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use alloy_json_rpc::{RpcParam, RpcReturn};
-use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
+use alloy_primitives::{aliases::U192, Address, Bytes, TxHash, B256, U256};
 use alloy_rpc_types_eth::{
     state::StateOverride, Block, BlockId, BlockNumberOrTag, FeeHistory, Filter, Log, Transaction,
     TransactionReceipt, TransactionRequest,
@@ -120,6 +120,7 @@ mockall::mock! {
         async fn balance_of(&self, address: Address, block_id: Option<BlockId>)
             -> ProviderResult<U256>;
         async fn get_deposit_info(&self, address: Address) -> ProviderResult<DepositInfo>;
+        async fn get_nonce(&self, address: Address, key: U192) -> ProviderResult<U256>;
         async fn get_balances(&self, addresses: Vec<Address>) -> ProviderResult<Vec<U256>>;
     }
 
@@ -167,6 +168,8 @@ mockall::mock! {
             revert_data: &Bytes,
         ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>>;
         fn simulation_should_revert(&self) -> bool;
+//        async fn get_nonce(&self, address: Address, key: U256) -> Result<U256, String>;
+
     }
 
     #[async_trait::async_trait]
@@ -211,6 +214,7 @@ mockall::mock! {
         async fn balance_of(&self, address: Address, block_id: Option<BlockId>)
             -> ProviderResult<U256>;
         async fn get_deposit_info(&self, address: Address) -> ProviderResult<DepositInfo>;
+        async fn get_nonce(&self, address: Address, key: U192) -> ProviderResult<U256>;
         async fn get_balances(&self, addresses: Vec<Address>) -> ProviderResult<Vec<U256>>;
     }
 
@@ -258,6 +262,7 @@ mockall::mock! {
             revert_data: &Bytes,
         ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>>;
         fn simulation_should_revert(&self) -> bool;
+//   async fn get_nonce(&self, address: Address, key: U256) -> Result<U256, String>;
     }
 
     #[async_trait::async_trait]

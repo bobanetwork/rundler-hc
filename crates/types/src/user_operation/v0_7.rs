@@ -11,13 +11,16 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{ruint::FromUintError, Address, Bytes, FixedBytes, B256, U256};
+use alloy_primitives::{keccak256, ruint::FromUintError, Address, Bytes, FixedBytes, B256, U256};
 use alloy_sol_types::{sol, SolValue};
 use rundler_contracts::v0_7::PackedUserOperation;
 use rundler_utils::random::{random_bytes, random_bytes_array};
 
+//use rand::RngCore;
 use super::{UserOperation as UserOperationTrait, UserOperationId, UserOperationVariant};
 use crate::{authorization::Eip7702Auth, chain::ChainSpec, Entity, EntryPointVersion};
+//use alloy_sol_types::abi::Token;
+//use alloy_sol_types::abi::encode;
 
 /// Gas overhead required by the entry point contract for the inner call
 pub const ENTRY_POINT_INNER_GAS_OVERHEAD: u128 = 10_000;
@@ -98,6 +101,22 @@ pub struct UserOperation {
     pub calldata_gas_cost: u128,
 }
 
+sol! {
+    /// packed for hc hashing
+    struct hc_packed_2 {
+        /// sender
+        address sender;
+        /// nonce
+        uint256 nonce;
+        /// init_code hash
+        bytes32 h_init_code;
+        /// call_data hash
+        bytes32 h_call_data;
+        /// paymaster info hash
+        bytes32 h_paymaster_and_data;
+    }
+}
+
 impl UserOperationTrait for UserOperation {
     type OptionalGas = UserOperationOptionalGas;
 
@@ -107,6 +126,12 @@ impl UserOperationTrait for UserOperation {
 
     fn hash(&self, _entry_point: Address, _chain_id: u64) -> B256 {
         self.hash
+    }
+
+    fn hc_hash(&self) -> B256 {
+        let packed: B256 = keccak256(self.pack_for_hc_hash());
+        //keccak256(packed).into()
+        packed
     }
 
     fn id(&self) -> UserOperationId {
@@ -251,6 +276,22 @@ impl UserOperation {
     /// Returns a reference to the packed user operation
     pub fn packed(&self) -> &PackedUserOperation {
         &self.packed
+    }
+
+    /// Gets the byte array representation of the user operation to be used as HC key
+    pub fn pack_for_hc_hash(&self) -> Bytes {
+        let hash_init_code = keccak256(self.packed.initCode.clone());
+        let hash_call_data = keccak256(self.packed.callData.clone());
+        let hash_paymaster_and_data = keccak256(self.packed.paymasterAndData.clone());
+        let p = hc_packed_2 {
+            sender: self.sender,
+            nonce: self.nonce,
+            h_init_code: hash_init_code,
+            h_call_data: hash_call_data,
+            h_paymaster_and_data: hash_paymaster_and_data,
+        };
+
+        p.abi_encode().into()
     }
 }
 
@@ -511,6 +552,15 @@ impl UserOperationOptionalGas {
         }
 
         base
+    }
+
+    /// Hash fields relevant to Hybrid Compute
+    pub fn hc_hash(&self) -> B256 {
+        let cs = ChainSpec::default();
+        self.clone()
+            .into_user_operation_builder(&cs, 0, 0, 0)
+            .build()
+            .hc_hash()
     }
 }
 
