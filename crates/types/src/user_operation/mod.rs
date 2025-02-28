@@ -13,17 +13,15 @@
 
 use std::{fmt::Debug, time::Duration};
 
-use ethers::{
-    abi::AbiEncode,
-    types::{Address, Bytes, H256, U128, U256},
-};
+use alloy_primitives::{Address, Bytes, B256, /*U128,*/ U256};
+use alloy_sol_types::SolValue;
 
 /// User Operation types for Entry Point v0.6
 pub mod v0_6;
 /// User Operation types for Entry Point v0.7
 pub mod v0_7;
 
-use crate::{chain::ChainSpec, Entity};
+use crate::{authorization::Eip7702Auth, chain::ChainSpec, Entity};
 
 /// A user op must be valid for at least this long into the future to be included.
 pub const TIME_RANGE_BUFFER: Duration = Duration::from_secs(60);
@@ -33,7 +31,7 @@ pub const TIME_RANGE_BUFFER: Duration = Duration::from_secs(60);
 /// 32 bytes for user op array offset
 /// 32 bytes for beneficiary
 /// 32 bytes for array count
-/// Ontop of this offset there needs to be another 32 bytes for each
+/// On top of this offset there needs to be another 32 bytes for each
 /// user operation in the bundle to store its offset within the array
 pub const BUNDLE_BYTE_OVERHEAD: usize = 4 + 32 + 32 + 32;
 
@@ -91,19 +89,28 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     fn call_data(&self) -> &Bytes;
 
     /// Returns the call gas limit
-    fn call_gas_limit(&self) -> U256;
+    fn call_gas_limit(&self) -> u128;
 
     /// Returns the verification gas limit
-    fn verification_gas_limit(&self) -> U256;
+    fn verification_gas_limit(&self) -> u128;
 
     /// Returns the max fee per gas
-    fn max_fee_per_gas(&self) -> U256;
+    fn max_fee_per_gas(&self) -> u128;
 
     /// Returns the max priority fee per gas
-    fn max_priority_fee_per_gas(&self) -> U256;
+    fn max_priority_fee_per_gas(&self) -> u128;
 
     /// Returns the maximum cost, in wei, of this user operation
     fn max_gas_cost(&self) -> U256;
+
+    /// Returns the gas price for this UO given the base fee
+    fn gas_price(&self, base_fee: u128) -> u128 {
+        self.max_fee_per_gas()
+            .min(base_fee + self.max_priority_fee_per_gas())
+    }
+
+    /// Return the authorization list of the UO. empty if it is not 7702 txn.
+    fn authorization_tuple(&self) -> Option<Eip7702Auth>;
 
     /*
      * Enhanced functions
@@ -113,10 +120,10 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     ///
     /// The hash is used to uniquely identify a user operation in the entry point.
     /// It does not include the signature field.
-    fn hash(&self, entry_point: Address, chain_id: u64) -> H256;
+    fn hash(&self, entry_point: Address, chain_id: u64) -> B256;
 
     /// Identifies a user operation for Hybrid Compute purposes
-    fn hc_hash(&self) -> H256;
+    fn hc_hash(&self) -> B256;
 
     /// Get the user operation id
     fn id(&self) -> UserOperationId;
@@ -127,25 +134,13 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     /// Returns the heap size of the user operation
     fn heap_size(&self) -> usize;
 
-    /// Returns the total verification gas limit
-    fn total_verification_gas_limit(&self) -> U256;
-
-    /// Returns the required pre-execution buffer
-    ///
-    /// This should capture all of the gas that is needed to execute the user operation,
-    /// minus the call gas limit. The entry point will check for this buffer before
-    /// executing the user operation.
-    fn required_pre_execution_buffer(&self) -> U256;
-
     /// Returns the pre-verification gas
-    fn pre_verification_gas(&self) -> U256;
+    fn pre_verification_gas(&self) -> u128;
 
-    /// Calculate the static portion of the pre-verification gas for this user operation
-    fn calc_static_pre_verification_gas(
-        &self,
-        chain_spec: &ChainSpec,
-        include_fixed_gas_overhead: bool,
-    ) -> U256;
+    /// Get the static portion of the pre-verification gas for this user operation
+    ///
+    /// This does NOT include any shared gas costs for a bundle (i.e. intrinsic gas)
+    fn static_pre_verification_gas(&self, chain_spec: &ChainSpec) -> u128;
 
     /// Clear the signature field of the user op
     ///
@@ -158,6 +153,197 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     /// Calculate the size of the user operation in single UO bundle in bytes
     fn single_uo_bundle_size_bytes(&self) -> usize {
         self.abi_encoded_size() + BUNDLE_BYTE_OVERHEAD + USER_OP_OFFSET_WORD_SIZE
+    }
+
+    /// Gas limit functions
+    ///
+    /// Gas limit: Total as limit for the bundle transaction
+    ///     - This value is required to be high enough so that the bundle transaction does not
+    ///         run out of gas.
+    /// Execution gas limit: Gas spent during the execution part of the bundle transaction
+    ///     - This value is typically limited by block builders/sequencers and is the value by which
+    ///         we will limit the amount of gas used in a bundle.
+    ///
+    /// For example, on Arbitrum chains the L1-DA gas portion is added at the beginning of transaction execution
+    /// and uses up the gas limit of the transaction. However, this L1-DA portion is not part of the maximum gas
+    /// allowed by the sequencer per block.
+    ///
+    /// If calculating the gas limit value to put on a bundle transaction, use the gas limit functions.
+    /// If limiting the size of a bundle transaction to adhere to block gas limit, use the execution gas limit functions.
+    ///
+    /// Returns the gas limit that applies to bundle's total gas limit
+    ///
+    /// On an L2 this is the total gas limit for the bundle transaction ~including~ any potential DA costs
+    /// if the chain requires it.
+    ///
+    /// This is needed to set the gas limit for the bundle transaction.
+    ///
+    /// `bundle_size` is the size of the bundle if applying shared gas to the gas limit, otherwise `None`.
+    fn gas_limit(&self, chain_spec: &ChainSpec, bundle_size: Option<usize>) -> u128 {
+        self.pre_verification_gas_limit(chain_spec, bundle_size)
+            + self.total_verification_gas_limit()
+            + self.required_pre_execution_buffer()
+            + self.call_gas_limit()
+    }
+
+    /// Returns the gas limit that applies to the computation portion of a bundle's gas limit
+    ///
+    /// On an L2 this is the total gas limit for the bundle transaction ~excluding~ any potential DA costs.
+    ///
+    /// This is needed to limit the size of the bundle transaction to adhere to the block gas limit.
+    ///
+    /// `bundle_size` is the size of the bundle if applying shared gas to the gas limit, otherwise `None`.
+    fn computation_gas_limit(&self, chain_spec: &ChainSpec, bundle_size: Option<usize>) -> u128 {
+        self.pre_verification_execution_gas_limit(chain_spec, bundle_size)
+            + self.total_verification_gas_limit()
+            + self.required_pre_execution_buffer()
+            + self.call_gas_limit()
+    }
+
+    /// Returns the portion of pre-verification gas the applies to the DA portion of a bundle's gas limit
+    ///
+    /// On an L2 this is the portion of the pre_verification_gas that is due to DA costs
+    ///
+    /// `bundle_size` is the size of the bundle if applying shared gas to the gas limit, otherwise `None`.
+    fn pre_verification_da_gas_limit(
+        &self,
+        chain_spec: &ChainSpec,
+        bundle_size: Option<usize>,
+    ) -> u128 {
+        // On some chains (OP bedrock) the DA gas fee is charged via pre_verification_gas
+        // but this not part of the gas limit of the transaction.
+        //
+        // On other chains (Arbitrum), the DA portion IS charged in the gas limit, so calculate it here.
+        if chain_spec.da_pre_verification_gas && chain_spec.include_da_gas_in_gas_limit {
+            self.pre_verification_gas()
+                .saturating_sub(self.static_pre_verification_gas(chain_spec))
+                .saturating_sub(optional_bundle_per_uo_shared_gas(chain_spec, bundle_size))
+        } else {
+            0
+        }
+    }
+
+    /// Returns the portion of pre-verification gas the applies to the execution portion of a bundle's gas limit
+    ///
+    /// On an L2 this is the total gas limit for the bundle transaction ~excluding~ any potential DA costs
+    ///
+    /// `bundle_size` is the size of the bundle if applying shared gas to the gas limit, otherwise `None`.
+    fn pre_verification_execution_gas_limit(
+        &self,
+        chain_spec: &ChainSpec,
+        bundle_size: Option<usize>,
+    ) -> u128 {
+        // On some chains (OP bedrock, Arbitrum) the DA gas fee is charged via pre_verification_gas
+        // but this not part of the EXECUTION gas limit of the transaction.
+        //
+        // On other chains, the DA portion is zero.
+        //
+        // Thus, only consider the static portion of the pre_verification_gas in the gas limit.
+        self.static_pre_verification_gas(chain_spec)
+            .saturating_add(optional_bundle_per_uo_shared_gas(chain_spec, bundle_size))
+            .saturating_add(self.authorization_gas_limit())
+    }
+
+    /// Returns the portion of pre-verification gas that applies to a bundle's total gas limit
+    ///
+    /// On an L2 this is the total gas limit for the bundle transaction ~including~ any potential DA costs
+    ///
+    /// `bundle_size` is the size of the bundle if applying shared gas to the gas limit, otherwise `None`.
+    fn pre_verification_gas_limit(
+        &self,
+        chain_spec: &ChainSpec,
+        bundle_size: Option<usize>,
+    ) -> u128 {
+        self.pre_verification_execution_gas_limit(chain_spec, bundle_size)
+            + self.pre_verification_da_gas_limit(chain_spec, bundle_size)
+    }
+
+    /// Returns the required pre-verification gas for the given user operation
+    ///
+    /// `bundle_size` is the size of the bundle
+    /// `da_gas` is the DA gas cost for the user operation, calculated elsewhere
+    fn required_pre_verification_gas(
+        &self,
+        chain_spec: &ChainSpec,
+        bundle_size: usize,
+        da_gas: u128,
+    ) -> u128 {
+        self.static_pre_verification_gas(chain_spec)
+            .saturating_add(bundle_per_uo_shared_gas(chain_spec, bundle_size))
+            .saturating_add(da_gas)
+            .saturating_add(self.authorization_gas_limit())
+    }
+
+    /// Returns true if the user operation has enough pre-verification gas to be included in a bundle
+    ///
+    /// `bundle_size` is the size of the bundle
+    /// `da_gas` is the DA gas cost for the user operation, calculated elsewhere
+    fn has_required_pre_verification_gas(
+        &self,
+        chain_spec: &ChainSpec,
+        bundle_size: usize,
+        da_gas: u128,
+    ) -> bool {
+        self.pre_verification_gas()
+            > self.required_pre_verification_gas(chain_spec, bundle_size, da_gas)
+    }
+
+    /// Returns the total verification gas limit
+    fn total_verification_gas_limit(&self) -> u128;
+
+    /// Returns the required pre-execution buffer
+    ///
+    /// This should capture all of the gas that is needed to execute the user operation,
+    /// minus the call gas limit. The entry point will check for this buffer before
+    /// executing the user operation.
+    fn required_pre_execution_buffer(&self) -> u128;
+
+    /// Returns the limit of gas that may be used used prior to the execution of the user operation
+    fn pre_op_gas_limit(&self) -> u128 {
+        self.pre_verification_gas() + self.total_verification_gas_limit()
+    }
+
+    /// Returns the limit of gas that may be used during the execution of a user operation, including
+    /// the paymaster post operation
+    fn execution_gas_limit(&self) -> u128 {
+        self.call_gas_limit() + self.paymaster_post_op_gas_limit()
+    }
+
+    /// Returns the limit of gas that may be used during the paymaster post operation
+    fn paymaster_post_op_gas_limit(&self) -> u128;
+
+    /// Returns the gas limit for the authorization
+    fn authorization_gas_limit(&self) -> u128 {
+        if self.authorization_tuple().is_some() {
+            alloy_eips::eip7702::constants::PER_AUTH_BASE_COST as u128
+                + alloy_eips::eip7702::constants::PER_EMPTY_ACCOUNT_COST as u128
+        } else {
+            0
+        }
+    }
+}
+
+/// Returns the total shared gas for a bundle
+pub fn bundle_shared_gas(chain_spec: &ChainSpec) -> u128 {
+    chain_spec.transaction_intrinsic_gas()
+}
+
+/// Returns the shared gas per user operation for a given bundle size
+///
+/// `bundle_size` is the size of the bundle if applying shared gas to the gas limit, otherwise `None`.
+pub fn bundle_per_uo_shared_gas(chain_spec: &ChainSpec, bundle_size: usize) -> u128 {
+    if bundle_size == 0 {
+        0
+    } else {
+        bundle_shared_gas(chain_spec) / bundle_size as u128
+    }
+}
+
+fn optional_bundle_per_uo_shared_gas(chain_spec: &ChainSpec, bundle_size: Option<usize>) -> u128 {
+    if let Some(bundle_size) = bundle_size {
+        bundle_per_uo_shared_gas(chain_spec, bundle_size)
+    } else {
+        0
     }
 }
 
@@ -177,14 +363,14 @@ impl UserOperation for UserOperationVariant {
         EntryPointVersion::Unspecified
     }
 
-    fn hash(&self, entry_point: Address, chain_id: u64) -> H256 {
+    fn hash(&self, entry_point: Address, chain_id: u64) -> B256 {
         match self {
             UserOperationVariant::V0_6(op) => op.hash(entry_point, chain_id),
             UserOperationVariant::V0_7(op) => op.hash(entry_point, chain_id),
         }
     }
 
-    fn hc_hash(&self) -> H256 {
+    fn hc_hash(&self) -> B256 {
         match self {
             UserOperationVariant::V0_6(op) => op.hc_hash(),
             UserOperationVariant::V0_7(op) => op.hc_hash(),
@@ -254,64 +440,63 @@ impl UserOperation for UserOperationVariant {
         }
     }
 
-    fn call_gas_limit(&self) -> U256 {
+    fn call_gas_limit(&self) -> u128 {
         match self {
             UserOperationVariant::V0_6(op) => op.call_gas_limit(),
             UserOperationVariant::V0_7(op) => op.call_gas_limit(),
         }
     }
 
-    fn verification_gas_limit(&self) -> U256 {
+    fn verification_gas_limit(&self) -> u128 {
         match self {
             UserOperationVariant::V0_6(op) => op.verification_gas_limit(),
             UserOperationVariant::V0_7(op) => op.verification_gas_limit(),
         }
     }
 
-    fn total_verification_gas_limit(&self) -> U256 {
+    fn total_verification_gas_limit(&self) -> u128 {
         match self {
             UserOperationVariant::V0_6(op) => op.total_verification_gas_limit(),
             UserOperationVariant::V0_7(op) => op.total_verification_gas_limit(),
         }
     }
 
-    fn required_pre_execution_buffer(&self) -> U256 {
+    fn paymaster_post_op_gas_limit(&self) -> u128 {
+        match self {
+            UserOperationVariant::V0_6(op) => op.paymaster_post_op_gas_limit(),
+            UserOperationVariant::V0_7(op) => op.paymaster_post_op_gas_limit(),
+        }
+    }
+
+    fn required_pre_execution_buffer(&self) -> u128 {
         match self {
             UserOperationVariant::V0_6(op) => op.required_pre_execution_buffer(),
             UserOperationVariant::V0_7(op) => op.required_pre_execution_buffer(),
         }
     }
 
-    fn pre_verification_gas(&self) -> U256 {
+    fn pre_verification_gas(&self) -> u128 {
         match self {
             UserOperationVariant::V0_6(op) => op.pre_verification_gas(),
             UserOperationVariant::V0_7(op) => op.pre_verification_gas(),
         }
     }
 
-    fn calc_static_pre_verification_gas(
-        &self,
-        chain_spec: &ChainSpec,
-        include_fixed_gas_overhead: bool,
-    ) -> U256 {
+    fn static_pre_verification_gas(&self, chain_spec: &ChainSpec) -> u128 {
         match self {
-            UserOperationVariant::V0_6(op) => {
-                op.calc_static_pre_verification_gas(chain_spec, include_fixed_gas_overhead)
-            }
-            UserOperationVariant::V0_7(op) => {
-                op.calc_static_pre_verification_gas(chain_spec, include_fixed_gas_overhead)
-            }
+            UserOperationVariant::V0_6(op) => op.static_pre_verification_gas(chain_spec),
+            UserOperationVariant::V0_7(op) => op.static_pre_verification_gas(chain_spec),
         }
     }
 
-    fn max_fee_per_gas(&self) -> U256 {
+    fn max_fee_per_gas(&self) -> u128 {
         match self {
             UserOperationVariant::V0_6(op) => op.max_fee_per_gas(),
             UserOperationVariant::V0_7(op) => op.max_fee_per_gas(),
         }
     }
 
-    fn max_priority_fee_per_gas(&self) -> U256 {
+    fn max_priority_fee_per_gas(&self) -> u128 {
         match self {
             UserOperationVariant::V0_6(op) => op.max_priority_fee_per_gas(),
             UserOperationVariant::V0_7(op) => op.max_priority_fee_per_gas(),
@@ -329,6 +514,13 @@ impl UserOperation for UserOperationVariant {
         match self {
             UserOperationVariant::V0_6(op) => op.abi_encoded_size(),
             UserOperationVariant::V0_7(op) => op.abi_encoded_size(),
+        }
+    }
+
+    fn authorization_tuple(&self) -> Option<Eip7702Auth> {
+        match self {
+            UserOperationVariant::V0_6(op) => op.authorization_tuple(),
+            UserOperationVariant::V0_7(op) => op.authorization_tuple(),
         }
     }
 }
@@ -377,9 +569,9 @@ impl UserOperationOptionalGas {
     }
 
     /// Hash fields relevant to Hybrid Compute
-    pub fn hc_hash(&self) -> H256 {
+    pub fn hc_hash(&self, cs: &ChainSpec) -> B256 {
         match self {
-            UserOperationOptionalGas::V0_6(op) => op.hc_hash(),
+            UserOperationOptionalGas::V0_6(op) => op.hc_hash(cs),
             UserOperationOptionalGas::V0_7(op) => op.hc_hash(),
         }
     }
@@ -387,13 +579,11 @@ impl UserOperationOptionalGas {
     /// Convert into UserOperationVariant type - needed for Hybrid Compute
     pub fn into_variant(&self, cs: &ChainSpec) -> UserOperationVariant {
         match self {
-            UserOperationOptionalGas::V0_6(op) => UserOperationVariant::V0_6(
-                op.clone().into_user_operation(U256::from(0), U256::from(0)),
-            ),
+            UserOperationOptionalGas::V0_6(op) => {
+                UserOperationVariant::V0_6(op.clone().into_user_operation_builder(cs, 0, 0).build())
+            }
             UserOperationOptionalGas::V0_7(op) => UserOperationVariant::V0_7(
-                op.clone()
-                    .into_user_operation_builder(cs, U128::from(0), U128::from(0), U128::from(0))
-                    .build(),
+                op.clone().into_user_operation_builder(cs, 0, 0, 0).build(),
             ),
         }
     }
@@ -403,17 +593,17 @@ impl UserOperationOptionalGas {
 #[derive(Debug, Clone)]
 pub struct GasEstimate {
     /// Pre verification gas
-    pub pre_verification_gas: U256,
+    pub pre_verification_gas: u128,
     /// Call gas limit
-    pub call_gas_limit: U256,
+    pub call_gas_limit: u128,
     /// Verification gas limit
-    pub verification_gas_limit: U256,
+    pub verification_gas_limit: u128,
     /// Paymaster verification gas limit
     ///
     /// v0.6: unused
     ///
     /// v0.7: populated only if the user operation has a paymaster
-    pub paymaster_verification_gas_limit: Option<U256>,
+    pub paymaster_verification_gas_limit: Option<u128>,
 }
 
 /// User operations per aggregator
@@ -427,15 +617,15 @@ pub struct UserOpsPerAggregator<UO: UserOperation> {
     pub signature: Bytes,
 }
 
-pub(crate) fn op_calldata_gas_cost<UO: AbiEncode>(
+pub(crate) fn op_calldata_gas_cost<UO: SolValue>(
     uo: UO,
-    zero_byte_cost: U256,
-    non_zero_byte_cost: U256,
-    per_word_cost: U256,
-) -> U256 {
-    let encoded_op = uo.encode();
-    let length_in_words = (encoded_op.len() + 31) >> 5; // ceil(encoded_op.len() / 32)
-    let call_data_cost: U256 = encoded_op
+    zero_byte_cost: u128,
+    non_zero_byte_cost: u128,
+    per_word_cost: u128,
+) -> u128 {
+    let encoded_op = uo.abi_encode();
+    let length_in_words: u128 = (encoded_op.len() as u128 + 31) >> 5; // ceil(encoded_op.len() / 32)
+    let call_data_cost = encoded_op
         .iter()
         .map(|&x| {
             if x == 0 {

@@ -13,21 +13,19 @@
 
 use std::{collections::HashMap, future::Future, pin::Pin};
 
-use ethers::{
-    types::{spoof, Address, Bytes, H256, U256, U64},
-    utils::{hex, to_checksum},
-};
+//use alloy_provider::ProviderBuilder;
+use alloy_primitives::map::FbBuildHasher;
+use alloy_primitives::{aliases::U192, hex, Address, Bytes, B256, U128, U256, U64};
+use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
 use futures_util::future;
 use jsonrpsee::{
     core::{client::ClientT, params::ObjectParams, JsonValue},
     http_client::HttpClientBuilder,
 };
+use rundler_contracts::v0_7::{IHCHelper, ISimpleAccount};
 use rundler_types::{
-    chain::ChainSpec,
-    contracts::{v0_6::simple_account::SimpleAccount, v0_7::hc_helper::HCHelper},
-    hybrid_compute,
-    pool::Pool,
-    UserOperation, UserOperationOptionalGas, UserOperationVariant,
+    chain::ChainSpec, hybrid_compute, pool::Pool, UserOperation, UserOperationOptionalGas,
+    UserOperationVariant,
 };
 use rundler_utils::log::LogOnError;
 use tracing::Level;
@@ -90,7 +88,7 @@ where
         &self,
         op: UserOperationVariant,
         entry_point: Address,
-    ) -> EthResult<H256> {
+    ) -> EthResult<B256> {
         println!("HC send_user_operation {:?}", op);
         let bundle_size = op.single_uo_bundle_size_bytes();
         if bundle_size > self.chain_spec.max_transaction_size_bytes {
@@ -113,18 +111,26 @@ where
         //context:&EntryPointContext<P, E>,
         entry_point: Address,
         op: UserOperationOptionalGas,
-        key: H256,
-        state_override: Option<spoof::State>,
+        key: B256,
+        state_override: Option<StateOverride>,
     ) -> bool {
         let mut s2 = state_override.clone().unwrap_or_default();
         let hc_addr = self.hc.helper_addr;
+
+        let mut hm = HashMap::with_hasher(FbBuildHasher::<32>::default());
 
         // Set a 1-byte value which will trigger a special revert code
         let val_vrfy = "0xff00000000000000000000000000000000000000000000000000000000000002"
             .parse::<Bytes>()
             .unwrap();
-        s2.account(hc_addr).store(key, H256::from_slice(&val_vrfy));
+        //s2.account(hc_addr).store(key, B256::from_slice(&val_vrfy));
+        hm.insert(key, B256::from_slice(&val_vrfy));
+        let ao = AccountOverride {
+            state_diff: Some(hm),
+            ..Default::default()
+        };
 
+        s2.insert(hc_addr, ao);
         let result_v = self
             .router
             .estimate_gas(&entry_point, op.clone(), Some(s2), None)
@@ -147,7 +153,7 @@ where
         //context:&EntryPointContext<P, E>,
         entry_point: Address,
         op: UserOperationOptionalGas,
-        state_override: Option<spoof::State>,
+        state_override: Option<StateOverride>,
         revert_data: &Bytes,
     ) -> EthResult<RpcGasEstimate> {
         let s2 = state_override.unwrap_or_default();
@@ -158,7 +164,7 @@ where
         //      validation_estimation_gas_fee: 0,
         //};
 
-        let hh = op.hc_hash();
+        let hh = op.hc_hash(&self.chain_spec);
         println!("HC api.rs hh {:?}", hh);
         let op_t: UserOperationVariant = op.into_variant(&self.chain_spec);
 
@@ -166,16 +172,16 @@ where
 
         let n_key: U256 = op_t.nonce() >> 64;
         let at_price = Some(op_t.max_priority_fee_per_gas());
-        //let hc_nonce = context.gas_estimator.entry_point.get_nonce(op_t.sender(), n_key).await.unwrap();
+        //let hc_nonce = context.gas_estimator.entry_point.get_nonce(op_t.sender(), n_key.into()).await.unwrap();
         let hc_nonce = self
             .router
-            .get_nonce(&entry_point, op_t.sender(), n_key)
+            .get_nonce(&entry_point, op_t.sender(), n_key.to::<U192>())
             .await
             .unwrap();
 
         let err_nonce = self
             .router
-            .get_nonce(&entry_point, self.hc.sys_account, n_key)
+            .get_nonce(&entry_point, self.hc.sys_account, n_key.to::<U192>())
             .await
             .unwrap();
         println!(
@@ -185,10 +191,14 @@ where
             op_t.nonce(),
             n_key
         );
-        let p2 = rundler_provider::new_provider(&self.hc.node_http, None)?;
+        let p2 = rundler_provider::new_alloy_provider(&self.hc.node_http, 120)?;
+        //let p2 = ProviderBuilder::new().on_builtin(&self.hc.node_http).await.unwrap();  //FIXME error handling
 
-        let hx = HCHelper::new(self.hc.helper_addr, p2.clone());
-        let url = hx.registered_callers(ep_addr).await.expect("url_decode").1;
+        let hx = IHCHelper::new(self.hc.helper_addr, p2.clone());
+
+        let url_response = hx.RegisteredCallers(ep_addr).call().await;
+
+        let url = url_response.expect("url_decode").url;
         println!("HC registered_caller url {:?}", url);
 
         let cc = HttpClientBuilder::default().build(url); // could specify a request_timeout() here.
@@ -205,25 +215,28 @@ where
         println!("HC api.rs sk_hex {:?} mk {:?}", sk_hex, map_key);
 
         let payload = hex::encode(hybrid_compute::hc_req_payload(revert_data));
-        let n_bytes: [u8; 32] = (hc_nonce).into();
+        let n_bytes: B256 = hc_nonce.into();
         let src_n = hex::encode(n_bytes);
         let src_addr = hex::encode(op_t.sender());
 
-        let oo_n_key: U256 = U256::from_big_endian(op_t.sender().as_fixed_bytes());
+        let oo_n_key: U256 = U256::from_be_slice(op_t.sender().as_slice());
 
         let oo_nonce = self
             .router
-            .get_nonce(&entry_point, ep_addr, oo_n_key)
+            .get_nonce(&entry_point, ep_addr, oo_n_key.to::<U192>())
             .await
             .unwrap();
 
-        let ha_owner = SimpleAccount::new(ep_addr, p2).owner().await;
+        let sa = ISimpleAccount::new(ep_addr, p2);
+        let ha_result = sa.owner().call().await;
 
-        if ha_owner.is_err() {
+        if ha_result.is_err() {
             return Err(EthRpcError::Internal(anyhow::anyhow!(
                 "Failed to look up HybridAccount owner"
             )));
         }
+        let ha_owner = ha_result.unwrap()._0;
+
         // This version parameter tells the offchain RPC which version of the
         // AA contracts are being used. This affects the hashing algorithm needed
         // to generate an offchain signature.
@@ -287,7 +300,7 @@ where
                         oo_nonce,
                         map_key,
                         &self.hc,
-                        ha_owner.unwrap(),
+                        ha_owner,
                         err_nonce,
                         is_v7,
                     )
@@ -301,13 +314,13 @@ where
             }
             Err(error) => {
                 match error {
-                    jsonrpsee::core::Error::Call(e) => {
+                    jsonrpsee::core::ClientError::Call(e) => {
                         err_hc = hybrid_compute::HcErr {
                             code: 2,
                             message: "HC02: Call error: ".to_owned() + e.message(),
                         };
                     }
-                    jsonrpsee::core::Error::Transport(e) => {
+                    jsonrpsee::core::ClientError::Transport(e) => {
                         if e.to_string().contains("Connection refused")
                             || e.to_string().contains("status code: 5")
                         {
@@ -323,13 +336,13 @@ where
                             };
                         }
                     }
-                    jsonrpsee::core::Error::RequestTimeout => {
+                    jsonrpsee::core::ClientError::RequestTimeout => {
                         err_hc = hybrid_compute::HcErr {
                             code: 6,
                             message: "HC06: RequestTimeout".to_string(),
                         };
                     }
-                    jsonrpsee::core::Error::Custom(e) => {
+                    jsonrpsee::core::ClientError::Custom(e) => {
                         err_hc = hybrid_compute::HcErr {
                             code: 2,
                             message: "HC02: Custom error:".to_owned() + &e.to_string(),
@@ -396,7 +409,7 @@ where
                 .estimate_gas(
                     &entry_point,
                     op_tmp_2.clone(),
-                    Some(spoof::State::default()),
+                    Some(StateOverride::default()),
                     at_price,
                 )
                 .await;
@@ -419,7 +432,9 @@ where
 
             // The current formula used to estimate gas usage in the offchain_rpc service
             // sometimes underestimates the true cost. For now all we can do is error here.
-            if r2.call_gas_limit > op_tmp_2.into_variant(&self.chain_spec).call_gas_limit() {
+            if r2.call_gas_limit.to::<u128>()
+                > op_tmp_2.into_variant(&self.chain_spec).call_gas_limit()
+            {
                 println!("HC op_tmp_2 failed, call_gas_limit too low");
                 let msg = "HC04: Offchain call_gas_limit too low".to_string();
                 return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
@@ -428,10 +443,10 @@ where
             let offchain_gas =
                 r2.pre_verification_gas + r2.verification_gas_limit + r2.call_gas_limit;
 
-            let cleanup_keys: Vec<H256> = vec![map_key];
+            let cleanup_keys: Vec<B256> = vec![map_key];
             let c_nonce = self
                 .router
-                .get_nonce(&entry_point, self.hc.sys_account, U256::zero())
+                .get_nonce(&entry_point, self.hc.sys_account, U192::ZERO)
                 .await
                 .unwrap();
             let cleanup_op =
@@ -445,7 +460,7 @@ where
                     &entry_point,
                     // rundler_types::UserOperationOptionalGas::V0_6(op_tmp_4),
                     cleanup_op,
-                    Some(spoof::State::default()),
+                    Some(StateOverride::default()),
                     at_price,
                 )
                 .await;
@@ -477,14 +492,21 @@ where
                 needed_pvg, r3.pre_verification_gas, offchain_gas
             );
 
-            hybrid_compute::hc_set_pvg(hh, needed_pvg, offchain_gas + cleanup_gas + offchain_gas);
+            let offchain_pvg = offchain_gas
+                .saturating_add(offchain_gas)
+                .saturating_add(cleanup_gas);
+
+            hybrid_compute::hc_set_pvg(hh, needed_pvg.to::<u128>(), offchain_pvg.to::<u128>());
 
             if err_hc.code != 0 {
                 return Err(EthRpcError::Internal(anyhow::anyhow!(err_hc.message)));
             }
 
-            let total_gas = needed_pvg + (r3.verification_gas_limit + VG_PAD) + r3.call_gas_limit;
-            if total_gas > U256::from(25_000_000) {
+            let total_gas = needed_pvg
+                .saturating_add(r3.verification_gas_limit)
+                .saturating_add(U128::from(VG_PAD))
+                .saturating_add(r3.call_gas_limit);
+            if total_gas > U128::from(25_000_000) {
                 // Approaching the block gas limit
                 let err_msg: String =
                     "Excessive HC total_gas estimate = ".to_owned() + &total_gas.to_string();
@@ -492,7 +514,7 @@ where
             }
 
             Ok(RpcGasEstimateV0_6 {
-                pre_verification_gas: (needed_pvg + PVG_PAD),
+                pre_verification_gas: needed_pvg.saturating_add(U128::from(PVG_PAD)),
                 verification_gas_limit: r3.verification_gas_limit,
                 call_gas_limit: r3.call_gas_limit,
             }
@@ -506,7 +528,7 @@ where
         &self,
         op: UserOperationOptionalGas,
         entry_point: Address,
-        state_override: Option<spoof::State>,
+        state_override: Option<StateOverride>,
     ) -> EthResult<RpcGasEstimate> {
         let bundle_size = op.single_uo_bundle_size_bytes();
         if bundle_size > self.chain_spec.max_transaction_size_bytes {
@@ -526,15 +548,23 @@ where
             Ok(ref estimate) => {
                 if let RpcGasEstimate::V0_6(estimate6) = estimate {
                     return Ok(RpcGasEstimateV0_6 {
-                        pre_verification_gas: estimate6.pre_verification_gas + PVG_PAD,
-                        verification_gas_limit: estimate6.verification_gas_limit + VG_PAD,
+                        pre_verification_gas: estimate6
+                            .pre_verification_gas
+                            .saturating_add(U128::from(PVG_PAD)),
+                        verification_gas_limit: estimate6
+                            .verification_gas_limit
+                            .saturating_add(U128::from(VG_PAD)),
                         call_gas_limit: estimate6.call_gas_limit,
                     }
                     .into());
                 } else if let RpcGasEstimate::V0_7(estimate7) = estimate {
                     return Ok(RpcGasEstimateV0_7 {
-                        pre_verification_gas: estimate7.pre_verification_gas + PVG_PAD,
-                        verification_gas_limit: estimate7.verification_gas_limit + VG_PAD,
+                        pre_verification_gas: estimate7
+                            .pre_verification_gas
+                            .saturating_add(U128::from(PVG_PAD)),
+                        verification_gas_limit: estimate7
+                            .verification_gas_limit
+                            .saturating_add(U128::from(VG_PAD)),
                         call_gas_limit: estimate7.call_gas_limit,
                         paymaster_verification_gas_limit: estimate7
                             .paymaster_verification_gas_limit,
@@ -548,7 +578,7 @@ where
                     println!("HC api.rs HC trigger at bn {}", bn);
 
                     let map_key = hybrid_compute::hc_map_key(&r.revert_data);
-                    let key: H256 = hybrid_compute::hc_storage_key(map_key);
+                    let key: B256 = hybrid_compute::hc_storage_key(map_key);
 
                     if self
                         .hc_verify_trigger(entry_point, op.clone(), key, state_override.clone())
@@ -573,9 +603,9 @@ where
 
     pub(crate) async fn get_user_operation_by_hash(
         &self,
-        hash: H256,
+        hash: B256,
     ) -> EthResult<Option<RpcUserOperationByHash>> {
-        if hash == H256::zero() {
+        if hash == B256::ZERO {
             return Err(EthRpcError::InvalidParams(
                 "Missing/invalid userOpHash".to_string(),
             ));
@@ -598,9 +628,9 @@ where
 
     pub(crate) async fn get_user_operation_receipt(
         &self,
-        hash: H256,
+        hash: B256,
     ) -> EthResult<Option<RpcUserOperationReceipt>> {
-        if hash == H256::zero() {
+        if hash == B256::ZERO {
             return Err(EthRpcError::InvalidParams(
                 "Missing/invalid userOpHash".to_string(),
             ));
@@ -619,17 +649,17 @@ where
         Ok(self
             .router
             .entry_points()
-            .map(|ep| to_checksum(ep, None))
+            .map(|ep| ep.to_checksum(None))
             .collect())
     }
 
     pub(crate) async fn chain_id(&self) -> EthResult<U64> {
-        Ok(self.chain_spec.id.into())
+        Ok(U64::from(self.chain_spec.id))
     }
 
     async fn get_pending_user_operation_by_hash(
         &self,
-        hash: H256,
+        hash: B256,
     ) -> EthResult<Option<RpcUserOperationByHash>> {
         let res = self
             .pool
@@ -651,15 +681,14 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use ethers::{
-        abi::AbiEncode,
-        types::{Bytes, Log, Transaction},
-    };
+    use alloy_consensus::{Signed, TxEip1559, TxEnvelope::Eip1559};
+    use alloy_primitives::{Log as PrimitiveLog, LogData, PrimitiveSignature, TxKind, U256};
+    use alloy_sol_types::SolInterface;
     use mockall::predicate::eq;
-    use rundler_provider::{MockEntryPointV0_6, MockProvider};
+    use rundler_contracts::v0_6::IEntryPoint::{handleOpsCall, IEntryPointCalls};
+    use rundler_provider::{Log, MockEntryPointV0_6, MockEvmProvider, Transaction};
     use rundler_sim::MockGasEstimator;
     use rundler_types::{
-        contracts::v0_6::i_entry_point::{HandleOpsCall, IEntryPointCalls},
         pool::{MockPool, PoolOperation},
         v0_6::UserOperation,
         EntityInfos, UserOperation as UserOperationTrait, ValidTimeRange,
@@ -681,11 +710,12 @@ mod tests {
             entry_point: ep,
             aggregator: None,
             valid_time_range: ValidTimeRange::default(),
-            expected_code_hash: H256::random(),
-            sim_block_hash: H256::random(),
+            expected_code_hash: B256::random(),
+            sim_block_hash: B256::random(),
             sim_block_number: 1000,
             account_is_staked: false,
             entity_infos: EntityInfos::default(),
+            da_gas_data: rundler_types::da::DAGasUOData::Empty,
         };
 
         let mut pool = MockPool::default();
@@ -694,12 +724,12 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(Some(po.clone())));
 
-        let mut provider = MockProvider::default();
+        let mut provider = MockEvmProvider::default();
         provider.expect_get_logs().returning(move |_| Ok(vec![]));
         provider.expect_get_block_number().returning(|| Ok(1000));
 
         let mut entry_point = MockEntryPointV0_6::default();
-        entry_point.expect_address().returning(move || ep);
+        entry_point.expect_address().return_const(ep);
 
         let api = create_api(provider, entry_point, pool, MockGasEstimator::default());
         let res = api.get_user_operation_by_hash(hash).await.unwrap();
@@ -723,32 +753,48 @@ mod tests {
         let uo = UserOperation::default();
         let hash = uo.hash(ep, 1);
         let block_number = 1000;
-        let block_hash = H256::random();
+        let block_hash = B256::random();
 
         let mut pool = MockPool::default();
         pool.expect_get_op_by_hash()
             .with(eq(hash))
             .returning(move |_| Ok(None));
 
-        let mut provider = MockProvider::default();
+        let mut provider = MockEvmProvider::default();
         provider.expect_get_block_number().returning(|| Ok(1000));
 
-        let tx_data: Bytes = IEntryPointCalls::HandleOps(HandleOpsCall {
-            beneficiary: Address::zero(),
-            ops: vec![uo.clone()],
+        let tx_data = IEntryPointCalls::handleOps(handleOpsCall {
+            ops: vec![uo.clone().into()],
+            beneficiary: Address::ZERO,
         })
-        .encode()
-        .into();
-        let tx = Transaction {
-            to: Some(ep),
-            input: tx_data,
-            block_number: Some(block_number.into()),
-            block_hash: Some(block_hash),
+        .abi_encode();
+
+        let inner_txn = TxEip1559 {
+            to: TxKind::Call(ep),
+            input: tx_data.into(),
             ..Default::default()
         };
-        let tx_hash = tx.hash();
+
+        let inner = Eip1559(Signed::new_unchecked(
+            inner_txn,
+            PrimitiveSignature::test_signature(),
+            hash,
+        ));
+        let tx = Transaction {
+            inner,
+            block_hash: Some(block_hash),
+            block_number: Some(block_number),
+            transaction_index: None,
+            effective_gas_price: None,
+            from: Address::default(),
+        };
+
+        let tx_hash = *tx.inner.tx_hash();
         let log = Log {
-            address: ep,
+            inner: PrimitiveLog {
+                address: ep,
+                data: LogData::default(),
+            },
             transaction_hash: Some(tx_hash),
             ..Default::default()
         };
@@ -757,19 +803,19 @@ mod tests {
             .expect_get_logs()
             .returning(move |_| Ok(vec![log.clone()]));
         provider
-            .expect_get_transaction()
+            .expect_get_transaction_by_hash()
             .with(eq(tx_hash))
             .returning(move |_| Ok(Some(tx.clone())));
 
         let mut entry_point = MockEntryPointV0_6::default();
-        entry_point.expect_address().returning(move || ep);
+        entry_point.expect_address().return_const(ep);
 
         let api = create_api(provider, entry_point, pool, MockGasEstimator::default());
         let res = api.get_user_operation_by_hash(hash).await.unwrap();
         let ro = RpcUserOperationByHash {
             user_operation: UserOperationVariant::from(uo).into(),
             entry_point: ep.into(),
-            block_number: Some(block_number.into()),
+            block_number: Some(U256::from(block_number)),
             block_hash: Some(block_hash),
             transaction_hash: Some(tx_hash),
         };
@@ -788,12 +834,12 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(None));
 
-        let mut provider = MockProvider::default();
+        let mut provider = MockEvmProvider::default();
         provider.expect_get_logs().returning(move |_| Ok(vec![]));
         provider.expect_get_block_number().returning(|| Ok(1000));
 
         let mut entry_point = MockEntryPointV0_6::default();
-        entry_point.expect_address().returning(move || ep);
+        entry_point.expect_address().return_const(ep);
 
         let api = create_api(provider, entry_point, pool, MockGasEstimator::default());
         let res = api.get_user_operation_by_hash(hash).await.unwrap();
@@ -801,7 +847,7 @@ mod tests {
     }
 
     fn create_api(
-        provider: MockProvider,
+        provider: MockEvmProvider,
         ep: MockEntryPointV0_6,
         pool: MockPool,
         gas_estimator: MockGasEstimator,

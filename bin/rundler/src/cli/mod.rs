@@ -11,8 +11,12 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
+use std::{sync::Arc, time::Duration};
+
+use alloy_primitives::{Address, B256, U256};
 use anyhow::{bail, Context};
 use clap::{builder::PossibleValuesParser, Args, Parser, Subcommand};
+use rundler_contracts::v0_7::IHCHelper;
 
 mod builder;
 mod chain_spec;
@@ -24,15 +28,22 @@ mod rpc;
 mod tracing;
 
 use builder::BuilderCliArgs;
-use ethers::types::{Address, H256};
 use node::NodeCliArgs;
 use pool::PoolCliArgs;
+use reth_tasks::TaskManager;
 use rpc::RpcCliArgs;
+use rundler_provider::{
+    AlloyEntryPointV0_6, AlloyEntryPointV0_7, AlloyEvmProvider, DAGasOracleSync,
+    EntryPointProvider, EvmProvider, Providers,
+};
 use rundler_rpc::{EthApiSettings, RundlerApiSettings};
 use rundler_sim::{
     EstimationSettings, PrecheckSettings, PriorityFeeMode, SimulationSettings, MIN_CALL_GAS_LIMIT,
 };
-use rundler_types::{contracts::v0_7::hc_helper::HCHelper, hybrid_compute};
+use rundler_types::{
+    chain::ChainSpec, da::DAGasOracleType, hybrid_compute,
+    v0_6::UserOperation as UserOperationV0_6, v0_7::UserOperation as UserOperationV0_7,
+};
 
 /// Main entry point for the CLI
 ///
@@ -43,11 +54,16 @@ pub async fn run() -> anyhow::Result<()> {
     let _guard = tracing::configure_logging(&opt.logs)?;
     tracing::info!("Parsed CLI options: {:#?}", opt);
 
+    let mut task_manager = TaskManager::current();
+    let task_spawner = task_manager.executor();
+
     let metrics_addr = format!("{}:{}", opt.metrics.host, opt.metrics.port).parse()?;
     metrics::initialize(
+        &task_spawner,
         opt.metrics.sample_interval_millis,
         metrics_addr,
         &opt.metrics.tags,
+        &opt.metrics.buckets,
     )
     .context("metrics server should start")?;
 
@@ -58,12 +74,14 @@ pub async fn run() -> anyhow::Result<()> {
         .node_http
         .clone()
         .expect("must provide node_http");
-    let p2 = rundler_provider::new_provider(&node_http, None)?;
-    let hx = HCHelper::new(opt.common.hc_helper_addr, p2);
+    let p2 = rundler_provider::new_alloy_provider(&node_http, 120)?;
+    let hx = IHCHelper::new(opt.common.hc_helper_addr, p2);
     let slot_idx = hx
-        .response_slot()
+        .ResponseSlot()
+        .call()
         .await
-        .expect("Failed to get ResponseSlot");
+        .expect("Failed to get ResponseSlot")
+        ._0;
 
     hybrid_compute::init(
         opt.common.hc_helper_addr,
@@ -76,11 +94,30 @@ pub async fn run() -> anyhow::Result<()> {
     );
 
     match opt.command {
-        Command::Node(args) => node::run(cs, *args, opt.common).await?,
-        Command::Pool(args) => pool::run(cs, args, opt.common).await?,
-        Command::Rpc(args) => rpc::run(cs, args, opt.common).await?,
-        Command::Builder(args) => builder::run(cs, args, opt.common).await?,
+        Command::Node(args) => {
+            node::spawn_tasks(task_spawner.clone(), cs, *args, opt.common).await?
+        }
+        Command::Pool(args) => {
+            pool::spawn_tasks(task_spawner.clone(), cs, args, opt.common).await?
+        }
+        Command::Rpc(args) => rpc::spawn_tasks(task_spawner.clone(), cs, args, opt.common).await?,
+        Command::Builder(args) => {
+            builder::spawn_tasks(task_spawner.clone(), cs, args, opt.common).await?
+        }
     }
+
+    // wait for ctrl-c or the task manager to panic
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Received ctrl-c, shutting down");
+        },
+        e = &mut task_manager => {
+            tracing::error!("Task manager panicked, shutting down: {e}");
+        },
+    }
+
+    // wait for the task manager to shutdown
+    task_manager.graceful_shutdown_with_timeout(Duration::from_secs(10));
 
     tracing::info!("Shutdown, goodbye");
     Ok(())
@@ -166,7 +203,7 @@ pub struct CommonArgs {
         env = "MAX_BUNDLE_GAS",
         global = true
     )]
-    max_bundle_gas: u64,
+    max_bundle_gas: u128,
 
     #[arg(
         long = "min_stake_value",
@@ -223,7 +260,16 @@ pub struct CommonArgs {
         default_value = "1000000000000", // 10K gwei
         global = true
     )]
-    verification_estimation_gas_fee: u64,
+    verification_estimation_gas_fee: u128,
+
+    #[arg(
+        long = "bundle_base_fee_overhead_percent",
+        name = "bundle_base_fee_overhead_percent",
+        env = "BUNDLE_BASE_FEE_OVERHEAD_PERCENT",
+        default_value = "27", // 2 12.5% EIP-1559 increases
+        global = true
+    )]
+    bundle_base_fee_overhead_percent: u32,
 
     #[arg(
         long = "bundle_priority_fee_overhead_percent",
@@ -232,7 +278,7 @@ pub struct CommonArgs {
         default_value = "0",
         global = true
     )]
-    bundle_priority_fee_overhead_percent: u64,
+    bundle_priority_fee_overhead_percent: u32,
 
     #[arg(
         long = "priority_fee_mode_kind",
@@ -251,7 +297,7 @@ pub struct CommonArgs {
         default_value = "0",
         global = true
     )]
-    priority_fee_mode_value: u64,
+    priority_fee_mode_value: u32,
 
     #[arg(
         long = "base_fee_accept_percent",
@@ -260,7 +306,7 @@ pub struct CommonArgs {
         default_value = "50",
         global = true
     )]
-    base_fee_accept_percent: u64,
+    base_fee_accept_percent: u32,
 
     #[arg(
         long = "pre_verification_gas_accept_percent",
@@ -269,16 +315,7 @@ pub struct CommonArgs {
         default_value = "50",
         global = true
     )]
-    pre_verification_gas_accept_percent: u64,
-
-    #[arg(
-        long = "aws_region",
-        name = "aws_region",
-        env = "AWS_REGION",
-        default_value = "us-east-1",
-        global = true
-    )]
-    aws_region: String,
+    pre_verification_gas_accept_percent: u32,
 
     #[arg(
         long = "mempool_config_path",
@@ -327,6 +364,29 @@ pub struct CommonArgs {
     pub num_builders_v0_7: u64,
 
     #[arg(
+        long = "da_gas_tracking_enabled",
+        name = "da_gas_tracking_enabled",
+        env = "DA_GAS_TRACKING_ENABLED",
+        default_value = "false"
+    )]
+    pub da_gas_tracking_enabled: bool,
+
+    #[arg(
+        long = "provider_client_timeout_seconds",
+        name = "provider_client_timeout_seconds",
+        env = "PROVIDER_CLIENT_TIMEOUT_SECONDS",
+        default_value = "10"
+    )]
+    pub provider_client_timeout_seconds: u64,
+
+    #[arg(
+        long = "max_expected_storage_slots",
+        name = "max_expected_storage_slots",
+        env = "MAX_EXPECTED_STORAGE_SLOTS"
+    )]
+    pub max_expected_storage_slots: Option<usize>,
+
+    #[arg(
         long = "hc_helper_addr",
         name = "hc_helper_addr",
         env = "HC_HELPER_ADDR"
@@ -348,7 +408,7 @@ pub struct CommonArgs {
         name = "hc_sys_privkey",
         env = "HC_SYS_PRIVKEY"
     )]
-    hc_sys_privkey: H256,
+    hc_sys_privkey: B256,
 }
 
 const SIMULATION_GAS_OVERHEAD: u64 = 100_000;
@@ -367,8 +427,9 @@ impl TryFrom<&CommonArgs> for EstimationSettings {
                 SIMULATION_GAS_OVERHEAD
             );
         }
-        let max_call_gas = value.max_simulate_handle_ops_gas - value.max_verification_gas;
-        if max_call_gas < MIN_CALL_GAS_LIMIT.as_u64() {
+        let max_call_gas: u128 =
+            (value.max_simulate_handle_ops_gas - value.max_verification_gas) as u128;
+        if max_call_gas < MIN_CALL_GAS_LIMIT {
             anyhow::bail!(
                 "max_simulate_handle_ops_gas ({}) must be greater than max_verification_gas ({}) by at least {MIN_CALL_GAS_LIMIT}",
                 value.max_verification_gas,
@@ -376,9 +437,9 @@ impl TryFrom<&CommonArgs> for EstimationSettings {
             );
         }
         Ok(Self {
-            max_verification_gas: value.max_verification_gas,
+            max_verification_gas: value.max_verification_gas as u128,
             max_call_gas,
-            max_paymaster_verification_gas: value.max_verification_gas,
+            max_paymaster_verification_gas: value.max_verification_gas as u128,
             max_paymaster_post_op_gas: max_call_gas,
             max_total_execution_gas: value.max_bundle_gas,
             max_simulate_handle_ops_gas: value.max_simulate_handle_ops_gas,
@@ -392,8 +453,9 @@ impl TryFrom<&CommonArgs> for PrecheckSettings {
 
     fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
         Ok(Self {
-            max_verification_gas: value.max_verification_gas.into(),
-            max_total_execution_gas: value.max_bundle_gas.into(),
+            max_verification_gas: value.max_verification_gas as u128,
+            max_total_execution_gas: value.max_bundle_gas,
+            bundle_base_fee_overhead_percent: value.bundle_base_fee_overhead_percent,
             bundle_priority_fee_overhead_percent: value.bundle_priority_fee_overhead_percent,
             priority_fee_mode: PriorityFeeMode::try_from(
                 value.priority_fee_mode_kind.as_str(),
@@ -415,9 +477,7 @@ impl TryFrom<&CommonArgs> for SimulationSettings {
 
         Ok(Self::new(
             value.min_unstake_delay,
-            value.min_stake_value,
-            value.max_simulate_handle_ops_gas,
-            value.max_verification_gas,
+            U256::from(value.min_stake_value),
             value.tracer_timeout.clone(),
         ))
     }
@@ -439,7 +499,6 @@ impl TryFrom<&CommonArgs> for RundlerApiSettings {
                 value.priority_fee_mode_value,
             )?,
             bundle_priority_fee_overhead_percent: value.bundle_priority_fee_overhead_percent,
-            max_verification_gas: value.max_verification_gas,
         })
     }
 }
@@ -490,6 +549,23 @@ pub struct MetricsArgs {
         global = true
     )]
     sample_interval_millis: u64,
+
+    /// Bucket for histogram metric.
+    #[arg(
+        long = "metrics.histogram_buckets", 
+        name = "metrics.histogram_buckets",
+        env = "METRICS_HISTOGRAM_BUCKETS",
+        default_values_t = vec![
+            // Exponential buckets from 0 to 256
+            0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
+            // Fine-grained buckets from 500 to 1000
+            500.0, 600.0, 700.0, 800.0, 900.0, 1000.0,
+            // Coarser buckets from 1000 to 10,000
+            2000.0, 3000.0, 4000.0, 5000.0, 7500.0, 10000.0,
+        ],
+        global = true
+    )]
+    buckets: Vec<f64>,
 }
 
 /// CLI options for logging
@@ -536,4 +612,104 @@ pub struct Cli {
 
     #[clap(flatten)]
     logs: LogsArgs,
+}
+
+#[derive(Clone)]
+pub struct RundlerProviders<P, EP06, EP07, D> {
+    provider: P,
+    ep_v0_6: Option<EP06>,
+    ep_v0_7: Option<EP07>,
+    da_gas_oracle_sync: Option<D>,
+}
+
+impl<P, EP06, EP07, D> Providers for RundlerProviders<P, EP06, EP07, D>
+where
+    P: EvmProvider + Clone,
+    EP06: EntryPointProvider<UserOperationV0_6> + Clone,
+    EP07: EntryPointProvider<UserOperationV0_7> + Clone,
+    D: DAGasOracleSync + Clone,
+{
+    type Evm = P;
+    type EntryPointV0_6 = EP06;
+    type EntryPointV0_7 = EP07;
+    type DAGasOracleSync = D;
+
+    fn evm(&self) -> &Self::Evm {
+        &self.provider
+    }
+
+    fn ep_v0_6(&self) -> &Option<Self::EntryPointV0_6> {
+        &self.ep_v0_6
+    }
+
+    fn ep_v0_7(&self) -> &Option<Self::EntryPointV0_7> {
+        &self.ep_v0_7
+    }
+
+    fn da_gas_oracle_sync(&self) -> &Option<Self::DAGasOracleSync> {
+        &self.da_gas_oracle_sync
+    }
+}
+
+pub fn construct_providers(
+    args: &CommonArgs,
+    chain_spec: &ChainSpec,
+) -> anyhow::Result<impl Providers> {
+    let provider = Arc::new(rundler_provider::new_alloy_provider(
+        args.node_http.as_ref().context("must provide node_http")?,
+        args.provider_client_timeout_seconds,
+    )?);
+    let (da_gas_oracle, da_gas_oracle_sync) =
+        rundler_provider::new_alloy_da_gas_oracle(chain_spec, provider.clone());
+
+    let ep_v0_6 = if args.disable_entry_point_v0_6 {
+        None
+    } else {
+        Some(AlloyEntryPointV0_6::new(
+            chain_spec.clone(),
+            args.max_verification_gas,
+            args.max_simulate_handle_ops_gas,
+            args.max_simulate_handle_ops_gas,
+            provider.clone(),
+            da_gas_oracle.clone(),
+        ))
+    };
+
+    let ep_v0_7 = if args.disable_entry_point_v0_7 {
+        None
+    } else {
+        Some(AlloyEntryPointV0_7::new(
+            chain_spec.clone(),
+            args.max_verification_gas,
+            args.max_simulate_handle_ops_gas,
+            args.max_simulate_handle_ops_gas,
+            provider.clone(),
+            da_gas_oracle.clone(),
+        ))
+    };
+
+    Ok(RundlerProviders {
+        provider: AlloyEvmProvider::new(provider),
+        ep_v0_6,
+        ep_v0_7,
+        da_gas_oracle_sync,
+    })
+}
+
+fn lint_da_gas_tracking(da_gas_tracking_enabled: bool, chain_spec: &ChainSpec) -> bool {
+    if !da_gas_tracking_enabled {
+        return false;
+    }
+
+    if !chain_spec.da_pre_verification_gas {
+        tracing::warn!("DA tracking is disabled because DA pre-verification gas is not enabled");
+        false
+    } else if !(chain_spec.da_gas_oracle_type == DAGasOracleType::CachedNitro
+        || chain_spec.da_gas_oracle_type == DAGasOracleType::LocalBedrock)
+    {
+        tracing::warn!("DA tracking is disabled because DA gas oracle contract type {:?} does not support caching", chain_spec.da_gas_oracle_type);
+        false
+    } else {
+        true
+    }
 }

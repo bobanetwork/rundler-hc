@@ -11,6 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
+use alloy_sol_types::Panic;
 use anyhow::{bail, Context};
 use rundler_task::grpc::protos::{from_bytes, ToProtoBytes};
 use rundler_types::{
@@ -26,19 +27,21 @@ use super::protos::{
     AssociatedStorageDuringDeploy, AssociatedStorageIsAlternateSender, CallGasLimitTooLow,
     CallHadValue, CalledBannedEntryPointMethod, CodeHashChanged, DidNotRevert,
     DiscardedOnInsertError, Entity, EntityThrottledError, EntityType, EntryPointRevert,
-    ExistingSenderWithInitCode, FactoryCalledCreate2Twice, FactoryIsNotContract,
-    InvalidAccountSignature, InvalidPaymasterSignature, InvalidSignature, InvalidStorageAccess,
-    InvalidTimeRange, MaxFeePerGasTooLow, MaxOperationsReachedError, MaxPriorityFeePerGasTooLow,
-    MempoolError as ProtoMempoolError, MultipleRolesViolation, NotStaked,
-    OperationAlreadyKnownError, OperationDropTooSoon, OperationRevert, OutOfGas,
-    PaymasterBalanceTooLow, PaymasterDepositTooLow, PaymasterIsNotContract,
-    PreVerificationGasTooLow, PrecheckViolationError as ProtoPrecheckViolationError,
-    ReplacementUnderpricedError, SenderAddressUsedAsAlternateEntity, SenderFundsTooLow,
-    SenderIsNotContractAndNoInitCode, SimulationViolationError as ProtoSimulationViolationError,
+    ExecutionGasLimitEfficiencyTooLow, ExistingSenderWithInitCode, FactoryCalledCreate2Twice,
+    FactoryIsNotContract, FactoryMustBeEmpty, InvalidAccountSignature, InvalidPaymasterSignature,
+    InvalidSignature, InvalidStorageAccess, InvalidTimeRange, MaxFeePerGasTooLow,
+    MaxOperationsReachedError, MaxPriorityFeePerGasTooLow, MempoolError as ProtoMempoolError,
+    MultipleRolesViolation, NotStaked, OperationAlreadyKnownError, OperationDropTooSoon,
+    OperationRevert, OutOfGas, PanicRevert, PaymasterBalanceTooLow, PaymasterDepositTooLow,
+    PaymasterIsNotContract, PreOpGasLimitEfficiencyTooLow, PreVerificationGasTooLow,
+    PrecheckViolationError as ProtoPrecheckViolationError, ReplacementUnderpricedError,
+    SenderAddressUsedAsAlternateEntity, SenderFundsTooLow, SenderIsNotContractAndNoInitCode,
+    SimulationViolationError as ProtoSimulationViolationError, TooManyExpectedStorageSlots,
     TotalGasLimitTooHigh, UnintendedRevert, UnintendedRevertWithMessage, UnknownEntryPointError,
     UnknownRevert, UnstakedAggregator, UnstakedPaymasterContext, UnsupportedAggregatorError,
-    UsedForbiddenOpcode, UsedForbiddenPrecompile, ValidationRevert as ProtoValidationRevert,
-    VerificationGasLimitBufferTooLow, VerificationGasLimitTooHigh, WrongNumberOfPhases,
+    UseUnsupportedEip, UsedForbiddenOpcode, UsedForbiddenPrecompile,
+    ValidationRevert as ProtoValidationRevert, VerificationGasLimitBufferTooLow,
+    VerificationGasLimitTooHigh, WrongNumberOfPhases,
 };
 
 impl TryFrom<ProtoMempoolError> for PoolError {
@@ -124,6 +127,21 @@ impl TryFrom<ProtoMempoolError> for MempoolError {
             }
             Some(mempool_error::Error::OperationDropTooSoon(e)) => {
                 MempoolError::OperationDropTooSoon(e.added_at, e.attempted_at, e.must_wait)
+            }
+            Some(mempool_error::Error::PreOpGasLimitEfficiencyTooLow(e)) => {
+                MempoolError::PreOpGasLimitEfficiencyTooLow(e.required, e.actual)
+            }
+            Some(mempool_error::Error::ExecutionGasLimitEfficiencyTooLow(e)) => {
+                MempoolError::ExecutionGasLimitEfficiencyTooLow(e.required, e.actual)
+            }
+            Some(mempool_error::Error::TooManyExpectedStorageSlots(e)) => {
+                MempoolError::TooManyExpectedStorageSlots(
+                    e.max_slots.try_into()?,
+                    e.expected_slots.try_into()?,
+                )
+            }
+            Some(mempool_error::Error::UseUnsupportedEip(e)) => {
+                MempoolError::EIPNotSupported(e.eip_name)
             }
             None => bail!("unknown proto mempool error"),
         })
@@ -229,6 +247,33 @@ impl From<MempoolError> for ProtoMempoolError {
                     )),
                 }
             }
+            MempoolError::PreOpGasLimitEfficiencyTooLow(required, actual) => ProtoMempoolError {
+                error: Some(mempool_error::Error::PreOpGasLimitEfficiencyTooLow(
+                    PreOpGasLimitEfficiencyTooLow { required, actual },
+                )),
+            },
+            MempoolError::ExecutionGasLimitEfficiencyTooLow(required, actual) => {
+                ProtoMempoolError {
+                    error: Some(mempool_error::Error::ExecutionGasLimitEfficiencyTooLow(
+                        ExecutionGasLimitEfficiencyTooLow { required, actual },
+                    )),
+                }
+            }
+            MempoolError::TooManyExpectedStorageSlots(max_slots, expected_slots) => {
+                ProtoMempoolError {
+                    error: Some(mempool_error::Error::TooManyExpectedStorageSlots(
+                        TooManyExpectedStorageSlots {
+                            max_slots: max_slots as u64,
+                            expected_slots: expected_slots as u64,
+                        },
+                    )),
+                }
+            }
+            MempoolError::EIPNotSupported(msg) => ProtoMempoolError {
+                error: Some(mempool_error::Error::UseUnsupportedEip(UseUnsupportedEip {
+                    eip_name: msg,
+                })),
+            },
         }
     }
 }
@@ -346,6 +391,13 @@ impl From<PrecheckViolation> for ProtoPrecheckViolationError {
                     },
                 )),
             },
+            PrecheckViolation::FactoryMustBeEmpty(addr) => ProtoPrecheckViolationError {
+                violation: Some(precheck_violation_error::Violation::FactoryMustBeEmpty(
+                    FactoryMustBeEmpty {
+                        factory_address: addr.to_proto_bytes(),
+                    },
+                )),
+            },
         }
     }
 }
@@ -414,6 +466,9 @@ impl TryFrom<ProtoPrecheckViolationError> for PrecheckViolation {
                     from_bytes(&e.actual_gas_limit)?,
                     from_bytes(&e.min_gas_limit)?,
                 )
+            }
+            Some(precheck_violation_error::Violation::FactoryMustBeEmpty(e)) => {
+                PrecheckViolation::FactoryMustBeEmpty(from_bytes(&e.factory_address)?)
             }
             None => {
                 bail!("unknown proto mempool precheck violation")
@@ -535,7 +590,7 @@ impl From<SimulationViolation> for ProtoSimulationViolationError {
                         accessed_entity: EntityType::from(stake_data.accessed_entity) as i32,
                         slot: stake_data.slot.to_proto_bytes(),
                         min_stake: stake_data.min_stake.to_proto_bytes(),
-                        min_unstake_delay: stake_data.min_unstake_delay.to_proto_bytes(),
+                        min_unstake_delay: stake_data.min_unstake_delay,
                     },
                 )),
             },
@@ -750,7 +805,7 @@ impl TryFrom<ProtoSimulationViolationError> for SimulationViolation {
                     accessed_entity,
                     slot: from_bytes(&e.slot)?,
                     min_stake: from_bytes(&e.min_stake)?,
-                    min_unstake_delay: from_bytes(&e.min_unstake_delay)?,
+                    min_unstake_delay: e.min_unstake_delay,
                 }))
             }
             Some(simulation_violation_error::Violation::UnintendedRevert(e)) => {
@@ -845,6 +900,9 @@ impl From<ValidationRevert> for ProtoValidationRevert {
                     revert_bytes: revert_bytes.to_vec(),
                 })
             }
+            ValidationRevert::Panic(panic) => validation_revert::Revert::Panic(PanicRevert {
+                code: panic.code.to_proto_bytes(),
+            }),
         };
         ProtoValidationRevert {
             revert: Some(inner),
@@ -868,6 +926,9 @@ impl TryFrom<ProtoValidationRevert> for ValidationRevert {
             Some(validation_revert::Revert::Unknown(e)) => {
                 ValidationRevert::Unknown(e.revert_bytes.into())
             }
+            Some(validation_revert::Revert::Panic(e)) => ValidationRevert::Panic(Panic {
+                code: from_bytes(&e.code)?,
+            }),
             None => {
                 bail!("unknown proto validation revert")
             }
@@ -877,6 +938,8 @@ impl TryFrom<ProtoValidationRevert> for ValidationRevert {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::U256;
+
     use super::*;
 
     #[test]
@@ -893,15 +956,15 @@ mod tests {
     #[test]
     fn test_precheck_error() {
         let error = MempoolError::PrecheckViolation(PrecheckViolation::SenderFundsTooLow(
-            0.into(),
-            0.into(),
+            U256::ZERO,
+            U256::ZERO,
         ));
         let proto_error: ProtoMempoolError = error.into();
         let error2 = proto_error.try_into().unwrap();
         match error2 {
             MempoolError::PrecheckViolation(PrecheckViolation::SenderFundsTooLow(x, y)) => {
-                assert_eq!(x, 0.into());
-                assert_eq!(y, 0.into());
+                assert_eq!(x, U256::ZERO);
+                assert_eq!(y, U256::ZERO);
             }
             _ => panic!("wrong error type"),
         }

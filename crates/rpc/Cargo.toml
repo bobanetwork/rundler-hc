@@ -5,21 +5,31 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
-rundler-provider = { path = "../provider" }
-rundler-sim = { path = "../sim" }
-rundler-task = { path = "../task" }
-rundler-types = { path = "../types" }
-rundler-utils = { path = "../utils" }
+alloy-consensus.workspace = true
+rundler-contracts.workspace = true
+rundler-provider.workspace = true
+rundler-sim.workspace = true
+rundler-task.workspace = true
+rundler-types.workspace = true
+rundler-utils.workspace = true
+
+alloy-contract.workspace = true
+alloy-json-rpc.workspace = true
+alloy-primitives.workspace = true
+alloy-provider.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-sol-types.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
-ethers.workspace = true
 futures-util.workspace = true
-hyper.workspace = true
+http.workspace = true
 jsonrpsee = { workspace = true, features = ["client", "macros", "server"] }
 metrics.workspace = true
+metrics-derive.workspace = true
 serde.workspace = true
 strum.workspace = true
 thiserror.workspace = true
@@ -27,12 +37,14 @@ tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tower.workspace = true
-tower-http.workspace = true
+tower-http = { workspace = true, features = ["cors"] }
 tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+alloy-consensus.workspace = true
+alloy-network.workspace = true
 mockall.workspace = true
-rundler-provider = { path = "../provider", features = ["test-utils"] }
-rundler-sim = { path = "../sim", features = ["test-utils"] }
-rundler-types = { path = "../types", features = ["test-utils"] }
+rundler-provider = { workspace = true, features = ["test-utils"] }
+rundler-sim = { workspace = true, features = ["test-utils"] }
+rundler-types = { workspace = true, features = ["test-utils"] }

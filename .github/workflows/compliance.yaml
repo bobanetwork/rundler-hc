@@ -5,7 +5,7 @@ on:
       - main
 #  pull_request:
 
-name: compliance
+name: compliance 07
 jobs:
   compliance:
     runs-on: ubuntu-latest
@@ -13,7 +13,9 @@ jobs:
       - run: curl -sSL https://raw.githubusercontent.com/pdm-project/pdm/main/install-pdm.py | python3 -
       - run: pip install jq yq
       - run: sudo apt install -y libxml2-utils
-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
 
       - name: Checkout Rundler
         uses: actions/checkout@v4
@@ -21,12 +23,22 @@ jobs:
           path: rundler
           submodules: recursive
 
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "v0.3.0"
+
+      - uses: KengoTODA/actions-setup-docker-compose@v1
+        with:
+          version: "2.14.2"
+
       - name: Clone Test Executor
         uses: actions/checkout@v4
         with:
           path: bundler-test-executors
           repository: bobanetwork/bundler-test-executor
           ref: hc-dev
+          submodules: recursive
 
       - name: Build rundler image locally
         run: docker buildx build ./rundler -t alchemyplatform/rundler:latest

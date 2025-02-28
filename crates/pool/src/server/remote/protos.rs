@@ -11,17 +11,23 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
+use alloy_primitives::{Address, B256};
 use anyhow::{anyhow, Context};
-use ethers::types::{Address, H256};
 use rundler_task::grpc::protos::{from_bytes, ConversionError, ToProtoBytes};
 use rundler_types::{
+    authorization::Eip7702Auth,
     chain::ChainSpec,
+    da::{
+        BedrockDAGasUOData as RundlerBedrockDAGasUOData, DAGasUOData as RundlerDAGasUOData,
+        NitroDAGasUOData as RundlerNitroDAGasUOData,
+    },
     pool::{
         NewHead as PoolNewHead, PaymasterMetadata as PoolPaymasterMetadata, PoolOperation,
         Reputation as PoolReputation, ReputationStatus as PoolReputationStatus,
         StakeStatus as RundlerStakeStatus,
     },
-    v0_6, v0_7, Entity as RundlerEntity, EntityInfos, EntityType as RundlerEntityType,
+    v0_6::{self, ExtendedUserOperation},
+    v0_7, Entity as RundlerEntity, EntityInfos, EntityType as RundlerEntityType,
     EntityUpdate as RundlerEntityUpdate, EntityUpdateType as RundlerEntityUpdateType,
     StakeInfo as RundlerStakeInfo, UserOperationVariant, ValidTimeRange,
 };
@@ -42,6 +48,10 @@ impl From<&UserOperationVariant> for UserOperation {
 
 impl From<&v0_6::UserOperation> for UserOperation {
     fn from(op: &v0_6::UserOperation) -> Self {
+        let authorization_tuple = op
+            .authorization_tuple
+            .as_ref()
+            .map(|authorization| AuthorizationTuple::from(authorization.clone()));
         let op = UserOperationV06 {
             sender: op.sender.to_proto_bytes(),
             nonce: op.nonce.to_proto_bytes(),
@@ -54,6 +64,7 @@ impl From<&v0_6::UserOperation> for UserOperation {
             max_priority_fee_per_gas: op.max_priority_fee_per_gas.to_proto_bytes(),
             paymaster_and_data: op.paymaster_and_data.to_proto_bytes(),
             signature: op.signature.to_proto_bytes(),
+            authorization_tuple,
         };
         UserOperation {
             uo: Some(user_operation::Uo::V06(op)),
@@ -65,24 +76,61 @@ pub trait TryUoFromProto<T>: Sized {
     fn try_uo_from_proto(value: T, chain_spec: &ChainSpec) -> Result<Self, ConversionError>;
 }
 
+impl From<AuthorizationTuple> for Eip7702Auth {
+    fn from(value: AuthorizationTuple) -> Self {
+        Eip7702Auth {
+            chain_id: value.chain_id,
+            address: from_bytes(&value.address).unwrap_or_default(),
+            nonce: value.nonce,
+            y_parity: value.y_parity as u8,
+            r: from_bytes(&value.r).unwrap_or_default(),
+            s: from_bytes(&value.s).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<Eip7702Auth> for AuthorizationTuple {
+    fn from(value: Eip7702Auth) -> Self {
+        AuthorizationTuple {
+            chain_id: value.chain_id,
+            address: value.address.to_proto_bytes(),
+            nonce: value.nonce,
+            y_parity: value.y_parity.into(),
+            r: value.r.to_proto_bytes(),
+            s: value.s.to_proto_bytes(),
+        }
+    }
+}
 impl TryUoFromProto<UserOperationV06> for v0_6::UserOperation {
     fn try_uo_from_proto(
         op: UserOperationV06,
-        _chain_spec: &ChainSpec,
+        chain_spec: &ChainSpec,
     ) -> Result<Self, ConversionError> {
-        Ok(v0_6::UserOperation {
-            sender: from_bytes(&op.sender)?,
-            nonce: from_bytes(&op.nonce)?,
-            init_code: op.init_code.into(),
-            call_data: op.call_data.into(),
-            call_gas_limit: from_bytes(&op.call_gas_limit)?,
-            verification_gas_limit: from_bytes(&op.verification_gas_limit)?,
-            pre_verification_gas: from_bytes(&op.pre_verification_gas)?,
-            max_fee_per_gas: from_bytes(&op.max_fee_per_gas)?,
-            max_priority_fee_per_gas: from_bytes(&op.max_priority_fee_per_gas)?,
-            paymaster_and_data: op.paymaster_and_data.into(),
-            signature: op.signature.into(),
-        })
+        let authorization_tuple = op
+            .authorization_tuple
+            .as_ref()
+            .map(|authorization| Eip7702Auth::from(authorization.clone()));
+
+        Ok(v0_6::UserOperationBuilder::new(
+            chain_spec,
+            v0_6::UserOperationRequiredFields {
+                sender: from_bytes(&op.sender)?,
+                nonce: from_bytes(&op.nonce)?,
+                init_code: op.init_code.into(),
+                call_data: op.call_data.into(),
+                call_gas_limit: from_bytes(&op.call_gas_limit)?,
+                verification_gas_limit: from_bytes(&op.verification_gas_limit)?,
+                pre_verification_gas: from_bytes(&op.pre_verification_gas)?,
+                max_fee_per_gas: from_bytes(&op.max_fee_per_gas)?,
+                max_priority_fee_per_gas: from_bytes(&op.max_priority_fee_per_gas)?,
+                paymaster_and_data: op.paymaster_and_data.into(),
+                signature: op.signature.into(),
+            },
+            ExtendedUserOperation {
+                authorization_tuple,
+            },
+        )
+        .build())
     }
 }
 
@@ -106,6 +154,10 @@ impl From<&v0_7::UserOperation> for UserOperation {
             factory_data: op.factory_data.to_proto_bytes(),
             entry_point: op.entry_point.to_proto_bytes(),
             chain_id: op.chain_id,
+            authorization_tuple: op
+                .authorization_tuple
+                .as_ref()
+                .map(|authorization| AuthorizationTuple::from(authorization.clone())),
         };
         UserOperation {
             uo: Some(user_operation::Uo::V07(op)),
@@ -118,6 +170,11 @@ impl TryUoFromProto<UserOperationV07> for v0_7::UserOperation {
         op: UserOperationV07,
         chain_spec: &ChainSpec,
     ) -> Result<Self, ConversionError> {
+        let authorization_tuple = op
+            .authorization_tuple
+            .as_ref()
+            .map(|authorization| Eip7702Auth::from(authorization.clone()));
+
         let mut builder = v0_7::UserOperationBuilder::new(
             chain_spec,
             v0_7::UserOperationRequiredFields {
@@ -140,6 +197,10 @@ impl TryUoFromProto<UserOperationV07> for v0_7::UserOperation {
                 from_bytes(&op.paymaster_post_op_gas_limit)?,
                 op.paymaster_data.into(),
             );
+        }
+
+        if authorization_tuple.is_some() {
+            builder = builder.authorization_tuple(authorization_tuple);
         }
 
         if !op.factory.is_empty() {
@@ -196,9 +257,11 @@ impl TryFrom<&EntityUpdate> for RundlerEntityUpdate {
             .try_into()?;
         let update_type = RundlerEntityUpdateType::try_from(entity_update.update_type)
             .map_err(|_| ConversionError::InvalidEnumValue(entity_update.update_type))?;
+        let value = Some(entity_update.value).filter(|&v| v != 0);
         Ok(RundlerEntityUpdate {
             entity,
             update_type,
+            value,
         })
     }
 }
@@ -256,6 +319,9 @@ impl From<RundlerEntityUpdateType> for EntityUpdateType {
         match update_type {
             RundlerEntityUpdateType::UnstakedInvalidation => EntityUpdateType::UnstakedInvalidation,
             RundlerEntityUpdateType::StakedInvalidation => EntityUpdateType::StakedInvalidation,
+            RundlerEntityUpdateType::PaymasterOpsSeenDecrement => {
+                EntityUpdateType::PaymasterOpsSeenDecrement
+            }
         }
     }
 }
@@ -265,6 +331,7 @@ impl From<&RundlerEntityUpdate> for EntityUpdate {
         EntityUpdate {
             entity: Some(Entity::from(&entity_update.entity)),
             update_type: EntityUpdateType::from(entity_update.update_type).into(),
+            value: entity_update.value.unwrap_or_default(),
         }
     }
 }
@@ -322,8 +389,8 @@ impl TryFrom<StakeStatus> for RundlerStakeStatus {
             return Ok(RundlerStakeStatus {
                 is_staked: stake_status.is_staked,
                 stake_info: RundlerStakeInfo {
-                    stake: stake_info.stake.into(),
-                    unstake_delay_sec: stake_info.unstake_delay_sec.into(),
+                    stake: from_bytes(&stake_info.stake)?,
+                    unstake_delay_sec: stake_info.unstake_delay_sec,
                 },
             });
         }
@@ -337,8 +404,8 @@ impl From<RundlerStakeStatus> for StakeStatus {
         StakeStatus {
             is_staked: stake_status.is_staked,
             stake_info: Some(StakeInfo {
-                stake: stake_status.stake_info.stake.as_u64(),
-                unstake_delay_sec: stake_status.stake_info.unstake_delay_sec.as_u32(),
+                stake: stake_status.stake_info.stake.to_proto_bytes(),
+                unstake_delay_sec: stake_status.stake_info.unstake_delay_sec,
             }),
         }
     }
@@ -355,7 +422,49 @@ impl From<&PoolOperation> for MempoolOp {
             expected_code_hash: op.expected_code_hash.to_proto_bytes(),
             sim_block_hash: op.sim_block_hash.to_proto_bytes(),
             account_is_staked: op.account_is_staked,
+            da_gas_data: Some(DaGasUoData::from(&op.da_gas_data)),
         }
+    }
+}
+
+impl From<&RundlerDAGasUOData> for DaGasUoData {
+    fn from(data: &RundlerDAGasUOData) -> Self {
+        match data {
+            RundlerDAGasUOData::Empty => DaGasUoData {
+                data: Some(da_gas_uo_data::Data::Empty(EmptyUoData {})),
+            },
+            RundlerDAGasUOData::Nitro(data) => DaGasUoData {
+                data: Some(da_gas_uo_data::Data::Nitro(NitroDaGasUoData {
+                    uo_units: data.uo_units.to_proto_bytes(),
+                })),
+            },
+            RundlerDAGasUOData::Bedrock(data) => DaGasUoData {
+                data: Some(da_gas_uo_data::Data::Bedrock(BedrockDaGasUoData {
+                    uo_units: data.uo_units,
+                })),
+            },
+        }
+    }
+}
+
+impl TryFrom<DaGasUoData> for RundlerDAGasUOData {
+    type Error = ConversionError;
+
+    fn try_from(data: DaGasUoData) -> Result<Self, Self::Error> {
+        let ret = match data.data {
+            Some(da_gas_uo_data::Data::Empty(_)) => RundlerDAGasUOData::Empty,
+            Some(da_gas_uo_data::Data::Nitro(NitroDaGasUoData { uo_units })) => {
+                RundlerDAGasUOData::Nitro(RundlerNitroDAGasUOData {
+                    uo_units: from_bytes(&uo_units)?,
+                })
+            }
+            Some(da_gas_uo_data::Data::Bedrock(BedrockDaGasUoData { uo_units })) => {
+                RundlerDAGasUOData::Bedrock(RundlerBedrockDAGasUOData { uo_units })
+            }
+            None => RundlerDAGasUOData::Empty,
+        };
+
+        Ok(ret)
     }
 }
 
@@ -377,8 +486,8 @@ impl TryUoFromProto<MempoolOp> for PoolOperation {
 
         let valid_time_range = ValidTimeRange::new(op.valid_after.into(), op.valid_until.into());
 
-        let expected_code_hash = H256::from_slice(&op.expected_code_hash);
-        let sim_block_hash = H256::from_slice(&op.sim_block_hash);
+        let expected_code_hash = B256::from_slice(&op.expected_code_hash);
+        let sim_block_hash = B256::from_slice(&op.sim_block_hash);
 
         Ok(PoolOperation {
             uo,
@@ -390,6 +499,10 @@ impl TryUoFromProto<MempoolOp> for PoolOperation {
             sim_block_number: 0,
             account_is_staked: op.account_is_staked,
             entity_infos: EntityInfos::default(),
+            da_gas_data: op
+                .da_gas_data
+                .context("DA gas data should be set")?
+                .try_into()?,
         })
     }
 }
@@ -429,7 +542,7 @@ impl TryFrom<PaymasterBalance> for PoolPaymasterMetadata {
 impl From<PoolPaymasterMetadata> for PaymasterBalance {
     fn from(paymaster_metadata: PoolPaymasterMetadata) -> Self {
         Self {
-            address: paymaster_metadata.address.as_bytes().to_vec(),
+            address: paymaster_metadata.address.to_vec(),
             confirmed_balance: paymaster_metadata.confirmed_balance.to_proto_bytes(),
             pending_balance: paymaster_metadata.pending_balance.to_proto_bytes(),
         }

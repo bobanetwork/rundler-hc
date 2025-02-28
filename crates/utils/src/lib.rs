@@ -20,11 +20,13 @@
 
 //! Rundler utilities
 
+pub mod authorization_utils;
 pub mod cache;
 pub mod emit;
 pub mod eth;
-pub mod handle;
+pub mod guard_timer;
 pub mod log;
 pub mod math;
+pub mod random;
 pub mod retry;
 pub mod strs;
