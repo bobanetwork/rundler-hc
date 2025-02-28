@@ -21,13 +21,13 @@ rundler-utils = { path = "../../crates/utils" }
 
 # CLI dependencies
 anyhow.workspace = true
-config = "0.14.0"
 clap = { version = "4.4.4", features = ["derive", "env"] }
+config = "0.14.0"
 dotenv = "0.15.0"
 ethers.workspace = true
+go-parse-duration = "0.1"
 itertools = "0.12.1"
 metrics = "0.22.1"
-go-parse-duration = "0.1"
 metrics-exporter-prometheus = { version = "0.13.1", default-features = false, features = ["http-listener"] }
 metrics-process = "1.2.1"
 metrics-util = "0.16.2"

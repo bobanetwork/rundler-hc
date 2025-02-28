@@ -1,8 +1,5 @@
 [workspace]
-members = [
-    "bin/*",
-    "crates/*",
-]
+members = ["bin/*", "crates/*"]
 default-members = ["bin/rundler"]
 resolver = "2"
 

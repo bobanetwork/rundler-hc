@@ -12,13 +12,13 @@ rundler-utils = { path = "../utils" }
 
 anyhow.workspace = true
 async-trait.workspace = true
-futures.workspace = true
 ethers.workspace = true
-pin-project.workspace = true
+futures.workspace = true
 metrics.workspace = true
+pin-project.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tower.workspace = true
-thiserror.workspace = true
 tracing.workspace = true

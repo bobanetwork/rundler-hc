@@ -17,20 +17,23 @@ anyhow.workspace = true
 async-trait.workspace = true
 enum_dispatch = "0.3.11"
 ethers.workspace = true
-ethers-signers = {version = "2.0.8", features = ["aws"] }
+ethers-signers = { version = "2.0.8", features = ["aws"] }
 futures.workspace = true
 futures-timer = "3.0.2"
 futures-util.workspace = true
-jsonrpsee = { workspace = true, features = [ "http-client" ]}
+jsonrpsee = { workspace = true, features = [ "http-client" ] }
 linked-hash-map = "0.5.6"
 metrics.workspace = true
+parse-display.workspace = true
 pin-project.workspace = true
 prost.workspace = true
-parse-display.workspace = true
 reqwest.workspace = true
 rslock = "0.3.0"
 rusoto_core = { version = "0.48.0", default-features = false, features = ["rustls"] }
 rusoto_kms = { version = "0.48.0", default-features = false, features = ["rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+strum.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -38,20 +41,17 @@ tonic.workspace = true
 tonic-health.workspace = true
 tonic-reflection.workspace = true
 tracing.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-strum.workspace = true
 
-mockall = {workspace = true, optional = true }
+mockall = { workspace = true, optional = true }
 
 [dev-dependencies]
 mockall.workspace = true
-rundler-types = { path = "../types", features = ["test-utils"] }
 rundler-provider = { path = "../provider", features = ["test-utils"] }
 rundler-sim = { path = "../sim", features = ["test-utils"] }
+rundler-types = { path = "../types", features = ["test-utils"] }
 
 [build-dependencies]
 tonic-build.workspace = true
 
 [features]
-test-utils = [ "mockall" ]
+test-utils = ["mockall"]
