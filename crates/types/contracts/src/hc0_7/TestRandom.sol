@@ -15,8 +15,8 @@ contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
     uint256 constant MIN_DISTANCE = 2;
     uint256 constant MAX_DISTANCE = 255;
 
-    address payable immutable hcAccount;
-    IERC20 immutable bobaToken;
+    address payable public immutable hcAccount;
+    IERC20 public immutable bobaToken;
 
     address public owner;
 
@@ -26,8 +26,8 @@ contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
     // be set to zero. The payPerCall mechanism is a workaround for
     // a HybridAccount which is not configured to pull payments from
     // its callers.
-    uint256 feePerCall;
-    uint256 payPerCall;
+    uint256 public feePerCall;
+    uint256 public payPerCall;
 
     event RandomRequest(bytes32 indexed requestId, address indexed clientAddress);
     event RandomResult (bytes32 indexed requestId, uint256 indexed result);
@@ -38,7 +38,7 @@ contract TestRandom is VRF, ReentrancyGuard, UUPSUpgradeable, Initializable  {
     uint256 randIndex;
 
     // Key to verify VRF responses.
-    bytes32 randomKeyHash;
+    bytes32 public randomKeyHash;
 
     // Store the parameters of a random request
     struct randRequest {
