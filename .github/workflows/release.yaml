@@ -8,9 +8,9 @@ on:
       version:
         required: true
         type: string
-  push:
-    tags:
-      - v*.*.*
+#  push:
+#    tags:
+#      - v*.*.*
 
 jobs:
   extract-version:
@@ -55,6 +55,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.83.0
         with:
           target: ${{ matrix.target }}
+          toolchain: 1.79.0
       - uses: taiki-e/install-action@cross
       - uses: Swatinem/rust-cache@v2
         with:

@@ -1,8 +1,9 @@
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  pull_request:
+#  pull_request:
 
 name: compliance 07
 jobs:
@@ -35,8 +36,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: bundler-test-executors
-          repository: alchemyplatform/bundler-test-executor
-          ref: master
+          repository: bobanetwork/bundler-test-executor
+          ref: hc-dev
           submodules: recursive
 
       - name: Build rundler image locally

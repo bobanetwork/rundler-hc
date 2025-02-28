@@ -13,7 +13,7 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-
 SHELL ["/bin/bash", "-c"]
 RUN curl -L https://foundry.paradigm.xyz | bash
 ENV PATH="/root/.foundry/bin:${PATH}"
-RUN foundryup -i v0.3.0
+RUN foundryup -i v0.3.0  # Formerly pinned to -C 2044faec
 
 RUN cargo install cargo-chef --locked
 
@@ -29,7 +29,7 @@ COPY --from=planner /app/recipe.json recipe.json
 
 # Set the build profile to be release
 ARG BUILD_PROFILE=release
-ENV BUILD_PROFILE $BUILD_PROFILE
+ENV BUILD_PROFILE=$BUILD_PROFILE
 
 # Builds dependencies
 RUN cargo chef cook --profile $BUILD_PROFILE --recipe-path recipe.json
@@ -56,3 +56,4 @@ COPY --from=builder /app/target/release/rundler /usr/local/bin
 
 EXPOSE 3000 8080
 ENTRYPOINT ["/usr/local/bin/rundler"]
+CMD ["node"]
