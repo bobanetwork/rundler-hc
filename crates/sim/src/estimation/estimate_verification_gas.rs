@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use rundler_provider::{EntryPoint, EvmProvider, SimulationProvider, StateOverride};
 use rundler_types::{chain::ChainSpec, UserOperation};
 use rundler_utils::authorization_utils;
+use tracing::instrument;
 
 use super::Settings;
 use crate::GasEstimationError;
@@ -66,6 +67,7 @@ where
 {
     type UO = UO;
 
+    #[instrument(skip_all)]
     async fn estimate_verification_gas<F: Send + Sync + Fn(UO, GetOpWithLimitArgs) -> UO>(
         &self,
         op: &UO,
@@ -118,7 +120,7 @@ where
 
         let gas_used = self
             .provider
-            .get_gas_used(call)
+            .get_gas_used(call.clone())
             .await
             .context("failed to run initial guess")?;
         println!(
@@ -134,6 +136,11 @@ where
             }
         } else if let Some(revert) = E::decode_simulate_handle_ops_revert(&gas_used.result)?.err() {
             println!("HC estimate_verification GasEstimationError {}", revert);
+            tracing::debug!(
+                " simulation reverted with evm call: {}, error: {}",
+                call,
+                revert
+            );
             return Err(GasEstimationError::RevertInValidation(revert));
         }
 

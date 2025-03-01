@@ -33,6 +33,7 @@ use rundler_types::{
 };
 use rundler_utils::math;
 use tokio::join;
+use tracing::instrument;
 
 use super::{
     CallGasEstimator, CallGasEstimatorImpl, CallGasEstimatorSpecialization, GasEstimationError,
@@ -65,6 +66,7 @@ where
 {
     type UserOperationOptionalGas = UserOperationOptionalGas;
 
+    #[instrument(skip(self, state_override))]
     async fn estimate_op_gas(
         &self,
         op: UserOperationOptionalGas,
@@ -72,6 +74,15 @@ where
         at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
         self.check_provided_limits(&op)?;
+
+        let agg = op
+            .aggregator
+            .map(|agg| {
+                self.chain_spec
+                    .get_signature_aggregator(&agg)
+                    .ok_or(GasEstimationError::UnsupportedAggregator(agg))
+            })
+            .transpose()?;
 
         let (block_hash, _) = self
             .provider
@@ -83,7 +94,7 @@ where
             .estimate_pre_verification_gas(&op, block_hash, at_price)
             .await?;
 
-        let full_op = op
+        let mut full_op = op
             .clone()
             .into_user_operation_builder(
                 &self.chain_spec,
@@ -92,6 +103,14 @@ where
             )
             .pre_verification_gas(pre_verification_gas)
             .build();
+        if let Some(agg) = agg {
+            full_op = full_op.transform_for_aggregator(
+                &self.chain_spec,
+                agg.address(),
+                agg.costs().clone(),
+                agg.dummy_uo_signature().clone(),
+            );
+        }
 
         let verification_future =
             self.estimate_verification_gas(&op, &full_op, block_hash, state_override.clone());
@@ -107,9 +126,11 @@ where
         let call_gas_limit = call_gas_limit?;
 
         // Verify total gas limit
-        let mut op_with_gas = full_op;
-        op_with_gas.verification_gas_limit = verification_gas_limit;
-        op_with_gas.call_gas_limit = call_gas_limit;
+        let op_with_gas = UserOperationBuilder::from_uo(full_op, &self.chain_spec)
+            .verification_gas_limit(verification_gas_limit)
+            .call_gas_limit(call_gas_limit)
+            .build();
+
         // require that this can fit in a bundle of size 1
         let gas_limit = op_with_gas.computation_gas_limit(&self.chain_spec, Some(1));
         if gas_limit > self.settings.max_total_execution_gas {
@@ -213,6 +234,7 @@ where
         Ok(())
     }
 
+    #[instrument(skip_all)]
     async fn estimate_verification_gas(
         &self,
         optional_op: &UserOperationOptionalGas,
@@ -265,6 +287,7 @@ where
         Ok(verification_gas_limit)
     }
 
+    #[instrument(skip_all)]
     async fn estimate_pre_verification_gas(
         &self,
         optional_op: &UserOperationOptionalGas,
@@ -301,6 +324,12 @@ where
             gas_price = at_gas_price;
         }
 
+        if let Some(agg) = &optional_op.aggregator {
+            if self.chain_spec.get_signature_aggregator(agg).is_none() {
+                return Err(GasEstimationError::UnsupportedAggregator(*agg));
+            };
+        }
+
         Ok(gas::estimate_pre_verification_gas(
             &self.chain_spec,
             &self.entry_point,
@@ -312,6 +341,7 @@ where
         .await?)
     }
 
+    #[instrument(skip_all)]
     async fn estimate_call_gas(
         &self,
         optional_op: &UserOperationOptionalGas,
@@ -394,10 +424,11 @@ impl CallGasEstimatorSpecialization for CallGasEstimatorSpecializationV06 {
         rounding: u128,
         is_continuation: bool,
     ) -> Bytes {
+        let op = callless_op.into_unstructured();
         let call = CallGasEstimationProxyCalls::estimateCallGas(estimateCallGasCall {
             args: EstimateCallGasArgs {
-                callData: callless_op.call_data,
-                sender: callless_op.sender,
+                callData: op.call_data,
+                sender: op.sender,
                 minGas: U256::from(min_gas),
                 maxGas: U256::from(max_gas),
                 rounding: U256::from(rounding),
@@ -409,9 +440,10 @@ impl CallGasEstimatorSpecialization for CallGasEstimatorSpecializationV06 {
     }
 
     fn get_test_call_gas_calldata(&self, callless_op: Self::UO, call_gas_limit: u128) -> Bytes {
+        let op = callless_op.into_unstructured();
         let call = CallGasEstimationProxyCalls::testCallGas(testCallGasCall {
-            sender: callless_op.sender,
-            callData: callless_op.call_data,
+            sender: op.sender,
+            callData: op.call_data,
             callGasLimit: U256::from(call_gas_limit),
         });
 
@@ -449,10 +481,7 @@ mod tests {
     };
     use rundler_types::{
         da::DAGasOracleType,
-        v0_6::{
-            ExtendedUserOperation, UserOperation, UserOperationOptionalGas,
-            UserOperationRequiredFields,
-        },
+        v0_6::{UserOperation, UserOperationOptionalGas, UserOperationRequiredFields},
         GasFees, UserOperation as UserOperationTrait, ValidationRevert,
     };
     use CallGasEstimationProxy::{
@@ -581,6 +610,7 @@ mod tests {
             paymaster_and_data: Bytes::new(),
             signature: Bytes::new(),
             eip7702_auth_address: None,
+            aggregator: None,
         }
     }
 
@@ -599,9 +629,6 @@ mod tests {
                 max_priority_fee_per_gas: 1000,
                 paymaster_and_data: Bytes::new(),
                 signature: Bytes::new(),
-            },
-            ExtendedUserOperation {
-                authorization_tuple: None,
             },
         )
         .build()
@@ -650,7 +677,7 @@ mod tests {
         let (mut entry, provider) = create_base_config();
         entry
             .expect_calc_da_gas()
-            .returning(|_a, _b, _c| Ok((TEST_FEE, Default::default(), Default::default())));
+            .returning(|_a, _b, _c, _d| Ok((TEST_FEE, Default::default(), Default::default())));
 
         let settings = Settings {
             max_verification_gas: 10000000000,
@@ -726,7 +753,7 @@ mod tests {
 
         entry
             .expect_calc_da_gas()
-            .returning(|_a, _b, _c| Ok((TEST_FEE, Default::default(), Default::default())));
+            .returning(|_a, _b, _c, _d| Ok((TEST_FEE, Default::default(), Default::default())));
 
         let settings = Settings {
             max_verification_gas: 10000000000,
@@ -1504,6 +1531,26 @@ mod tests {
             err,
             GasEstimationError::GasTotalTooLarge(_, TEST_MAX_GAS_LIMITS)
         ))
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_aggregator() {
+        let (entry, provider) = create_base_config();
+        let (estimator, _) = create_estimator(entry, provider);
+        let mut op = demo_user_op_optional_gas(None);
+        let unsupported = Address::random();
+        op.aggregator = Some(unsupported);
+
+        let err = estimator
+            .estimate_op_gas(op, StateOverride::default(), None)
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(
+            err,
+            GasEstimationError::UnsupportedAggregator(x) if x == unsupported,
+        ));
     }
 
     #[test]

@@ -84,10 +84,14 @@ pub trait Mempool: Send + Sync {
     /// The `shard_index` is used to divide the mempool into disjoint shards to ensure
     /// that two bundle builders don't attempt to but bundle the same operations. If
     /// the supplied `shard_index` does not exist, the call will error.
+    ///
+    /// The `filter_id` is used to identify the filter that the operations belong to.
+    /// If the `filter_id` does not exist, the call will error.
     fn best_operations(
         &self,
         max: usize,
         shard_index: u64,
+        filter_id: Option<String>,
     ) -> MempoolResult<Vec<Arc<PoolOperation>>>;
 
     /// Returns the all operations from the pool up to a max size
@@ -148,11 +152,11 @@ pub struct PoolConfig {
     pub sim_settings: SimulationSettings,
     /// Configuration for the mempool channels, by channel ID
     pub mempool_channel_configs: HashMap<B256, MempoolConfig>,
-    /// Number of mempool shards to use. A mempool shard is a disjoint subset of the mempool
+    /// Number of mempool shards to use by filter ID. A mempool shard is a disjoint subset of the mempool
     /// that is used to ensure that two bundle builders don't attempt to but bundle the same
     /// operations. The mempool is divided into shards by taking the hash of the operation
     /// and modding it by the number of shards.
-    pub num_shards: u64,
+    pub num_shards_by_filter_id: HashMap<String, u64>,
     /// the maximum number of user operations with a throttled entity that can stay in the mempool
     pub throttled_entity_mempool_count: u64,
     /// The maximum number of blocks a user operation with a throttled entity can stay in the mempool
@@ -195,7 +199,8 @@ pub enum OperationOrigin {
 #[cfg(test)]
 mod tests {
     use rundler_types::{
-        v0_6::UserOperation, Entity, EntityInfo, EntityInfos, EntityType, ValidTimeRange,
+        v0_6::{UserOperationBuilder, UserOperationRequiredFields},
+        Entity, EntityInfo, EntityInfos, EntityType, ValidTimeRange,
     };
 
     use super::*;
@@ -208,12 +213,16 @@ mod tests {
         let factory = Address::random();
 
         let po = PoolOperation {
-            uo: UserOperation {
-                sender,
-                paymaster_and_data: paymaster.to_vec().into(),
-                init_code: factory.to_vec().into(),
-                ..Default::default()
-            }
+            uo: UserOperationBuilder::new(
+                &ChainSpec::default(),
+                UserOperationRequiredFields {
+                    sender,
+                    paymaster_and_data: paymaster.to_vec().into(),
+                    init_code: factory.to_vec().into(),
+                    ..Default::default()
+                },
+            )
+            .build()
             .into(),
             entry_point: Address::random(),
             aggregator: Some(aggregator),
@@ -241,6 +250,7 @@ mod tests {
                 }),
             },
             da_gas_data: Default::default(),
+            filter_id: None,
         };
 
         let entities = po.entities().collect::<Vec<_>>();

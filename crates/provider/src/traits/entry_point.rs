@@ -13,6 +13,7 @@
 
 use alloy_primitives::{aliases::U192, Address, Bytes, U256};
 use rundler_types::{
+    chain::ChainSpec,
     da::{DAGasBlockData, DAGasUOData},
     GasFees, Timestamp, UserOperation, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
 };
@@ -33,12 +34,10 @@ pub struct AggregatorSimOut {
 /// Result of a signature aggregator call
 #[derive(Debug)]
 pub enum AggregatorOut {
-    /// No aggregator used
-    NotNeeded,
     /// Successful call
     SuccessWithInfo(AggregatorSimOut),
     /// Aggregator validation function reverted
-    ValidationReverted,
+    ValidationReverted(Bytes),
 }
 
 /// Result of an entry point handle ops call
@@ -53,6 +52,8 @@ pub enum HandleOpsOut {
     /// Call failed due to a bug in the 0.6 entry point contract https://github.com/eth-infinitism/account-abstraction/pull/325.
     /// Special handling is required to remove the offending operation from the bundle.
     PostOpRevert,
+    /// Call reverted
+    Revert(Bytes),
 }
 
 /// Deposit info for an address from the entry point contract
@@ -146,6 +147,7 @@ pub trait BundleHandler: Send + Sync {
         sender_eoa: Address,
         gas_limit: u64,
         gas_fees: GasFees,
+        proxy: Option<Address>,
     ) -> ProviderResult<HandleOpsOut>;
 
     /// Construct the transaction to send a bundle of operations to the entry point contract
@@ -155,7 +157,17 @@ pub trait BundleHandler: Send + Sync {
         sender_eoa: Address,
         gas_limit: u64,
         gas_fees: GasFees,
+        proxy: Option<Address>,
     ) -> TransactionRequest;
+
+    /// Decode the revert data from a call to `handleOps`
+    fn decode_handle_ops_revert(message: &str, revert_data: &Bytes) -> HandleOpsOut;
+
+    /// Decode user ops from calldata
+    fn decode_ops_from_calldata(
+        chain_spec: &ChainSpec,
+        calldata: &Bytes,
+    ) -> Vec<UserOpsPerAggregator<Self::UO>>;
 }
 
 /// Trait for calculating Data Availability (DA) gas costs for user operations
@@ -179,6 +191,7 @@ pub trait DAGasProvider: Send + Sync {
         uo: Self::UO,
         block: BlockHashOrNumber,
         gas_price: u128,
+        bundle_size: usize,
     ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
 }
 

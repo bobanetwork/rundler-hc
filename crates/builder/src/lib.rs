@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-#![warn(missing_docs, unreachable_pub)]
+#![warn(missing_docs, unreachable_pub, unused_crate_dependencies)]
 #![deny(unused_must_use, rust_2018_idioms)]
 #![doc(test(
     no_crate_inject,
@@ -37,6 +37,6 @@ pub use server::{LocalBuilderBuilder, LocalBuilderHandle, RemoteBuilderClient};
 mod signer;
 
 mod task;
-pub use task::{Args as BuilderTaskArgs, BuilderTask, EntryPointBuilderSettings};
+pub use task::{Args as BuilderTaskArgs, BuilderSettings, BuilderTask, EntryPointBuilderSettings};
 
 mod transaction_tracker;

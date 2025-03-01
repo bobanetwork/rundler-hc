@@ -22,6 +22,7 @@ use alloy_rpc_types_trace::geth::{
 };
 use rundler_contracts::utils::GetGasUsed::GasUsedResult;
 use rundler_types::{
+    chain::ChainSpec,
     da::{DAGasBlockData, DAGasUOData},
     v0_6, v0_7, GasFees, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
 };
@@ -180,6 +181,7 @@ mockall::mock! {
             op: v0_6::UserOperation,
             block: BlockHashOrNumber,
             gas_price: u128,
+            bundle_size: usize,
         ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
     }
 
@@ -192,6 +194,7 @@ mockall::mock! {
             sender_eoa: Address,
             gas_limit: u64,
             gas_fees: GasFees,
+            proxy: Option<Address>,
         ) -> ProviderResult<HandleOpsOut>;
         fn get_send_bundle_transaction(
             &self,
@@ -199,7 +202,13 @@ mockall::mock! {
             beneficiary: Address,
             gas_limit: u64,
             gas_fees: GasFees,
+            proxy: Option<Address>,
         ) -> TransactionRequest;
+        fn decode_handle_ops_revert(message: &str, revert_data: &Bytes) -> HandleOpsOut;
+        fn decode_ops_from_calldata(
+            chain_spec: &ChainSpec,
+            calldata: &Bytes,
+        ) -> Vec<UserOpsPerAggregator<v0_6::UserOperation>>;
     }
 
     impl EntryPointProvider<v0_6::UserOperation> for EntryPointV0_6 {}
@@ -273,6 +282,7 @@ mockall::mock! {
             op: v0_7::UserOperation,
             block: BlockHashOrNumber,
             gas_price: u128,
+            bundle_size: usize,
         ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
     }
 
@@ -285,6 +295,7 @@ mockall::mock! {
             sender_eoa: Address,
             gas_limit: u64,
             gas_fees: GasFees,
+            proxy: Option<Address>,
         ) -> ProviderResult<HandleOpsOut>;
         fn get_send_bundle_transaction(
             &self,
@@ -292,7 +303,13 @@ mockall::mock! {
             beneficiary: Address,
             gas_limit: u64,
             gas_fees: GasFees,
+            proxy: Option<Address>,
         ) -> TransactionRequest;
+        fn decode_handle_ops_revert(message: &str, revert_data: &Bytes) -> HandleOpsOut;
+        fn decode_ops_from_calldata(
+            chain_spec: &ChainSpec,
+            calldata: &Bytes,
+        ) -> Vec<UserOpsPerAggregator<v0_7::UserOperation>>;
     }
 
     impl EntryPointProvider<v0_7::UserOperation> for EntryPointV0_7 {}
@@ -315,6 +332,7 @@ mockall::mock! {
             uo_data: &DAGasUOData,
             block_data: &DAGasBlockData,
             gas_price: u128,
+            extra_bytes_len: usize,
         ) -> u128;
     }
 
@@ -326,6 +344,7 @@ mockall::mock! {
             to: Address,
             block: BlockHashOrNumber,
             gas_price: u128,
+            extra_data_len: usize,
         ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
     }
 }

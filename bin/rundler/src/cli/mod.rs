@@ -13,21 +13,28 @@
 
 use std::{sync::Arc, time::Duration};
 
+use aggregator::AggregatorType;
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{bail, Context};
-use clap::{builder::PossibleValuesParser, Args, Parser, Subcommand};
+use clap::{
+    builder::{PossibleValuesParser, ValueParser},
+    Args, Parser, Subcommand,
+};
 use rundler_contracts::v0_7::IHCHelper;
 
+mod aggregator;
 mod builder;
 mod chain_spec;
 mod json;
 mod metrics;
 mod node;
 mod pool;
+mod proxy;
 mod rpc;
 mod tracing;
 
-use builder::BuilderCliArgs;
+use builder::{BuilderCliArgs, EntryPointBuilderConfigs};
+use json::get_json_config;
 use node::NodeCliArgs;
 use pool::PoolCliArgs;
 use reth_tasks::TaskManager;
@@ -38,7 +45,8 @@ use rundler_provider::{
 };
 use rundler_rpc::{EthApiSettings, RundlerApiSettings};
 use rundler_sim::{
-    EstimationSettings, PrecheckSettings, PriorityFeeMode, SimulationSettings, MIN_CALL_GAS_LIMIT,
+    EstimationSettings, MempoolConfigs, PrecheckSettings, PriorityFeeMode, SimulationSettings,
+    MIN_CALL_GAS_LIMIT,
 };
 use rundler_types::{
     chain::ChainSpec, da::DAGasOracleType, hybrid_compute,
@@ -51,7 +59,7 @@ use rundler_types::{
 /// Listens for a ctrl-c signal and shuts down all components when received.
 pub async fn run() -> anyhow::Result<()> {
     let opt = Cli::parse();
-    let _guard = tracing::configure_logging(&opt.logs)?;
+    let _guard = tracing::configure_logging(&opt.common.network, &opt.logs)?;
     tracing::info!("Parsed CLI options: {:#?}", opt);
 
     let mut task_manager = TaskManager::current();
@@ -67,7 +75,16 @@ pub async fn run() -> anyhow::Result<()> {
     )
     .context("metrics server should start")?;
 
-    let cs = chain_spec::resolve_chain_spec(&opt.common.network, &opt.common.chain_spec);
+    let mut cs = chain_spec::resolve_chain_spec(&opt.common.network, &opt.common.chain_spec);
+
+    let (mempool_configs, entry_point_builders) = load_configs(&opt.common).await?;
+    if let Some(entry_point_builders) = &entry_point_builders {
+        entry_point_builders.set_proxies(&mut cs);
+    }
+
+    let providers = construct_providers(&opt.common, &cs)?;
+    aggregator::instantiate_aggregators(&opt.common, &mut cs, &providers);
+
     tracing::info!("Chain spec: {:#?}", cs);
     let node_http = opt
         .common
@@ -95,14 +112,34 @@ pub async fn run() -> anyhow::Result<()> {
 
     match opt.command {
         Command::Node(args) => {
-            node::spawn_tasks(task_spawner.clone(), cs, *args, opt.common).await?
+            node::spawn_tasks(
+                task_spawner.clone(),
+                cs,
+                *args,
+                opt.common,
+                providers,
+                mempool_configs,
+                entry_point_builders,
+            )
+            .await?
         }
         Command::Pool(args) => {
-            pool::spawn_tasks(task_spawner.clone(), cs, args, opt.common).await?
+            pool::spawn_tasks(
+                task_spawner.clone(),
+                cs,
+                args,
+                opt.common,
+                providers,
+                mempool_configs,
+                entry_point_builders,
+            )
+            .await?
         }
-        Command::Rpc(args) => rpc::spawn_tasks(task_spawner.clone(), cs, args, opt.common).await?,
+        Command::Rpc(args) => {
+            rpc::spawn_tasks(task_spawner.clone(), cs, args, opt.common, providers).await?
+        }
         Command::Builder(args) => {
-            builder::spawn_tasks(task_spawner.clone(), cs, args, opt.common).await?
+            builder::spawn_tasks(task_spawner.clone(), cs, args, opt.common, providers).await?
         }
     }
 
@@ -326,6 +363,14 @@ pub struct CommonArgs {
     pub mempool_config_path: Option<String>,
 
     #[arg(
+        long = "builders_config_path",
+        name = "builders_config_path",
+        env = "BUILDERS_CONFIG_PATH",
+        global = true
+    )]
+    builders_config_path: Option<String>,
+
+    #[arg(
         long = "disable_entry_point_v0_6",
         name = "disable_entry_point_v0_6",
         env = "DISABLE_ENTRY_POINT_V0_6",
@@ -333,16 +378,6 @@ pub struct CommonArgs {
         global = true
     )]
     pub disable_entry_point_v0_6: bool,
-
-    // Ignored if entry_point_v0_6_enabled is false
-    #[arg(
-        long = "num_builders_v0_6",
-        name = "num_builders_v0_6",
-        env = "NUM_BUILDERS_V0_6",
-        default_value = "1",
-        global = true
-    )]
-    pub num_builders_v0_6: u64,
 
     #[arg(
         long = "disable_entry_point_v0_7",
@@ -353,7 +388,31 @@ pub struct CommonArgs {
     )]
     pub disable_entry_point_v0_7: bool,
 
-    // Ignored if entry_point_v0_7_enabled is false
+    // Ignored if disable_entry_point_v0_6 is true
+    // Ignored if entry_point_builders_path is set
+    #[arg(
+        long = "num_builders_v0_6",
+        name = "num_builders_v0_6",
+        env = "NUM_BUILDERS_V0_6",
+        default_value = "1",
+        global = true
+    )]
+    pub num_builders_v0_6: u64,
+
+    // Ignored if disable_entry_point_v0_6 is true
+    // Ignored if entry_point_builders_path is set
+    // The index offset to apply to the builder index
+    #[arg(
+        long = "builder_index_offset_v0_6",
+        name = "builder_index_offset_v0_6",
+        env = "BUILDER_INDEX_OFFSET_V0_6",
+        default_value = "0",
+        global = true
+    )]
+    pub builder_index_offset_v0_6: u64,
+
+    // Ignored if disable_entry_point_v0_7 is true
+    // Ignored if entry_point_builders_path is set
     #[arg(
         long = "num_builders_v0_7",
         name = "num_builders_v0_7",
@@ -363,11 +422,24 @@ pub struct CommonArgs {
     )]
     pub num_builders_v0_7: u64,
 
+    // Ignored if disable_entry_point_v0_7 is true
+    // Ignored if entry_point_builders_path is set
+    // The index offset to apply to the builder index
+    #[arg(
+        long = "builder_index_offset_v0_7",
+        name = "builder_index_offset_v0_7",
+        env = "BUILDER_INDEX_OFFSET_V0_7",
+        default_value = "0",
+        global = true
+    )]
+    pub builder_index_offset_v0_7: u64,
+
     #[arg(
         long = "da_gas_tracking_enabled",
         name = "da_gas_tracking_enabled",
         env = "DA_GAS_TRACKING_ENABLED",
-        default_value = "false"
+        default_value = "false",
+        global = true
     )]
     pub da_gas_tracking_enabled: bool,
 
@@ -375,14 +447,16 @@ pub struct CommonArgs {
         long = "provider_client_timeout_seconds",
         name = "provider_client_timeout_seconds",
         env = "PROVIDER_CLIENT_TIMEOUT_SECONDS",
-        default_value = "10"
+        default_value = "10",
+        global = true
     )]
     pub provider_client_timeout_seconds: u64,
 
     #[arg(
         long = "max_expected_storage_slots",
         name = "max_expected_storage_slots",
-        env = "MAX_EXPECTED_STORAGE_SLOTS"
+        env = "MAX_EXPECTED_STORAGE_SLOTS",
+        global = true
     )]
     pub max_expected_storage_slots: Option<usize>,
 
@@ -409,6 +483,30 @@ pub struct CommonArgs {
         env = "HC_SYS_PRIVKEY"
     )]
     hc_sys_privkey: B256,
+    #[arg(
+        long = "enabled_aggregators",
+        name = "enabled_aggregators",
+        env = "ENABLED_AGGREGATORS",
+        global = true,
+        value_delimiter = ','
+    )]
+    pub enabled_aggregators: Vec<AggregatorType>,
+
+    #[arg(
+        long = "aggregator_options",
+        env = "AGGREGATOR_OPTIONS",
+        global = true,
+        value_delimiter = ',',
+        value_parser = ValueParser::new(parse_key_val)
+    )]
+    pub aggregator_options: Vec<(String, String)>,
+}
+
+fn parse_key_val(s: &str) -> Result<(String, String), anyhow::Error> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| anyhow::anyhow!(format!("invalid KEY=value: no `=` found in `{}`", s)))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
 const SIMULATION_GAS_OVERHEAD: u64 = 100_000;
@@ -596,6 +694,18 @@ pub struct LogsArgs {
         global = true
     )]
     json: bool,
+
+    /// Log OTLP Endpoint
+    ///
+    /// If set, tracing spans will be forwarded to the provided gRPC OTLP endpoint
+    #[arg(
+        long = "log.otlp_grpc_endpoint",
+        name = "log.otlp_grpc_endpoint",
+        env = "LOG_OTLP_GRPC_ENDPOINT",
+        default_value = None,
+        global = true
+    )]
+    otlp_grpc_endpoint: Option<String>,
 }
 
 /// CLI options
@@ -654,7 +764,7 @@ where
 pub fn construct_providers(
     args: &CommonArgs,
     chain_spec: &ChainSpec,
-) -> anyhow::Result<impl Providers> {
+) -> anyhow::Result<impl Providers + 'static> {
     let provider = Arc::new(rundler_provider::new_alloy_provider(
         args.node_http.as_ref().context("must provide node_http")?,
         args.provider_client_timeout_seconds,
@@ -712,4 +822,44 @@ fn lint_da_gas_tracking(da_gas_tracking_enabled: bool, chain_spec: &ChainSpec) -
     } else {
         true
     }
+}
+
+async fn load_configs(
+    args: &CommonArgs,
+) -> anyhow::Result<(Option<MempoolConfigs>, Option<EntryPointBuilderConfigs>)> {
+    let mempool_configs = if let Some(mempool_config_path) = &args.mempool_config_path {
+        let mempool_configs = get_json_config::<MempoolConfigs>(mempool_config_path)
+            .await
+            .with_context(|| format!("should load mempool config from {mempool_config_path}"))?;
+
+        tracing::info!("Mempool configs: {:?}", mempool_configs);
+
+        // For now only allow one mempool defined per entry point
+        let mut entry_points = vec![];
+        for mempool_config in mempool_configs.0.values() {
+            let ep = mempool_config.entry_point();
+            if entry_points.contains(&ep) {
+                bail!("multiple mempool configs defined for entry point {:?}", ep);
+            }
+            entry_points.push(ep);
+        }
+
+        Some(mempool_configs)
+    } else {
+        None
+    };
+
+    let builders_config = if let Some(builders_config_path) = &args.builders_config_path {
+        let builders_config = get_json_config::<EntryPointBuilderConfigs>(builders_config_path)
+            .await
+            .with_context(|| format!("should load builders config from {builders_config_path}"))?;
+
+        tracing::info!("Entry point builders: {:?}", builders_config);
+
+        Some(builders_config)
+    } else {
+        None
+    };
+
+    Ok((mempool_configs, builders_config))
 }

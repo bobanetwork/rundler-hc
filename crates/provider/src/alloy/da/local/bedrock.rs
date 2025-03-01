@@ -20,7 +20,7 @@ use reth_tasks::pool::BlockingTaskPool;
 use rundler_types::da::{BedrockDAGasBlockData, BedrockDAGasUOData, DAGasBlockData, DAGasUOData};
 use rundler_utils::cache::LruMap;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::error;
+use tracing::{error, instrument};
 
 use super::multicall::{self, Multicall::MulticallInstance, MULTICALL_BYTECODE};
 use crate::{
@@ -72,16 +72,18 @@ where
     AP: AlloyProvider<T>,
     T: Transport + Clone,
 {
+    #[instrument(skip(self))]
     async fn estimate_da_gas(
         &self,
         data: Bytes,
         to: Address,
         block: BlockHashOrNumber,
         gas_price: u128,
+        extra_bytes_len: usize,
     ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)> {
         let block_data = self.block_data(block).await?;
         let uo_data = self.uo_data(data, to, block).await?;
-        let da_gas = self.calc_da_gas_sync(&uo_data, &block_data, gas_price);
+        let da_gas = self.calc_da_gas_sync(&uo_data, &block_data, gas_price, extra_bytes_len);
         Ok((da_gas, uo_data, block_data))
     }
 }
@@ -92,6 +94,7 @@ where
     AP: AlloyProvider<T>,
     T: Transport + Clone,
 {
+    #[instrument(skip(self))]
     async fn block_data(&self, block: BlockHashOrNumber) -> ProviderResult<DAGasBlockData> {
         let mut cache = self.block_data_cache.lock().await;
         match cache.get(&block) {
@@ -104,6 +107,7 @@ where
         }
     }
 
+    #[instrument(skip(self, uo_data))]
     async fn uo_data(
         &self,
         uo_data: Bytes,
@@ -119,6 +123,7 @@ where
         uo_data: &DAGasUOData,
         block_data: &DAGasBlockData,
         gas_price: u128,
+        extra_data_len: usize,
     ) -> u128 {
         let block_da_data = match block_data {
             DAGasBlockData::Bedrock(block_da_data) => block_da_data,
@@ -132,7 +137,10 @@ where
         let fee_scaled = (block_da_data.base_fee_scalar * 16 * block_da_data.l1_base_fee
             + block_da_data.blob_base_fee_scalar * block_da_data.blob_base_fee)
             as u128;
-        let l1_fee = (uo_data.uo_units as u128 * fee_scaled) / DECIMAL_SCALAR;
+
+        let units = uo_data.uo_units + extra_data_to_units(extra_data_len);
+
+        let l1_fee = (units as u128 * fee_scaled) / DECIMAL_SCALAR;
         l1_fee.checked_div(gas_price).unwrap_or(u128::MAX)
     }
 }
@@ -142,6 +150,7 @@ where
     AP: AlloyProvider<T>,
     T: Transport + Clone,
 {
+    #[instrument(skip(self))]
     async fn is_fjord(&self) -> bool {
         self.oracle
             .isFjord()
@@ -152,6 +161,7 @@ where
             .unwrap_or(true) // Fail-open. Assume fjord if we can't check, so this can be used downstream in asserts w/o panic on RPC errors.
     }
 
+    #[instrument(skip(self))]
     async fn get_block_data(
         &self,
         block: BlockHashOrNumber,
@@ -225,6 +235,7 @@ where
         })
     }
 
+    #[instrument(skip(self, data))]
     async fn get_uo_data(&self, data: Bytes) -> ProviderResult<BedrockDAGasUOData> {
         // Blocking call compressing potentially a lot of data.
         // Generally takes more than 100µs so should be spawned on blocking threadpool.
@@ -248,4 +259,10 @@ where
             uo_units: uo_units as u64,
         })
     }
+}
+
+fn extra_data_to_units(extra_data_len: usize) -> u64 {
+    // https://github.com/ethereum-optimism/optimism/blob/d39eb247e60584c87b75baec937ddd20701225a5/packages/contracts-bedrock/src/L2/GasPriceOracle.sol#L239
+    // bytes are all scaled up by 1e6
+    (extra_data_len * 1_000_000) as u64
 }

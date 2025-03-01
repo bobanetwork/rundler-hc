@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-#![warn(missing_docs, unreachable_pub)]
+#![warn(missing_docs, unreachable_pub, unused_crate_dependencies)]
 #![deny(unused_must_use, rust_2018_idioms)]
 #![doc(test(
     no_crate_inject,
@@ -24,8 +24,12 @@
 mod alloy;
 pub use alloy::{
     entry_point::{
-        v0_6::EntryPointProvider as AlloyEntryPointV0_6,
+        v0_6::{
+            decode_ops_from_calldata as decode_v0_6_ops_from_calldata,
+            EntryPointProvider as AlloyEntryPointV0_6,
+        },
         v0_7::{
+            decode_ops_from_calldata as decode_v0_7_ops_from_calldata,
             decode_validation_revert as decode_v0_7_validation_revert,
             EntryPointProvider as AlloyEntryPointV0_7,
         },
@@ -47,6 +51,7 @@ pub use alloy_rpc_types_eth::{
     TransactionRequest,
 };
 pub use alloy_rpc_types_trace::geth::{
+    CallConfig as GethDebugTracerCallConfig, CallFrame as GethDebugTracerCallFrame,
     GethDebugBuiltInTracerType, GethDebugTracerType, GethDebugTracingCallOptions,
     GethDebugTracingOptions, GethTrace,
 };

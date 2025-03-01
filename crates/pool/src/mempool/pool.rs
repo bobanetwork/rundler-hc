@@ -150,10 +150,7 @@ where
         op: &UserOperationVariant,
     ) -> MempoolResult<Option<B256>> {
         // Check if operation already known
-        if self
-            .by_hash
-            .contains_key(&op.hash(self.config.entry_point, self.config.chain_spec.id))
-        {
+        if self.by_hash.contains_key(&op.hash()) {
             return Err(MempoolError::OperationAlreadyKnown);
         }
 
@@ -170,11 +167,7 @@ where
                 ));
             }
 
-            Ok(Some(
-                pool_op
-                    .uo()
-                    .hash(self.config.entry_point, self.config.chain_spec.id),
-            ))
+            Ok(Some(pool_op.uo().hash()))
         } else {
             Ok(None)
         }
@@ -191,9 +184,7 @@ where
         let is_eligible = if self.config.da_gas_tracking_enabled && self.da_gas_oracle.is_some() {
             if op.uo.pre_verification_gas() < required_pvg {
                 self.emit(PoolEvent::UpdatedDAData {
-                    op_hash: op
-                        .uo
-                        .hash(self.config.entry_point, self.config.chain_spec.id),
+                    op_hash: op.uo.hash(),
                     eligible: false,
                     required_pvg,
                     actual_pvg: op.uo.pre_verification_gas(),
@@ -282,6 +273,9 @@ where
 
             // check for eligibility
             if self.da_gas_oracle.is_some() && block_da_data.is_some() {
+                // TODO(bundle): assuming a bundle size of 1
+                let bundle_size = 1;
+
                 let da_gas_oracle = self.da_gas_oracle.as_ref().unwrap();
                 let block_da_data = block_da_data.unwrap();
 
@@ -289,11 +283,12 @@ where
                     &op.po.da_gas_data,
                     block_da_data,
                     op.uo().gas_price(gas_fees.base_fee),
+                    op.uo().extra_data_len(bundle_size),
                 );
 
                 let required_pvg = op.uo().required_pre_verification_gas(
                     &self.config.chain_spec,
-                    1,
+                    bundle_size,
                     required_da_gas,
                 );
                 let actual_pvg = op.uo().pre_verification_gas();
@@ -460,9 +455,7 @@ where
             warn!("Could not find time to mine for {:?}", mined_op.hash);
         }
 
-        let hash = tx_in_pool
-            .uo()
-            .hash(mined_op.entry_point, self.config.chain_spec.id);
+        let hash = tx_in_pool.uo().hash();
 
         self.remove_operation_internal(hash, Some(block_number))
     }
@@ -503,10 +496,7 @@ where
                 }
                 false
             })
-            .map(|o| {
-                o.po.uo
-                    .hash(self.config.entry_point, self.config.chain_spec.id)
-            })
+            .map(|o| o.po.uo.hash())
             .collect::<Vec<_>>();
         for &hash in &to_remove {
             self.remove_operation_internal(hash, None);
@@ -560,9 +550,7 @@ where
 
         while self.pool_size > self.config.max_size_of_pool_bytes {
             if let Some(worst) = self.best.pop_last() {
-                let hash = worst
-                    .uo()
-                    .hash(self.config.entry_point, self.config.chain_spec.id);
+                let hash = worst.uo().hash();
 
                 let _ = self
                     .remove_operation_internal(hash, None)
@@ -594,9 +582,7 @@ where
         }
 
         // create and insert ordered operation
-        let hash = pool_op
-            .uo()
-            .hash(self.config.entry_point, self.config.chain_spec.id);
+        let hash = pool_op.uo().hash();
         self.pool_size += pool_op.mem_size();
         self.by_hash.insert(hash, pool_op.clone());
         self.by_id.insert(pool_op.uo().id(), pool_op.clone());
@@ -815,8 +801,8 @@ mod tests {
     use alloy_primitives::U256;
     use rundler_provider::MockDAGasOracleSync;
     use rundler_types::{
-        v0_6::UserOperation, EntityInfo, EntityInfos, GasFees, UserOperation as UserOperationTrait,
-        ValidTimeRange,
+        v0_6::{UserOperationBuilder, UserOperationRequiredFields},
+        EntityInfo, EntityInfos, GasFees, UserOperation as UserOperationTrait, ValidTimeRange,
     };
 
     use super::*;
@@ -906,10 +892,7 @@ mod tests {
 
         let all = pool
             .all_operations()
-            .map(|op| {
-                op.uo
-                    .hash(pool.config.entry_point, pool.config.chain_spec.id)
-            })
+            .map(|op| op.uo.hash())
             .collect::<HashSet<_>>();
 
         assert_eq!(all, hashes);
@@ -996,9 +979,7 @@ mod tests {
 
         let op = create_op(sender, nonce, 1);
 
-        let hash = op
-            .uo
-            .hash(pool.config.entry_point, pool.config.chain_spec.id);
+        let hash = op.uo.hash();
 
         pool.add_operation(op, 0, 0).unwrap();
 
@@ -1025,13 +1006,15 @@ mod tests {
         let nonce = 0;
 
         let op = create_op(sender, nonce, 1);
-        let mut op_2 = create_op(sender, nonce, 2);
-        let uo2: &mut UserOperation = op_2.uo.as_mut();
-        uo2.max_fee_per_gas *= 2;
+        let op_2 = create_op_from_required(UserOperationRequiredFields {
+            sender,
+            nonce: U256::from(nonce),
+            max_fee_per_gas: 2,
+            max_priority_fee_per_gas: 2,
+            ..base_required_fields()
+        });
 
-        let hash = op_2
-            .uo
-            .hash(pool.config.entry_point, pool.config.chain_spec.id);
+        let hash = op_2.uo.hash();
 
         pool.add_operation(op, 0, 0).unwrap();
         pool.add_operation(op_2, 0, 0).unwrap();
@@ -1082,14 +1065,26 @@ mod tests {
         let mut pool = pool();
         let paymaster = Address::random();
         let ops = vec![
-            create_op(Address::random(), 0, 3),
-            create_op(Address::random(), 0, 2),
-            create_op(Address::random(), 0, 1),
+            create_op_from_required(UserOperationRequiredFields {
+                paymaster_and_data: paymaster.to_vec().into(),
+                sender: Address::random(),
+                max_fee_per_gas: 3,
+                ..base_required_fields()
+            }),
+            create_op_from_required(UserOperationRequiredFields {
+                paymaster_and_data: paymaster.to_vec().into(),
+                sender: Address::random(),
+                max_fee_per_gas: 2,
+                ..base_required_fields()
+            }),
+            create_op_from_required(UserOperationRequiredFields {
+                paymaster_and_data: paymaster.to_vec().into(),
+                sender: Address::random(),
+                max_fee_per_gas: 1,
+                ..base_required_fields()
+            }),
         ];
         for mut op in ops.into_iter() {
-            let uo: &mut UserOperation = op.uo.as_mut();
-
-            uo.paymaster_and_data = paymaster.to_vec().into();
             op.entity_infos.paymaster = Some(EntityInfo {
                 entity: Entity::paymaster(paymaster),
                 is_staked: false,
@@ -1110,39 +1105,37 @@ mod tests {
         let sender = Address::random();
         let paymaster = Address::random();
         let factory = Address::random();
-        let aggregator = Address::random();
 
-        let mut op = create_op(sender, 0, 1);
-        let uo: &mut UserOperation = op.uo.as_mut();
-        uo.paymaster_and_data = paymaster.to_vec().into();
+        let mut op = create_op_from_required(UserOperationRequiredFields {
+            sender,
+            paymaster_and_data: paymaster.to_vec().into(),
+            init_code: factory.to_vec().into(),
+            ..base_required_fields()
+        });
         op.entity_infos.paymaster = Some(EntityInfo {
             entity: Entity::paymaster(paymaster),
             is_staked: false,
         });
-        uo.init_code = factory.to_vec().into();
         op.entity_infos.factory = Some(EntityInfo {
             entity: Entity::factory(factory),
-            is_staked: false,
-        });
-        op.aggregator = Some(aggregator);
-        op.entity_infos.aggregator = Some(EntityInfo {
-            entity: Entity::aggregator(aggregator),
             is_staked: false,
         });
 
         let count = 5;
         let mut hashes = vec![];
         for i in 0..count {
-            let mut op = op.clone();
-            let uo: &mut UserOperation = op.uo.as_mut();
-            uo.nonce = U256::from(i);
-            hashes.push(pool.add_operation(op, 0, 0).unwrap());
+            let new_uo = UserOperationBuilder::from_uo(op.uo.clone().into(), &ChainSpec::default())
+                .nonce(U256::from(i))
+                .build();
+            let mut new_op = op.clone();
+            new_op.uo = new_uo.into();
+
+            hashes.push(pool.add_operation(new_op, 0, 0).unwrap());
         }
 
         assert_eq!(pool.address_count(&sender), 5);
         assert_eq!(pool.address_count(&paymaster), 5);
         assert_eq!(pool.address_count(&factory), 5);
-        assert_eq!(pool.address_count(&aggregator), 5);
 
         for hash in hashes.iter() {
             assert!(pool.remove_operation_by_hash(*hash).is_some());
@@ -1151,7 +1144,6 @@ mod tests {
         assert_eq!(pool.address_count(&sender), 0);
         assert_eq!(pool.address_count(&paymaster), 0);
         assert_eq!(pool.address_count(&factory), 0);
-        assert_eq!(pool.address_count(&aggregator), 0);
     }
 
     #[test]
@@ -1216,9 +1208,21 @@ mod tests {
         let mut pool = pool();
         let sender = Address::random();
         let paymaster1 = Address::random();
-        let mut po1 = create_op(sender, 0, 10);
-        let uo1: &mut UserOperation = po1.uo.as_mut();
-        uo1.paymaster_and_data = paymaster1.to_vec().into();
+        let paymaster2 = Address::random();
+
+        let mut po1 = create_op_from_required(UserOperationRequiredFields {
+            paymaster_and_data: paymaster1.to_vec().into(),
+            sender,
+            max_fee_per_gas: 10,
+            ..base_required_fields()
+        });
+        let mut po2 = create_op_from_required(UserOperationRequiredFields {
+            paymaster_and_data: paymaster2.to_vec().into(),
+            sender,
+            max_fee_per_gas: 11,
+            ..base_required_fields()
+        });
+
         po1.entity_infos.paymaster = Some(EntityInfo {
             entity: Entity::paymaster(paymaster1),
             is_staked: false,
@@ -1226,10 +1230,6 @@ mod tests {
         let _ = pool.add_operation(po1, 0, 0).unwrap();
         assert_eq!(pool.address_count(&paymaster1), 1);
 
-        let paymaster2 = Address::random();
-        let mut po2 = create_op(sender, 0, 11);
-        let uo2: &mut UserOperation = po2.uo.as_mut();
-        uo2.paymaster_and_data = paymaster2.to_vec().into();
         po2.entity_infos.paymaster = Some(EntityInfo {
             entity: Entity::paymaster(paymaster2),
             is_staked: false,
@@ -1326,7 +1326,7 @@ mod tests {
         let mut oracle = MockDAGasOracleSync::default();
         oracle
             .expect_calc_da_gas_sync()
-            .returning(move |_, _, _| da_pvg - 1);
+            .returning(move |_, _, _, _| da_pvg - 1);
 
         let mut pool = pool_with_conf_oracle(conf.clone(), oracle);
 
@@ -1361,7 +1361,7 @@ mod tests {
         let mut oracle = MockDAGasOracleSync::default();
         oracle
             .expect_calc_da_gas_sync()
-            .returning(move |_, _, _| da_pvg + 1);
+            .returning(move |_, _, _, _| da_pvg + 1);
 
         let mut pool = pool_with_conf_oracle(conf.clone(), oracle);
 
@@ -1396,7 +1396,7 @@ mod tests {
         let mut oracle = MockDAGasOracleSync::default();
         oracle
             .expect_calc_da_gas_sync()
-            .returning(move |_, _, _| da_pvg);
+            .returning(move |_, _, _, _| da_pvg);
 
         let mut pool = pool_with_conf_oracle(conf.clone(), oracle);
 
@@ -1431,10 +1431,12 @@ mod tests {
             .pre_verification_da_gas_limit(&conf.chain_spec, Some(1));
 
         let mut oracle = MockDAGasOracleSync::default();
-        oracle.expect_calc_da_gas_sync().returning(move |_, _, gp| {
-            assert_eq!(gp, po1_gas_price);
-            da_pvg + 1
-        });
+        oracle
+            .expect_calc_da_gas_sync()
+            .returning(move |_, _, gp, _| {
+                assert_eq!(gp, po1_gas_price);
+                da_pvg + 1
+            });
 
         let mut pool = pool_with_conf_oracle(conf.clone(), oracle);
 
@@ -1484,17 +1486,23 @@ mod tests {
     fn test_update_best_price() {
         let mut pool = pool();
 
-        let mut po1 = create_op(Address::random(), 0, 0);
-        let uo1: &mut UserOperation = po1.uo.as_mut();
-        uo1.max_fee_per_gas = 20;
-        uo1.max_priority_fee_per_gas = 10;
+        let po1 = create_op_from_required(UserOperationRequiredFields {
+            sender: Address::random(),
+            nonce: U256::from(0),
+            max_fee_per_gas: 20,
+            max_priority_fee_per_gas: 10,
+            ..base_required_fields()
+        });
+
         let _ = pool.add_operation(po1.clone(), 10, 0).unwrap();
 
-        let mut po2 = create_op(Address::random(), 0, 0);
-        let uo2: &mut UserOperation = po2.uo.as_mut();
-        uo2.max_fee_per_gas = 30;
-        uo2.max_priority_fee_per_gas = 10;
-
+        let po2 = create_op_from_required(UserOperationRequiredFields {
+            sender: Address::random(),
+            nonce: U256::from(0),
+            max_fee_per_gas: 30,
+            max_priority_fee_per_gas: 10,
+            ..base_required_fields()
+        });
         let _ = pool.add_operation(po2.clone(), 10, 0).unwrap();
 
         let po1 = Arc::new(po1);
@@ -1563,17 +1571,30 @@ mod tests {
             .mem_size()
     }
 
+    fn base_required_fields() -> UserOperationRequiredFields {
+        UserOperationRequiredFields {
+            pre_verification_gas: 50_000,
+            ..Default::default()
+        }
+    }
+
     fn create_op(sender: Address, nonce: usize, gas_fee: u128) -> PoolOperation {
+        let required = UserOperationRequiredFields {
+            sender,
+            nonce: U256::from(nonce),
+            max_fee_per_gas: gas_fee,
+            max_priority_fee_per_gas: gas_fee,
+            ..base_required_fields()
+        };
+        create_op_from_required(required)
+    }
+
+    fn create_op_from_required(required: UserOperationRequiredFields) -> PoolOperation {
+        let sender = required.sender;
         PoolOperation {
-            uo: UserOperation {
-                sender,
-                nonce: U256::from(nonce),
-                max_fee_per_gas: gas_fee,
-                max_priority_fee_per_gas: gas_fee,
-                pre_verification_gas: 50_000,
-                ..UserOperation::default()
-            }
-            .into(),
+            uo: UserOperationBuilder::new(&ChainSpec::default(), required)
+                .build()
+                .into(),
             entity_infos: EntityInfos {
                 factory: None,
                 sender: EntityInfo {
@@ -1591,6 +1612,7 @@ mod tests {
             sim_block_number: 0,
             account_is_staked: false,
             da_gas_data: Default::default(),
+            filter_id: None,
         }
     }
 

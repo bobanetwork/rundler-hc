@@ -28,7 +28,7 @@ use rundler_types::{
     UserOperationVariant,
 };
 use rundler_utils::log::LogOnError;
-use tracing::Level;
+use tracing::{instrument, Level};
 
 use super::{
     error::{EthResult, EthRpcError},
@@ -84,6 +84,7 @@ where
         }
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn send_user_operation(
         &self,
         op: UserOperationVariant,
@@ -524,6 +525,7 @@ where
         }
     }
 
+    #[instrument(skip(self, state_override))]
     pub(crate) async fn estimate_user_operation_gas(
         &self,
         op: UserOperationOptionalGas,
@@ -601,6 +603,7 @@ where
         result
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn get_user_operation_by_hash(
         &self,
         hash: B256,
@@ -626,6 +629,7 @@ where
         Ok(results.into_iter().find_map(|x| x))
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn get_user_operation_receipt(
         &self,
         hash: B256,
@@ -645,6 +649,7 @@ where
         Ok(results.into_iter().find_map(|x| x))
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn supported_entry_points(&self) -> EthResult<Vec<String>> {
         Ok(self
             .router
@@ -653,10 +658,12 @@ where
             .collect())
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn chain_id(&self) -> EthResult<U64> {
         Ok(U64::from(self.chain_spec.id))
     }
 
+    #[instrument(skip(self))]
     async fn get_pending_user_operation_by_hash(
         &self,
         hash: B256,
@@ -690,7 +697,7 @@ mod tests {
     use rundler_sim::MockGasEstimator;
     use rundler_types::{
         pool::{MockPool, PoolOperation},
-        v0_6::UserOperation,
+        v0_6::{UserOperationBuilder, UserOperationRequiredFields},
         EntityInfos, UserOperation as UserOperationTrait, ValidTimeRange,
     };
 
@@ -702,8 +709,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_user_op_by_hash_pending() {
         let ep = Address::random();
-        let uo = UserOperation::default();
-        let hash = uo.hash(ep, 1);
+        let cs = ChainSpec {
+            entry_point_address_v0_6: ep,
+            ..Default::default()
+        };
+        let uo = UserOperationBuilder::new(&cs, UserOperationRequiredFields::default()).build();
+        let hash = uo.hash();
 
         let po = PoolOperation {
             uo: uo.clone().into(),
@@ -716,6 +727,7 @@ mod tests {
             account_is_staked: false,
             entity_infos: EntityInfos::default(),
             da_gas_data: rundler_types::da::DAGasUOData::Empty,
+            filter_id: None,
         };
 
         let mut pool = MockPool::default();
@@ -750,8 +762,8 @@ mod tests {
             ..Default::default()
         };
         let ep = cs.entry_point_address_v0_6;
-        let uo = UserOperation::default();
-        let hash = uo.hash(ep, 1);
+        let uo = UserOperationBuilder::new(&cs, UserOperationRequiredFields::default()).build();
+        let hash = uo.hash();
         let block_number = 1000;
         let block_hash = B256::random();
 
@@ -824,9 +836,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_user_op_by_hash_not_found() {
-        let ep = Address::random();
-        let uo = UserOperation::default();
-        let hash = uo.hash(ep, 1);
+        let cs = ChainSpec {
+            id: 1,
+            ..Default::default()
+        };
+        let ep = cs.entry_point_address_v0_6;
+        let uo = UserOperationBuilder::new(&cs, UserOperationRequiredFields::default()).build();
+        let hash = uo.hash();
 
         let mut pool = MockPool::default();
         pool.expect_get_op_by_hash()

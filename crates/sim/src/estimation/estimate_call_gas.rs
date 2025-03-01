@@ -9,6 +9,7 @@ use rundler_contracts::{
 use rundler_provider::{EntryPoint, SimulationProvider, StateOverride};
 use rundler_types::UserOperation;
 use rundler_utils::authorization_utils;
+use tracing::instrument;
 
 use super::Settings;
 use crate::GasEstimationError;
@@ -95,6 +96,7 @@ where
 {
     type UO = UO;
 
+    #[instrument(skip(self))]
     async fn estimate_call_gas(
         &self,
         op: Self::UO,
@@ -107,7 +109,7 @@ where
 
         let callless_op = self.specialization.get_op_with_no_call_gas(op.clone());
 
-        if let Some(authorization_tuple) = op.authorization_tuple().clone() {
+        if let Some(authorization_tuple) = op.authorization_tuple() {
             let eip7702_auth_address = authorization_tuple.address;
             authorization_utils::apply_7702_overrides(
                 &mut state_override,
@@ -207,6 +209,7 @@ where
         }
     }
 
+    #[instrument(skip(self))]
     async fn simulate_handle_op_with_result(
         &self,
         op: Self::UO,

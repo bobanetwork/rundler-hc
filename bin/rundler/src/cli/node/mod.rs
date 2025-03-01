@@ -14,13 +14,16 @@
 use clap::Args;
 use rundler_builder::{BuilderEvent, BuilderTask, LocalBuilderBuilder};
 use rundler_pool::{LocalPoolBuilder, PoolEvent, PoolTask};
+use rundler_provider::Providers;
 use rundler_rpc::RpcTask;
+use rundler_sim::MempoolConfigs;
 use rundler_task::TaskSpawnerExt;
 use rundler_types::chain::ChainSpec;
 use rundler_utils::emit::{self, WithEntryPoint, EVENT_CHANNEL_CAPACITY};
 use tokio::sync::broadcast;
 
 use self::events::Event;
+use super::EntryPointBuilderConfigs;
 use crate::cli::{
     builder::{self, BuilderArgs},
     pool::PoolArgs,
@@ -49,7 +52,11 @@ pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
     chain_spec: ChainSpec,
     bundler_args: NodeCliArgs,
     common_args: CommonArgs,
+    providers: impl Providers + 'static,
+    mempool_configs: Option<MempoolConfigs>,
+    entry_point_builders: Option<EntryPointBuilderConfigs>,
 ) -> anyhow::Result<()> {
+    let _ = mempool_configs;
     let NodeCliArgs {
         pool: pool_args,
         builder: builder_args,
@@ -57,10 +64,22 @@ pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
     } = bundler_args;
 
     let pool_task_args = pool_args
-        .to_args(chain_spec.clone(), &common_args, None)
+        .to_args(
+            chain_spec.clone(),
+            &common_args,
+            None,
+            mempool_configs.clone(),
+            entry_point_builders.clone(),
+        )
         .await?;
     let builder_task_args = builder_args
-        .to_args(chain_spec.clone(), &common_args, None)
+        .to_args(
+            chain_spec.clone(),
+            &common_args,
+            None,
+            mempool_configs,
+            entry_point_builders,
+        )
         .await?;
     let rpc_task_args = rpc_args.to_args(
         chain_spec.clone(),
@@ -108,8 +127,6 @@ pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
 
     let builder_builder = LocalBuilderBuilder::new(REQUEST_CHANNEL_CAPACITY);
     let builder_handle = builder_builder.get_handle();
-
-    let providers = super::construct_providers(&common_args, &chain_spec)?;
 
     PoolTask::new(
         pool_task_args,

@@ -301,6 +301,7 @@ fn make_external_op(
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
             eip7702_auth_address: None,
+            aggregator: None,
         };
 
         new_op.signature = sig_hex.parse::<Bytes>().unwrap();
@@ -319,6 +320,7 @@ fn make_external_op(
             paymaster_and_data: Bytes::new(),
             signature: Bytes::new(),
             eip7702_auth_address: None,
+            aggregator: None,
         };
 
         new_op.signature = sig_hex.parse::<Bytes>().unwrap();
@@ -361,7 +363,7 @@ pub async fn external_op(
 
     let check_hash = new_op
         .into_variant(&cfg.chain_spec)
-        .hash(entry_point, cfg.chain_spec.id);
+        .hash(/*entry_point, cfg.chain_spec.id*/);
     let check_sig: Signature = Signature::from_str(&sig_hex).expect("Signature decode");
     let check_msg = check_hash.to_vec(); // check_hash.to_fixed_bytes().to_vec();
 
@@ -425,7 +427,7 @@ async fn make_err_op(
     nn: U256,
     oo_nonce: U256,
     cfg: &HcCfg,
-    entry_point: Address,
+    _entry_point: Address,
     wallet: PrivateKeySigner,
     is_v7: bool,
 ) -> (UserOperationOptionalGas, Bytes) {
@@ -463,10 +465,11 @@ async fn make_err_op(
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
             eip7702_auth_address: None,
+            aggregator: None,
         };
         let hh = UserOperationOptionalGas::V0_7(new_op.clone())
             .into_variant(&cfg.chain_spec)
-            .hash(entry_point, cfg.chain_spec.id);
+            .hash(/*entry_point, cfg.chain_spec.id*/);
         let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
         let sig_bytes: Bytes = signature.as_bytes().into();
         println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
@@ -487,10 +490,11 @@ async fn make_err_op(
             paymaster_and_data: Bytes::new(),
             signature: Bytes::new(),
             eip7702_auth_address: None,
+            aggregator: None,
         };
         let hh = UserOperationOptionalGas::V0_6(new_op.clone())
             .into_variant(&cfg.chain_spec)
-            .hash(entry_point, cfg.chain_spec.id);
+            .hash(/*entry_point, cfg.chain_spec.id*/);
         let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
         let sig_bytes: Bytes = signature.as_bytes().into();
         println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
@@ -551,7 +555,7 @@ pub async fn err_op(
 /// Encapsulate a RemoveResponses into a UserOperation
 pub async fn rr_op(
     cfg: &HcCfg,
-    entry_point: Address,
+    _entry_point: Address,
     oo_nonce: U256,
     keys: Vec<B256>,
     is_v7: bool,
@@ -577,6 +581,7 @@ pub async fn rr_op(
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
             eip7702_auth_address: None,
+            aggregator: None,
         };
 
         let key_bytes: B256 = cfg.sys_privkey;
@@ -584,7 +589,7 @@ pub async fn rr_op(
 
         let hh = UserOperationOptionalGas::V0_7(new_op.clone())
             .into_variant(&cfg.chain_spec)
-            .hash(entry_point, cfg.chain_spec.id);
+            .hash(/*entry_point, cfg.chain_spec.id*/);
 
         let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
         new_op.signature = signature.as_bytes().into();
@@ -605,6 +610,7 @@ pub async fn rr_op(
             paymaster_and_data: Bytes::new(),
             signature: Bytes::new(),
             eip7702_auth_address: None,
+            aggregator: None,
         };
 
         let key_bytes: B256 = cfg.sys_privkey;
@@ -612,7 +618,7 @@ pub async fn rr_op(
 
         let hh = UserOperationOptionalGas::V0_6(new_op.clone())
             .into_variant(&cfg.chain_spec)
-            .hash(entry_point, cfg.chain_spec.id);
+            .hash(/*entry_point, cfg.chain_spec.id*/);
         println!("HC pre_sign hash {:?}", hh);
 
         let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
@@ -864,6 +870,7 @@ mod test {
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
             eip7702_auth_address: None,
+            aggregator: None,
         };
         if let UserOperationOptionalGas::V0_7(op7) = op {
             assert_eq!(expected, op7);
@@ -939,6 +946,7 @@ mod test {
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
             eip7702_auth_address: None,
+            aggregator: None,
         };
         let (op, _) = op_future.await;
         if let UserOperationOptionalGas::V0_7(op7) = op {

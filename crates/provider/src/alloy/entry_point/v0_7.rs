@@ -29,7 +29,9 @@ use rundler_contracts::v0_7::{
     DepositInfo as DepositInfoV0_7,
     GetBalances::{self, GetBalancesResult},
     IAggregator,
-    IEntryPoint::{FailedOp, IEntryPointErrors, IEntryPointInstance},
+    IEntryPoint::{
+        FailedOp, FailedOpWithRevert, IEntryPointCalls, IEntryPointErrors, IEntryPointInstance,
+    },
     IEntryPointSimulations::{
         self, ExecutionResult as ExecutionResultV0_7, IEntryPointSimulationsInstance,
     },
@@ -40,16 +42,18 @@ use rundler_types::{
     authorization::Eip7702Auth,
     chain::ChainSpec,
     da::{DAGasBlockData, DAGasUOData},
-    v0_7::UserOperation,
+    v0_7::{UserOperation, UserOperationBuilder},
     GasFees, UserOperation as _, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
 };
 use rundler_utils::authorization_utils;
+use tracing::instrument;
 
 use crate::{
     AggregatorOut, AggregatorSimOut, BlockHashOrNumber, BundleHandler, DAGasOracle, DAGasProvider,
     DepositInfo, EntryPoint, EntryPointProvider as EntryPointProviderTrait, EvmCall,
     ExecutionResult, HandleOpsOut, ProviderResult, SignatureAggregator, SimulationProvider,
 };
+
 /// Entry point provider for v0.7
 #[derive(Clone)]
 pub struct EntryPointProvider<AP, T, D> {
@@ -100,6 +104,7 @@ where
         self.i_entry_point.address()
     }
 
+    #[instrument(skip(self))]
     async fn balance_of(
         &self,
         address: Address,
@@ -115,6 +120,7 @@ where
         Ok(ret._0)
     }
 
+    #[instrument(skip(self))]
     async fn get_deposit_info(&self, address: Address) -> ProviderResult<DepositInfo> {
         self.i_entry_point
             .getDepositInfo(address)
@@ -129,6 +135,7 @@ where
         Ok(ret._0)
     }
 
+    #[instrument(skip(self))]
     async fn get_balances(&self, addresses: Vec<Address>) -> ProviderResult<Vec<U256>> {
         let provider = self.i_entry_point.provider();
         let call = GetBalances::deploy_builder(provider, *self.address(), addresses)
@@ -161,6 +168,7 @@ where
 {
     type UO = UserOperation;
 
+    #[instrument(skip(self))]
     async fn aggregate_signatures(
         &self,
         aggregator_address: Address,
@@ -189,8 +197,12 @@ where
         match result {
             Ok(ret) => Ok(Some(ret.aggregatedSignature)),
             Err(ContractError::TransportError(TransportError::ErrorResp(resp))) => {
-                if resp.as_revert_data().is_some() {
-                    Ok(None)
+                if let Some(revert) = resp.as_revert_data() {
+                    let msg = format!(
+                        "Aggregator contract should aggregate signatures. Revert: {revert}",
+                    );
+                    tracing::error!(msg);
+                    Err(anyhow::anyhow!(msg).into())
                 } else {
                     Err(TransportError::ErrorResp(resp).into())
                 }
@@ -199,6 +211,7 @@ where
         }
     }
 
+    #[instrument(skip(self))]
     async fn validate_user_op_signature(
         &self,
         aggregator_address: Address,
@@ -222,8 +235,8 @@ where
                 signature: ret.sigForUserOp,
             })),
             Err(ContractError::TransportError(TransportError::ErrorResp(resp))) => {
-                if resp.as_revert_data().is_some() {
-                    Ok(AggregatorOut::ValidationReverted)
+                if let Some(revert) = resp.as_revert_data() {
+                    Ok(AggregatorOut::ValidationReverted(revert))
                 } else {
                     Err(TransportError::ErrorResp(resp).into())
                 }
@@ -242,12 +255,14 @@ where
 {
     type UO = UserOperation;
 
+    #[instrument(skip(self))]
     async fn call_handle_ops(
         &self,
         ops_per_aggregator: Vec<UserOpsPerAggregator<UserOperation>>,
         sender_eoa: Address,
         gas_limit: u64,
         gas_fees: GasFees,
+        proxy: Option<Address>,
     ) -> ProviderResult<HandleOpsOut> {
         let tx = get_handle_ops_call(
             &self.i_entry_point,
@@ -255,39 +270,24 @@ where
             sender_eoa,
             gas_limit,
             gas_fees,
+            proxy,
         );
         let res = self.i_entry_point.provider().call(&tx).await;
 
         match res {
             Ok(_) => return Ok(HandleOpsOut::Success),
             Err(TransportError::ErrorResp(resp)) => {
-                if let Some(err) = resp.as_decoded_error::<IEntryPointErrors>(false) {
-                    match err {
-                        IEntryPointErrors::FailedOp(FailedOp { opIndex, reason }) => {
-                            match &reason[..4] {
-                                // This revert is a bundler issue, not a user op issue, handle it differently
-                                "AA95" => {
-                                    Err(anyhow::anyhow!("Handle ops called with insufficient gas")
-                                        .into())
-                                }
-                                _ => Ok(HandleOpsOut::FailedOp(
-                                    opIndex
-                                        .try_into()
-                                        .context("returned opIndex out of bounds")?,
-                                    reason,
-                                )),
-                            }
-                        }
-                        IEntryPointErrors::SignatureValidationFailed(failure) => {
-                            Ok(HandleOpsOut::SignatureValidationFailed(failure.aggregator))
-                        }
-                        _ => Err(TransportError::ErrorResp(resp).into()),
-                    }
+                if let Some(revert_data) = resp.as_revert_data() {
+                    Ok(Self::decode_handle_ops_revert(&resp.message, &revert_data))
                 } else {
+                    tracing::error!("handle_ops failed with request: {:?}", tx);
                     Err(TransportError::ErrorResp(resp).into())
                 }
             }
-            Err(error) => Err(error.into()),
+            Err(error) => {
+                tracing::error!("handle_ops failed with request: {:?}", tx);
+                Err(error.into())
+            }
         }
     }
 
@@ -297,6 +297,7 @@ where
         sender_eoa: Address,
         gas_limit: u64,
         gas_fees: GasFees,
+        proxy: Option<Address>,
     ) -> TransactionRequest {
         get_handle_ops_call(
             &self.i_entry_point,
@@ -304,7 +305,38 @@ where
             sender_eoa,
             gas_limit,
             gas_fees,
+            proxy,
         )
+    }
+
+    fn decode_handle_ops_revert(_message: &str, revert_data: &Bytes) -> HandleOpsOut {
+        if let Ok(err) = IEntryPointErrors::abi_decode(revert_data, false) {
+            match err {
+                IEntryPointErrors::FailedOp(FailedOp { opIndex, reason }) => {
+                    HandleOpsOut::FailedOp(opIndex.try_into().unwrap_or(usize::MAX), reason)
+                }
+                IEntryPointErrors::FailedOpWithRevert(FailedOpWithRevert {
+                    opIndex,
+                    reason,
+                    inner,
+                }) => HandleOpsOut::FailedOp(
+                    opIndex.try_into().unwrap_or(usize::MAX),
+                    format!("{}:{}", reason, inner),
+                ),
+                IEntryPointErrors::SignatureValidationFailed(failure) => {
+                    HandleOpsOut::SignatureValidationFailed(failure.aggregator)
+                }
+            }
+        } else {
+            HandleOpsOut::Revert(revert_data.clone())
+        }
+    }
+
+    fn decode_ops_from_calldata(
+        chain_spec: &ChainSpec,
+        calldata: &Bytes,
+    ) -> Vec<UserOpsPerAggregator<UserOperation>> {
+        decode_ops_from_calldata(chain_spec, calldata)
     }
 }
 
@@ -317,13 +349,16 @@ where
 {
     type UO = UserOperation;
 
+    #[instrument(skip(self))]
     async fn calc_da_gas(
         &self,
         user_op: UserOperation,
         block: BlockHashOrNumber,
         gas_price: u128,
+        bundle_size: usize,
     ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)> {
-        let au = user_op.authorization_tuple();
+        let au = user_op.authorization_tuple().cloned();
+        let extra_data_len = user_op.extra_data_len(bundle_size);
 
         let txn_req = self
             .i_entry_point
@@ -331,11 +366,23 @@ where
             .into_transaction_request();
 
         let data = txn_req.input.into_input().unwrap();
-        let bundle_data =
-            super::max_bundle_transaction_data(*self.i_entry_point.address(), data, gas_price, au);
+
+        // TODO(bundle): assuming a bundle size of 1
+        let bundle_data = super::max_bundle_transaction_data(
+            *self.i_entry_point.address(),
+            data,
+            gas_price,
+            au.as_ref(),
+        );
 
         self.da_gas_oracle
-            .estimate_da_gas(bundle_data, *self.i_entry_point.address(), block, gas_price)
+            .estimate_da_gas(
+                bundle_data,
+                *self.i_entry_point.address(),
+                block,
+                gas_price,
+                extra_data_len,
+            )
             .await
     }
 }
@@ -364,7 +411,7 @@ where
 
         add_authorization_tuple(
             user_op.sender(),
-            &user_op.authorization_tuple,
+            user_op.authorization_tuple(),
             &mut override_ep,
         );
 
@@ -379,6 +426,7 @@ where
         Ok((call, override_ep))
     }
 
+    #[instrument(skip(self))]
     async fn simulate_validation(
         &self,
         user_op: Self::UO,
@@ -426,6 +474,7 @@ where
         }
     }
 
+    #[instrument(skip(self))]
     async fn simulate_handle_op(
         &self,
         op: Self::UO,
@@ -441,7 +490,7 @@ where
 
         add_simulations_override(&mut state_override, *self.i_entry_point.address());
 
-        add_authorization_tuple(op.sender(), &op.authorization_tuple, &mut state_override);
+        add_authorization_tuple(op.sender(), op.authorization_tuple(), &mut state_override);
 
         let ep_simulations = IEntryPointSimulations::new(
             *self.i_entry_point.address(),
@@ -504,6 +553,7 @@ fn get_handle_ops_call<AP: AlloyProvider<T>, T: Transport + Clone>(
     sender_eoa: Address,
     gas_limit: u64,
     gas_fees: GasFees,
+    proxy: Option<Address>,
 ) -> TransactionRequest {
     let mut authorization_list: Vec<SignedAuthorization> = vec![];
     let mut ops_per_aggregator: Vec<UserOpsPerAggregatorV0_7> = ops_per_aggregator
@@ -513,7 +563,7 @@ fn get_handle_ops_call<AP: AlloyProvider<T>, T: Transport + Clone>(
                 .user_ops
                 .into_iter()
                 .map(|op| {
-                    if let Some(authorization) = &op.authorization_tuple {
+                    if let Some(authorization) = op.authorization_tuple() {
                         authorization_list.push(SignedAuthorization::from(authorization.clone()));
                     }
                     op.pack()
@@ -540,9 +590,14 @@ fn get_handle_ops_call<AP: AlloyProvider<T>, T: Transport + Clone>(
         .gas_limit(gas_limit)
         .max_fee_per_gas(gas_fees.max_fee_per_gas)
         .max_priority_fee_per_gas(gas_fees.max_priority_fee_per_gas);
+
     if !authorization_list.is_empty() {
         txn_request = txn_request.with_authorization_list(authorization_list);
     }
+    if let Some(proxy) = proxy {
+        txn_request = txn_request.to(proxy);
+    }
+
     txn_request
 }
 
@@ -570,6 +625,57 @@ pub fn decode_validation_revert(err_bytes: &Bytes) -> ValidationRevert {
         }
     } else {
         ValidationRevert::Unknown(err_bytes.clone())
+    }
+}
+
+/// Decode user ops from calldata
+pub fn decode_ops_from_calldata(
+    chain_spec: &ChainSpec,
+    calldata: &Bytes,
+) -> Vec<UserOpsPerAggregator<UserOperation>> {
+    let entry_point_calls = match IEntryPointCalls::abi_decode(calldata, false) {
+        Ok(entry_point_calls) => entry_point_calls,
+        Err(_) => return vec![],
+    };
+
+    match entry_point_calls {
+        IEntryPointCalls::handleOps(handle_ops_call) => {
+            let ops = handle_ops_call
+                .ops
+                .into_iter()
+                .filter_map(|op| {
+                    UserOperationBuilder::from_packed(op, chain_spec)
+                        .ok()
+                        .map(|uo| uo.build())
+                })
+                .collect();
+
+            vec![UserOpsPerAggregator {
+                user_ops: ops,
+                aggregator: Address::ZERO,
+                signature: Bytes::new(),
+            }]
+        }
+        IEntryPointCalls::handleAggregatedOps(handle_aggregated_ops_call) => {
+            handle_aggregated_ops_call
+                .opsPerAggregator
+                .into_iter()
+                .map(|ops| UserOpsPerAggregator {
+                    user_ops: ops
+                        .userOps
+                        .into_iter()
+                        .filter_map(|op| {
+                            UserOperationBuilder::from_packed(op, chain_spec)
+                                .ok()
+                                .map(|uo| uo.build())
+                        })
+                        .collect(),
+                    aggregator: ops.aggregator,
+                    signature: ops.signature,
+                })
+                .collect()
+        }
+        _ => vec![],
     }
 }
 
@@ -611,10 +717,10 @@ impl TryFrom<ExecutionResultV0_7> for ExecutionResult {
 
 fn add_authorization_tuple(
     sender: Address,
-    authorization: &Option<Eip7702Auth>,
+    authorization: Option<&Eip7702Auth>,
     state_override: &mut StateOverride,
 ) {
-    if let Some(authorization) = &authorization {
+    if let Some(authorization) = authorization {
         authorization_utils::apply_7702_overrides(state_override, sender, authorization.address);
     }
 }

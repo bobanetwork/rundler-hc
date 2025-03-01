@@ -17,12 +17,14 @@ use alloy_consensus::Transaction;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolEvent;
 use anyhow::Context;
+use itertools::Itertools;
 use rundler_provider::{
     EvmProvider, Filter, GethDebugBuiltInTracerType, GethDebugTracerType, GethDebugTracingOptions,
     GethTrace, Log, TransactionReceipt,
 };
 use rundler_types::{chain::ChainSpec, UserOperation, UserOperationVariant};
 use rundler_utils::log::LogOnError;
+use tracing::instrument;
 
 use super::UserOperationEventProvider;
 use crate::types::{RpcUserOperationByHash, RpcUserOperationReceipt};
@@ -59,6 +61,7 @@ where
     P: EvmProvider,
     E: EntryPointEvents,
 {
+    #[instrument(skip(self))]
     async fn get_mined_by_hash(
         &self,
         hash: B256,
@@ -94,17 +97,20 @@ where
 
         let input = tx.input();
 
-        let user_operation = if E::address(&self.chain_spec) == to {
-            E::get_user_operations_from_tx_data(input.clone(), &self.chain_spec)
-                .into_iter()
-                .find(|op| op.hash(to, self.chain_spec.id) == hash)
-                .context("matching user operation should be found in tx data")?
-        } else {
-            self.trace_find_user_operation(transaction_hash, hash)
-                .await
-                .context("error running trace")?
-                .context("should have found user operation in trace")?
-        };
+        let ep_address = E::address(&self.chain_spec);
+        let user_operation =
+            if ep_address == to || self.chain_spec.known_proxy_addresses().contains(&to) {
+                E::get_user_operations_from_tx_data(input.clone(), &self.chain_spec)
+                    .into_iter()
+                    .find(|op| op.hash() == hash)
+                    .context("matching user operation should be found in tx data")?
+            } else {
+                tracing::debug!("Unknown entrypoint {to:?}, falling back to trace");
+                self.trace_find_user_operation(transaction_hash, hash)
+                    .await
+                    .context("error running trace")?
+                    .context("should have found user operation in trace")?
+            };
 
         Ok(Some(RpcUserOperationByHash {
             user_operation: user_operation.into().into(),
@@ -115,6 +121,7 @@ where
         }))
     }
 
+    #[instrument(skip(self))]
     async fn get_receipt(&self, hash: B256) -> anyhow::Result<Option<RpcUserOperationReceipt>> {
         let event = self
             .get_event_by_hash(hash)
@@ -173,6 +180,7 @@ where
         }
     }
 
+    #[instrument(skip(self))]
     async fn get_event_by_hash(&self, hash: B256) -> anyhow::Result<Option<Log>> {
         let to_block = self.provider.get_block_number().await?;
 
@@ -202,6 +210,7 @@ where
     /// This is meant to be used when a user operation event is found in the logs of a transaction, but the top level call
     /// wasn't to an entrypoint, so we need to trace the transaction to find the user operation by inspecting each call frame
     /// and returning the user operation that matches the hash.
+    #[instrument(skip(self))]
     async fn trace_find_user_operation(
         &self,
         tx_hash: B256,
@@ -231,15 +240,15 @@ where
 
         while let Some(call_frame) = frame_queue.pop_front() {
             // check if the call is to an entrypoint, if not enqueue the child calls if any
-            if let Some(to) = call_frame
+            if call_frame
                 .to
-                .filter(|to| *to == E::address(&self.chain_spec))
+                .is_some_and(|to| to == E::address(&self.chain_spec))
             {
                 // check if the user operation is in the call frame
                 if let Some(uo) =
                     E::get_user_operations_from_tx_data(call_frame.input, &self.chain_spec)
                         .into_iter()
-                        .find(|op| op.hash(to, self.chain_spec.id) == user_op_hash)
+                        .find(|op| op.hash() == user_op_hash)
                 {
                     return Ok(Some(uo));
                 }
