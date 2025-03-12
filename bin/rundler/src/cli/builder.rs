@@ -99,6 +99,24 @@ pub struct BuilderArgs {
     )]
     aws_kms_key_ids: Vec<String>,
 
+    /// Custom KMS server
+    #[arg(
+        long = "builder.kms_url",
+        name = "builder.kms_url",
+        env = "BUILDER_KMS_URL",
+        default_value = ""
+    )]
+    kms_url: String,
+
+    /// Region for custom KMS server
+    #[arg(
+        long = "builder.kms_region",
+        name = "builder.kms_region",
+        env = "BUILDER_KMS_REGION",
+        default_value = ""
+    )]
+    kms_region: String,
+
     /// Redis URI to use for KMS leasing
     #[arg(
         long = "builder.redis_uri",
@@ -371,6 +389,8 @@ impl BuilderArgs {
             rpc_url,
             private_keys,
             aws_kms_key_ids: self.aws_kms_key_ids.clone(),
+            kms_url: self.kms_url.clone(),
+            kms_region: self.kms_region.clone(),
             redis_uri: self.redis_uri.clone(),
             redis_lock_ttl_millis: self.redis_lock_ttl_millis,
             max_bundle_size: self.max_bundle_size,

@@ -16,7 +16,8 @@ use std::time::Duration;
 use alloy_signer::Signer as _;
 use alloy_signer_aws::AwsSigner;
 use anyhow::Context;
-use aws_config::BehaviorVersion;
+use aws_config::{BehaviorVersion, Region};
+use aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder;
 use rslock::{Lock, LockGuard, LockManager};
 use rundler_provider::EvmProvider;
 use rundler_task::TaskSpawner;
@@ -29,8 +30,8 @@ use super::monitor_account_balance;
 pub(crate) struct KmsSigner {
     pub(crate) signer: AwsSigner,
 }
-
 impl KmsSigner {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn connect<P: EvmProvider + Clone + 'static, T: TaskSpawner>(
         task_spawner: &T,
         provider: P,
@@ -38,8 +39,24 @@ impl KmsSigner {
         key_ids: Vec<String>,
         redis_uri: String,
         ttl_millis: u64,
+        kms_url: String,
+        kms_region: String,
     ) -> anyhow::Result<Self> {
-        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let mut builder = aws_config::load_defaults(BehaviorVersion::v2024_03_28())
+            .await
+            .into_builder();
+
+        if !kms_region.is_empty() {
+            builder.set_region(Region::new(kms_region));
+        }
+        if !kms_url.is_empty() {
+            let http_client = HyperClientBuilder::new().build_https();
+            builder
+                .set_endpoint_url(Some(kms_url))
+                .set_http_client(Some(http_client));
+        }
+        let config = builder.build();
+
         let client = aws_sdk_kms::Client::new(&config);
 
         let key_id = if key_ids.len() > 1 {
@@ -58,9 +75,14 @@ impl KmsSigner {
                 .to_owned()
         };
 
-        let signer = AwsSigner::new(client, key_id, Some(chain_id))
+        let signer = AwsSigner::new(client, key_id.clone(), Some(chain_id))
             .await
             .context("should create signer")?;
+        println!(
+            "HC signer using AWS key_id {:?} address {:?}",
+            key_id,
+            signer.address()
+        );
 
         task_spawner.spawn(Box::pin(monitor_account_balance(
             signer.address(),

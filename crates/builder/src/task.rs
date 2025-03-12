@@ -58,6 +58,10 @@ pub struct Args {
     /// AWS KMS key ids to use for signing transactions
     /// Only used if private_key is not provided
     pub aws_kms_key_ids: Vec<String>,
+    /// Custom KMS server URL
+    pub kms_url: String,
+    /// AWS region to use for custom KMS server
+    pub kms_region: String,
     /// Redis URI for key leasing
     pub redis_uri: String,
     /// Redis lease TTL in milliseconds
@@ -365,6 +369,8 @@ where
                     self.args.aws_kms_key_ids.clone(),
                     self.args.redis_uri.clone(),
                     self.args.redis_lock_ttl_millis,
+                    self.args.kms_url.clone(),
+                    self.args.kms_region.clone(),
                 ),
             )
             .await
