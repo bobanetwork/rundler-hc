@@ -51,6 +51,8 @@ print("  BOBA L2", boba_token)
 print("Reading local.env")
 with open("local.env", "r", encoding="ascii") as f:
     for line in f.readlines():
+        if line.startswith('#'):
+            continue
         k,v = line.strip().split('=')
         env_vars[k] = v
 
