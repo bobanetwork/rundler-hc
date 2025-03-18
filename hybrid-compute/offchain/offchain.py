@@ -22,32 +22,34 @@ def selector_hex(name):
 class RequestHandler(SimpleJSONRPCRequestHandler):
     rpc_paths = ('/', '/hc')
 
+methods = [
+    (offchain_addsub2,       "addsub2(uint32,uint32)"),
+    (offchain_ramble,        "ramble(uint256,bool)"),
+    (offchain_checkkyc,      "checkkyc(string)"),
+    (offchain_getprice,      "getprice(string)"),
+    (offchain_verifycaptcha, "verifyCaptcha(string,string,string)"),
+    (offchain_auction,       "verifyBidder(address)"),
+    (offchain_sports_betting,"get_score(uint256)"),
+    (offchain_auction,       "verifyBidder(address)"),
+    (offchain_getrainfall,   "get_rainfall(string)"),
+    (offchain_random,        "random(uint256,bytes32)"),
+]
+
+def list_methods(*args):
+    ret = []
+    for m in methods:
+        ret.append((selector_hex(m[1]), m[1]))
+    return ret
 
 def server_loop():
     """Main loop to listen for and process requests"""
     server = SimpleJSONRPCServer(
         ('0.0.0.0', PORT), requestHandler=RequestHandler)
-    server.register_function(offchain_addsub2, selector_hex(
-        "addsub2(uint32,uint32)"))  # 97e0d7ba
-    server.register_function(
-        offchain_ramble,  selector_hex("ramble(uint256,bool)"))
-    server.register_function(
-        offchain_checkkyc, selector_hex("checkkyc(string)"))
-    server.register_function(
-        offchain_getprice, selector_hex("getprice(string)"))
-    server.register_function(
-        offchain_verifycaptcha, selector_hex("verifyCaptcha(string,string,string)"))
-    server.register_function(
-        offchain_auction, selector_hex("verifyBidder(address)"))
-    server.register_function(
-        offchain_sports_betting, selector_hex("get_score(uint256)"))
-    server.register_function(
-        offchain_auction, selector_hex("verifyBidder(address)"))
-    server.register_function(
-        offchain_getrainfall, selector_hex("get_rainfall(string)"))
-    server.register_function(
-        offchain_random, selector_hex("random(uint256,bytes32)"))
 
+    for m in methods:
+        server.register_function(m[0], selector_hex(m[1]))
+        print("Registered", selector_hex(m[1]), m[1])
+    server.register_function(list_methods, "methods")
     server.serve_forever()
 
 server_loop()  # Run until killed
