@@ -9,7 +9,6 @@ RUN mkdir -p /etc/apt/keyrings
 RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
 RUN echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
 RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-config protobuf-compiler nodejs yarn rsync
-RUN apt-get install -y redis-server # for KMS
 
 SHELL ["/bin/bash", "-c"]
 RUN curl -L https://foundry.paradigm.xyz | bash
@@ -51,10 +50,11 @@ WORKDIR /app
 # install curl for healthcheck
 RUN apt-get -y update; apt-get -y install curl ca-certificates
 RUN update-ca-certificates
+RUN apt-get install -y redis-server # for KMS
 
 # Copy rundler over from the build stage
 COPY --from=builder /app/target/release/rundler /usr/local/bin
+COPY docker-wrapper.sh /docker-wrapper.sh
 
 EXPOSE 3000 8080
-ENTRYPOINT ["/usr/local/bin/rundler"]
-CMD ["node"]
+ENTRYPOINT ["/docker-wrapper.sh"]
