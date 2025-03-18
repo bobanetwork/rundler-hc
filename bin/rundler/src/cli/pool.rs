@@ -13,17 +13,18 @@
 
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
+use alloy_primitives::Address;
 use anyhow::Context;
 use clap::Args;
-use ethers::types::Address;
 use rundler_pool::{LocalPoolBuilder, PoolConfig, PoolTask, PoolTaskArgs};
+use rundler_provider::Providers;
 use rundler_sim::MempoolConfigs;
-use rundler_task::spawn_tasks_with_shutdown;
+use rundler_task::TaskSpawnerExt;
 use rundler_types::{chain::ChainSpec, EntryPointVersion};
 use rundler_utils::emit::{self, EVENT_CHANNEL_CAPACITY};
 use tokio::sync::broadcast;
 
-use super::CommonArgs;
+use super::{builder::EntryPointBuilderConfigs, CommonArgs};
 use crate::cli::json::get_json_config;
 
 const REQUEST_CHANNEL_CAPACITY: usize = 1024;
@@ -73,7 +74,7 @@ pub struct PoolArgs {
         env = "POOL_MIN_REPLACEMENT_FEE_INCREASE_PERCENTAGE",
         default_value = "10"
     )]
-    pub min_replacement_fee_increase_percentage: u64,
+    pub min_replacement_fee_increase_percentage: u32,
 
     #[arg(
         long = "pool.blocklist_path",
@@ -171,6 +172,29 @@ pub struct PoolArgs {
         default_value = "10"
     )]
     pub drop_min_num_blocks: u64,
+
+    #[arg(
+        long = "pool.gas_limit_efficiency_reject_threshold",
+        name = "pool.gas_limit_efficiency_reject_threshold",
+        env = "POOL_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD",
+        default_value = "0.0"
+    )]
+    pub gas_limit_efficiency_reject_threshold: f32,
+
+    #[arg(
+        long = "pool.max_time_in_pool_secs",
+        name = "pool.max_time_in_pool_secs",
+        env = "POOL_MAX_TIME_IN_POOL_SECS"
+    )]
+    pub max_time_in_pool_secs: Option<u64>,
+
+    #[arg(
+        long = "pool.support_7702",
+        name = "pool.support_7702",
+        env = "POOL_SUPPORT_7702",
+        default_value = "false"
+    )]
+    pub support_7702: bool,
 }
 
 impl PoolArgs {
@@ -181,35 +205,33 @@ impl PoolArgs {
         chain_spec: ChainSpec,
         common: &CommonArgs,
         remote_address: Option<SocketAddr>,
+        mempool_configs: Option<MempoolConfigs>,
+        builder_configs: Option<EntryPointBuilderConfigs>,
     ) -> anyhow::Result<PoolTaskArgs> {
         let blocklist = match &self.blocklist_path {
-            Some(blocklist) => Some(get_json_config(blocklist, &common.aws_region).await?),
+            Some(blocklist) => Some(get_json_config(blocklist).await?),
             None => None,
         };
         let allowlist = match &self.allowlist_path {
-            Some(allowlist) => Some(get_json_config(allowlist, &common.aws_region).await?),
+            Some(allowlist) => Some(get_json_config(allowlist).await?),
             None => None,
         };
         tracing::info!("blocklist: {:?}", blocklist);
         tracing::info!("allowlist: {:?}", allowlist);
 
-        let mempool_channel_configs = match &common.mempool_config_path {
-            Some(path) => get_json_config::<MempoolConfigs>(path, &common.aws_region)
-                .await
-                .with_context(|| format!("should load mempool configurations from {path}"))?,
-            None => MempoolConfigs::default(),
-        };
-        tracing::info!("Mempool channel configs: {:?}", mempool_channel_configs);
+        let mempool_channel_configs = mempool_configs.unwrap_or_default();
 
-        let chain_id = chain_spec.id;
+        let da_gas_tracking_enabled =
+            super::lint_da_gas_tracking(common.da_gas_tracking_enabled, &chain_spec);
+
         let pool_config_base = PoolConfig {
             // update per entry point
-            entry_point: Address::default(),
+            entry_point: Address::ZERO,
             entry_point_version: EntryPointVersion::Unspecified,
-            num_shards: 0,
+            num_shards_by_filter_id: HashMap::new(),
             mempool_channel_configs: HashMap::new(),
             // Base config
-            chain_id,
+            chain_spec: chain_spec.clone(),
             same_sender_mempool_count: self.same_sender_mempool_count,
             min_replacement_fee_increase_percentage: self.min_replacement_fee_increase_percentage,
             max_size_of_pool_bytes: self.max_size_in_bytes,
@@ -223,6 +245,11 @@ impl PoolArgs {
             paymaster_cache_length: self.paymaster_cache_length,
             reputation_tracking_enabled: self.reputation_tracking_enabled,
             drop_min_num_blocks: self.drop_min_num_blocks,
+            da_gas_tracking_enabled,
+            gas_limit_efficiency_reject_threshold: self.gas_limit_efficiency_reject_threshold,
+            max_time_in_pool: self.max_time_in_pool_secs.map(Duration::from_secs),
+            max_expected_storage_slots: common.max_expected_storage_slots.unwrap_or(usize::MAX),
+            support_7702: self.support_7702,
         };
 
         let mut pool_configs = vec![];
@@ -231,9 +258,15 @@ impl PoolArgs {
             pool_configs.push(PoolConfig {
                 entry_point: chain_spec.entry_point_address_v0_6,
                 entry_point_version: EntryPointVersion::V0_6,
-                num_shards: common.num_builders_v0_6,
+                num_shards_by_filter_id: get_num_shards_by_filter_id(
+                    chain_spec.entry_point_address_v0_6,
+                    common.num_builders_v0_6,
+                    builder_configs.as_ref(),
+                ),
                 mempool_channel_configs: mempool_channel_configs
                     .get_for_entry_point(chain_spec.entry_point_address_v0_6),
+                // always disable 7702 for EP v06.
+                support_7702: false,
                 ..pool_config_base.clone()
             });
         }
@@ -241,7 +274,11 @@ impl PoolArgs {
             pool_configs.push(PoolConfig {
                 entry_point: chain_spec.entry_point_address_v0_7,
                 entry_point_version: EntryPointVersion::V0_7,
-                num_shards: common.num_builders_v0_7,
+                num_shards_by_filter_id: get_num_shards_by_filter_id(
+                    chain_spec.entry_point_address_v0_7,
+                    common.num_builders_v0_7,
+                    builder_configs.as_ref(),
+                ),
                 mempool_channel_configs: mempool_channel_configs
                     .get_for_entry_point(chain_spec.entry_point_address_v0_7),
                 ..pool_config_base.clone()
@@ -251,10 +288,7 @@ impl PoolArgs {
         Ok(PoolTaskArgs {
             chain_spec,
             unsafe_mode: common.unsafe_mode,
-            http_url: common
-                .node_http
-                .clone()
-                .context("pool requires node_http arg")?,
+            http_url: common.node_http.clone().context("must provide node_http")?,
             chain_poll_interval: Duration::from_millis(self.chain_poll_interval_millis),
             chain_max_sync_retries: self.chain_sync_max_retries,
             pool_configs,
@@ -271,32 +305,60 @@ pub struct PoolCliArgs {
     pool: PoolArgs,
 }
 
-pub async fn run(
+pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
+    task_spawner: T,
     chain_spec: ChainSpec,
     pool_args: PoolCliArgs,
     common_args: CommonArgs,
+    providers: impl Providers + 'static,
+    mempool_configs: Option<MempoolConfigs>,
+    builder_configs: Option<EntryPointBuilderConfigs>,
 ) -> anyhow::Result<()> {
     let PoolCliArgs { pool: pool_args } = pool_args;
     let (event_sender, event_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     let task_args = pool_args
         .to_args(
-            chain_spec,
+            chain_spec.clone(),
             &common_args,
             Some(format!("{}:{}", pool_args.host, pool_args.port).parse()?),
+            mempool_configs,
+            builder_configs,
         )
         .await?;
 
-    emit::receive_and_log_events_with_filter(event_rx, |_| true);
+    task_spawner.spawn_critical(
+        "recv and log events",
+        Box::pin(emit::receive_and_log_events_with_filter(event_rx, |_| true)),
+    );
 
-    spawn_tasks_with_shutdown(
-        [PoolTask::new(
-            task_args,
-            event_sender,
-            LocalPoolBuilder::new(REQUEST_CHANNEL_CAPACITY, BLOCK_CHANNEL_CAPACITY),
-        )
-        .boxed()],
-        tokio::signal::ctrl_c(),
+    PoolTask::new(
+        task_args,
+        event_sender,
+        LocalPoolBuilder::new(REQUEST_CHANNEL_CAPACITY, BLOCK_CHANNEL_CAPACITY),
+        providers,
     )
-    .await;
+    .spawn(task_spawner)
+    .await?;
+
     Ok(())
+}
+
+fn get_num_shards_by_filter_id(
+    entry_point: Address,
+    default_num_shards: u64,
+    builder_configs: Option<&EntryPointBuilderConfigs>,
+) -> HashMap<String, u64> {
+    if let Some(builder_configs) = builder_configs {
+        if let Some(config) = builder_configs.get_for_entry_point(entry_point) {
+            config
+                .builders
+                .iter()
+                .map(|builder| (builder.filter_id.clone().unwrap_or_default(), builder.count))
+                .collect()
+        } else {
+            HashMap::from([("".to_string(), default_num_shards)])
+        }
+    } else {
+        HashMap::from([("".to_string(), default_num_shards)])
+    }
 }

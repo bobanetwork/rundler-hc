@@ -11,10 +11,14 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{fmt::Debug, marker::PhantomData, sync::Arc};
+use std::{
+    fmt::{self, Debug},
+    marker::PhantomData,
+    sync::Arc,
+};
 
-use ethers::types::{spoof, Address, H256, U256};
-use rundler_provider::{EntryPoint, SimulationProvider};
+use alloy_primitives::{aliases::U192, Address, B256, U256};
+use rundler_provider::{EntryPoint, SimulationProvider, StateOverride};
 use rundler_sim::{GasEstimationError, GasEstimator};
 use rundler_types::{
     EntryPointVersion, GasEstimate, UserOperation, UserOperationOptionalGas, UserOperationVariant,
@@ -39,7 +43,7 @@ pub(crate) struct EntryPointRouterBuilder {
 impl EntryPointRouterBuilder {
     pub(crate) fn v0_6<R>(mut self, route: R) -> Self
     where
-        R: EntryPointRoute,
+        R: EntryPointRoute + 'static,
     {
         if route.version() != EntryPointVersion::V0_6 {
             panic!(
@@ -55,7 +59,7 @@ impl EntryPointRouterBuilder {
 
     pub(crate) fn v0_7<R>(mut self, route: R) -> Self
     where
-        R: EntryPointRoute,
+        R: EntryPointRoute + 'static,
     {
         if route.version() != EntryPointVersion::V0_7 {
             panic!(
@@ -83,6 +87,14 @@ pub(crate) struct EntryPointRouter {
     entry_points: Vec<Address>,
     v0_6: Option<(Address, Arc<dyn EntryPointRoute>)>,
     v0_7: Option<(Address, Arc<dyn EntryPointRoute>)>,
+}
+
+impl fmt::Debug for EntryPointRouter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EntryPointRouter")
+            .field("entry_points", &self.entry_points)
+            .finish()
+    }
 }
 
 impl EntryPointRouter {
@@ -121,7 +133,7 @@ impl EntryPointRouter {
     pub(crate) async fn get_mined_by_hash(
         &self,
         entry_point: &Address,
-        hash: H256,
+        hash: B256,
     ) -> EthResult<Option<RpcUserOperationByHash>> {
         self.get_route(entry_point)?
             .get_mined_by_hash(hash)
@@ -132,7 +144,7 @@ impl EntryPointRouter {
     pub(crate) async fn get_receipt(
         &self,
         entry_point: &Address,
-        hash: H256,
+        hash: B256,
     ) -> EthResult<Option<RpcUserOperationReceipt>> {
         self.get_route(entry_point)?
             .get_receipt(hash)
@@ -144,8 +156,8 @@ impl EntryPointRouter {
         &self,
         entry_point: &Address,
         uo: UserOperationOptionalGas,
-        state_override: Option<spoof::State>,
-        at_price: Option<U256>,
+        state_override: Option<StateOverride>,
+        at_price: Option<u128>,
     ) -> EthResult<RpcGasEstimate> {
         match self.get_ep_version(entry_point)? {
             EntryPointVersion::V0_6 => {
@@ -192,7 +204,7 @@ impl EntryPointRouter {
         &self,
         entry_point: &Address,
         addr: Address,
-        key: U256,
+        key: U192,
     ) -> EthResult<U256> {
         self.get_route(entry_point)?
             .get_nonce(addr, key)
@@ -204,10 +216,9 @@ impl EntryPointRouter {
         &self,
         entry_point: &Address,
         uo: UserOperationVariant,
-        max_verification_gas: u64,
     ) -> EthResult<bool> {
         self.check_and_get_route(entry_point, &uo)?
-            .check_signature(uo, max_verification_gas)
+            .check_signature(uo)
             .await
             .map_err(Into::into)
     }
@@ -242,30 +253,25 @@ impl EntryPointRouter {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait EntryPointRoute: Send + Sync + 'static {
+pub(crate) trait EntryPointRoute: Send + Sync {
     fn version(&self) -> EntryPointVersion;
 
     fn address(&self) -> Address;
 
-    async fn get_mined_by_hash(&self, hash: H256)
+    async fn get_mined_by_hash(&self, hash: B256)
         -> anyhow::Result<Option<RpcUserOperationByHash>>;
 
-    async fn get_receipt(&self, hash: H256) -> anyhow::Result<Option<RpcUserOperationReceipt>>;
+    async fn get_receipt(&self, hash: B256) -> anyhow::Result<Option<RpcUserOperationReceipt>>;
 
     async fn estimate_gas(
         &self,
         uo: UserOperationOptionalGas,
-        state_override: Option<spoof::State>,
-        at_price: Option<U256>,
+        state_override: Option<StateOverride>,
+        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError>;
 
-    async fn get_nonce(&self, addr: Address, key: U256) -> anyhow::Result<U256>;
-
-    async fn check_signature(
-        &self,
-        uo: UserOperationVariant,
-        max_verification_gas: u64,
-    ) -> anyhow::Result<bool>;
+    async fn check_signature(&self, uo: UserOperationVariant) -> anyhow::Result<bool>;
+    async fn get_nonce(&self, addr: Address, key: U192) -> anyhow::Result<U256>;
 }
 
 #[derive(Debug)]
@@ -290,25 +296,25 @@ where
     }
 
     fn address(&self) -> Address {
-        self.entry_point.address()
+        *self.entry_point.address()
     }
 
     async fn get_mined_by_hash(
         &self,
-        hash: H256,
+        hash: B256,
     ) -> anyhow::Result<Option<RpcUserOperationByHash>> {
         self.event_provider.get_mined_by_hash(hash).await
     }
 
-    async fn get_receipt(&self, hash: H256) -> anyhow::Result<Option<RpcUserOperationReceipt>> {
+    async fn get_receipt(&self, hash: B256) -> anyhow::Result<Option<RpcUserOperationReceipt>> {
         self.event_provider.get_receipt(hash).await
     }
 
     async fn estimate_gas(
         &self,
         uo: UserOperationOptionalGas,
-        state_override: Option<spoof::State>,
-        at_price: Option<U256>,
+        state_override: Option<StateOverride>,
+        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
         println!(
             "HC router estimate_gas op {:?} state {:?}",
@@ -322,7 +328,7 @@ where
         ret
     }
 
-    async fn get_nonce(&self, addr: Address, key: U256) -> anyhow::Result<U256> {
+    async fn get_nonce(&self, addr: Address, key: U192) -> anyhow::Result<U256> {
         let output = self.entry_point.get_nonce(addr, key).await;
         if let Ok(nonce) = output {
             return Ok(nonce);
@@ -330,15 +336,11 @@ where
         Err(anyhow::anyhow!("get_nonce() failed"))
     }
 
-    async fn check_signature(
-        &self,
-        uo: UserOperationVariant,
-        max_verification_gas: u64,
-    ) -> anyhow::Result<bool> {
+    async fn check_signature(&self, uo: UserOperationVariant) -> anyhow::Result<bool> {
         let output = self
             .entry_point
-            .call_simulate_validation(uo.into(), max_verification_gas, None)
-            .await?;
+            .simulate_validation(uo.into(), None)
+            .await??;
 
         Ok(!output.return_info.account_sig_failed)
     }

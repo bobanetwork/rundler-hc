@@ -5,33 +5,39 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
-once_cell = "1.19.0"
-rundler-utils = { path = "../utils" }
+rundler-contracts.workspace = true
+rundler-utils.workspace = true
+
+alloy-eips.workspace = true
+alloy-primitives = { workspace = true, features = ["k256"] }
+alloy-rpc-types-eth.workspace = true
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
+alloy-sol-types.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
-chrono = "0.4.30"
-const-hex = "1.11.3"
-constcat = "0.4.1"
-ethers.workspace = true
+auto_impl.workspace = true
+chrono = "0.4.38"
+once_cell = "1.19.0"
+
 futures-util.workspace = true
-num_enum = "0.7.2"
+metrics.workspace = true
+metrics-derive.workspace = true
+num_enum = "0.7.3"
 parse-display.workspace = true
-rand.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 
 mockall = { workspace = true, optional = true }
 
-[build-dependencies]
-ethers.workspace = true
-
 [dev-dependencies]
-rundler-types = { path = ".", features = ["test-utils"] }
+alloy-primitives = { workspace = true, features = ["rand"] }
+serde_json.workspace = true
 tokio.workspace = true  # For hybrid compute testing.
 
 [features]

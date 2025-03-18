@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-#![warn(missing_docs, unreachable_pub)]
+#![warn(missing_docs, unreachable_pub, unused_crate_dependencies)]
 #![deny(unused_must_use, rust_2018_idioms)]
 #![doc(test(
     no_crate_inject,
@@ -31,7 +31,6 @@ mod eth;
 pub use eth::{EthApiClient, EthApiSettings};
 
 mod health;
-mod metrics;
 
 mod rundler;
 pub use rundler::{RundlerApiClient, Settings as RundlerApiSettings};
@@ -39,5 +38,6 @@ pub use rundler::{RundlerApiClient, Settings as RundlerApiSettings};
 mod task;
 pub use task::{Args as RpcTaskArgs, RpcTask};
 
+mod rpc_metrics;
 mod types;
 mod utils;

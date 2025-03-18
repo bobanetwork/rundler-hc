@@ -11,18 +11,19 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use ethers::types::{Address, H256, U256};
+use alloy_primitives::{Address, B256, U256};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    entity::EntityInfos, Entity, StakeInfo, UserOperation, UserOperationVariant, ValidTimeRange,
+    da::DAGasUOData, entity::EntityInfos, Entity, EntityType, StakeInfo, UserOperation,
+    UserOperationVariant, ValidTimeRange,
 };
 
 /// The new head of the chain, as viewed by the pool
 #[derive(Clone, Debug, Default)]
 pub struct NewHead {
     /// The hash of the new head
-    pub block_hash: H256,
+    pub block_hash: B256,
     /// The number of the new head
     pub block_number: u64,
 }
@@ -110,15 +111,19 @@ pub struct PoolOperation {
     /// The valid time range for this operation.
     pub valid_time_range: ValidTimeRange,
     /// The expected code hash for all contracts accessed during validation for this operation.
-    pub expected_code_hash: H256,
+    pub expected_code_hash: B256,
     /// The block hash simulation was completed at
-    pub sim_block_hash: H256,
+    pub sim_block_hash: B256,
     /// The block number simulation was completed at
     pub sim_block_number: u64,
     /// Whether the account is staked.
     pub account_is_staked: bool,
     /// Staking information about all the entities.
     pub entity_infos: EntityInfos,
+    /// The DA gas data for this operation
+    pub da_gas_data: DAGasUOData,
+    /// The matched filter ID for this operation
+    pub filter_id: Option<String>,
 }
 
 impl PoolOperation {
@@ -141,7 +146,7 @@ impl PoolOperation {
     /// Return all the unstaked entities that are used in this operation.
     pub fn unstaked_entities(&'_ self) -> impl Iterator<Item = Entity> + '_ {
         self.entity_infos.entities().filter_map(|(t, ei)| {
-            if ei.is_staked {
+            if ei.is_staked || ei.kind() == EntityType::Aggregator {
                 None
             } else {
                 Entity::new(t, ei.entity.address).into()

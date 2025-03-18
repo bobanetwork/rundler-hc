@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-#![warn(missing_docs, unreachable_pub)]
+#![warn(missing_docs, unreachable_pub, unused_crate_dependencies)]
 #![deny(unused_must_use, rust_2018_idioms)]
 #![doc(test(
     no_crate_inject,
@@ -23,5 +23,11 @@ pub mod block_watcher;
 pub mod grpc;
 pub mod server;
 
-mod task;
-pub use task::*;
+pub use reth_tasks::{
+    shutdown::GracefulShutdown, TaskSpawner, TaskSpawnerExt as RethTaskSpawnerExt,
+};
+
+/// A trait that extends Reth's `TaskSpawner` with additional methods.
+pub trait TaskSpawnerExt: TaskSpawner + RethTaskSpawnerExt + Clone + 'static {}
+
+impl<T: TaskSpawner + RethTaskSpawnerExt + Clone + 'static> TaskSpawnerExt for T {}

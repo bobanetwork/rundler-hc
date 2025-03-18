@@ -38,6 +38,8 @@ See [chain spec](./architecture/chain_spec.md) for a detailed description of cha
   - env: *MIN_STAKE_VALUE*
 - `--min_unstake_delay`: Minimum unstake delay. (default: `84600`).
   - env: *MIN_UNSTAKE_DELAY*
+- `--tracer_timeout`: The timeout used for custom javascript tracers, the string must be in a valid parseable format that can be used in the `ParseDuration` function on an ethereum node. See Docs [Here](https://pkg.go.dev/time#ParseDuration). (default: `15s`)
+  - env: *TRACER_TIMEOUT*
 - `--user_operation_event_block_distance`: Number of blocks to search when calling `eth_getUserOperationByHash`. (default: all blocks)
   - env: *USER_OPERATION_EVENT_BLOCK_DISTANCE*
 - `--max_simulate_handle_ops_gas`: Maximum gas for simulating handle operations. (default: `20000000`).
@@ -45,6 +47,8 @@ See [chain spec](./architecture/chain_spec.md) for a detailed description of cha
 - `--verification_estimation_gas_fee`: The gas fee to use during verification estimation. (default: `1000000000000` 10K gwei).
   - env: *VERIFICATION_ESTIMATION_GAS_FEE*
   - See [RPC documentation](./architecture/rpc.md#verificationGasLimit-estimation) for details.
+- `--bundle_base_fee_overhead_percent`: bundle transaction base fee overhead over network pending value. (default: `27`).
+  - env: *BUNDLE_BASE_FEE_OVERHEAD_PERCENT*
 - `--bundle_priority_fee_overhead_percent`: bundle transaction priority fee overhead over network value. (default: `0`).
   - env: *BUNDLE_PRIORITY_FEE_OVERHEAD_PERCENT*
 - `--priority_fee_mode_kind`: Priority fee mode kind. Possible values are `base_fee_percent` and `priority_fee_increase_percent`. (default: `priority_fee_increase_percent`).
@@ -59,20 +63,42 @@ See [chain spec](./architecture/chain_spec.md) for a detailed description of cha
   - (*Only required if using other AWS features*)
 - `--unsafe`: Flag for unsafe bundling mode. When set Rundler will skip checking simulation rules (and any `debug_traceCall`). (default: `false`).
   - env: *UNSAFE*
-- `--mempool_config_path`: Path to the mempool configuration file. (example: `mempool-config.json`, `s3://my-bucket/mempool-config.json`)
+- `--mempool_config_path`: Path to the mempool configuration file. (example: `mempool-config.json`, `s3://my-bucket/mempool-config.json`). (default: `None`)
   - This path can either be a local file path or an S3 url. If using an S3 url, Make sure your machine has access to this file. 
   - env: *MEMPOOL_CONFIG_PATH*
   - See [here](./architecture/pool.md#alternative-mempools-in-preview) for details.
+- `--entry_point_builders_path`: Path to the entry point builders configuration file (example: `builders.json`, `s3://my-bucket/builders.json`). (default: `None`)
+  - This path can either be a local file path or an S3 url. If using an S3 url, Make sure your machine has access to this file.
+  - env: *ENTRY_POINT_BUILDERS_PATH*
+  - NOTE: most deployments can ignore this and use the settings below.
+  - See [here](./architecture/builder.md#custom) for details.
 - `--disable_entry_point_v0_6`: Disable entry point v0.6 support. (default: `false`).
   - env: *DISABLE_ENTRY_POINT_V0_6*
 - `--num_builders_v0_6`: The number of bundle builders to run on entry point v0.6 (default: `1`)
   - env: *NUM_BUILDERS_V0_6*
+  - NOTE: ignored if `entry_point_builders_path` is set
+- `--builder_index_offset_v0_6`: If running multiple builder processes, this is the index offset to assign unique indexes to each bundle sender. (default: 0)
+  - env: *BUILDER_INDEX_OFFSET_V0_6*
+  - NOTE: ignored if `entry_point_builders_path` is set
 - `--disable_entry_point_v0_7`: Disable entry point v0.7 support. (default: `false`).
   - env: *DISABLE_ENTRY_POINT_V0_7*
 - `--num_builders_v0_7`: The number of bundle builders to run on entry point v0.7 (default: `1`)
   - env: *NUM_BUILDERS_V0_7*
-- `--tracer_timeout`: The timeout used for custom javascript tracers, the string must be in a valid parseable format that can be used in the `ParseDuration` function on an ethereum node. See Docs [Here](https://pkg.go.dev/time#ParseDuration). (default: `15s`)
-  - env: *TRACER_TIMEOUT*
+  - NOTE: ignored if `entry_point_builders_path` is set
+- `--builder_index_offset_v0_7`: If running multiple builder processes, this is the index offset to assign unique indexes to each bundle sender. (default: 0)
+  - env: *BUILDER_INDEX_OFFSET_V0_7*
+  - NOTE: ignored if `entry_point_builders_path` is set
+- `--da_gas_tracking_enabled`: Enable the DA gas tracking feature of the mempool (default: `false`)
+  - env: *DA_GAS_TRACKING_ENABLED*
+- `--max_expected_storage_slots`: Optionally set the maximum number of expected storage slots to submit with a conditional transaction. (default: `None`)
+  - env: *MAX_EXPECTED_STORAGE_SLOTS*
+- `--enabled_aggregators`: List of enabled aggregators.
+  - env: *ENABLED_AGGREGATORS*
+  - Types: see [aggregator.rs](../bin/rundler/src/cli/aggregator.rs)
+- `--aggregator_options`: List of aggregator specific options
+  - env: *ENABLED_AGGREGATORS*
+  - List of KEY=VALUE delimited by ',': i.e. `ENABLED_AGGREGATORS="KEY1=VALUE1,KEY2=VALUE2"`
+  - Options: see [aggregator.rs](../bin/rundler/src/cli/aggregator.rs)
 
 ## Metrics Options
 
@@ -97,6 +123,8 @@ Only `level` is supported.
   - env: *LOG_FILE*
 - `--log.json`: If set, logs will be written in JSON format.
   - env: *LOG_JSON*
+ - `--log.otlp_grpc_endpoint`: If set, tracing spans will be forwarded to the provided gRPC OTLP endpoint.
+  - env: *LOG_OTLP_GRPC_ENDPOINT*
 
 ## RPC Options
 
@@ -112,6 +140,8 @@ List of command line options for configuring the RPC API.
   - env: *RPC_TIMEOUT_SECONDS*
 - `--rpc.max_connections`:	Maximum number of concurrent connections (default: `100`)
   - env: *RPC_MAX_CONNECTIONS*
+- `--rpc.corsdomain`: Enable the cors functionality on the server (default: None and therefore corsdomain is disabled).
+  - env: *RPC_CORSDOMAIN*
 - `--rpc.pool_url`:	Pool URL for RPC (default: `http://localhost:50051`)
   - env: *RPC_POOL_URL*
   - *Only required when running in distributed mode* 
@@ -157,6 +187,10 @@ List of command line options for configuring the Pool.
   - env: *POOL_REPUTATION_TRACKING_ENABLED*
 - `--pool.drop_min_num_blocks`: The minimum number of blocks that a UO must stay in the mempool before it can be requested to be dropped by the user (default: `10`)
   - env: *POOL_DROP_MIN_NUM_BLOCKS*
+- `--pool.gas_limit_efficiency_reject_threshold`: The ratio of gas used to gas limit under which to reject UOs upon entry to the mempool (default: `0.0` disabled)
+  - env: *POOL_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD*
+- `--pool.max_time_in_pool_secs`: The maximum amount of time a UO is allowed to be in the mempool, in seconds. (default: `None`)
+  - env: *POOL_MAX_TIME_IN_POOL_SECS*
 
 ## Builder Options
 
@@ -208,11 +242,9 @@ List of command line options for configuring the Builder.
 - `--builder.flashbots_relay_auth_key`: Only used/required if builder.sender == "flashbots." Authorization key to use with the flashbots relay. See [here](https://docs.flashbots.net/flashbots-auction/advanced/rpc-endpoint#authentication) for more info. (default: None)
   - env: *BUILDER_FLASHBOTS_RELAY_AUTH_KEY*
 - `--builder.bloxroute_auth_header`: Only used/required if builder.sender == "polygon_bloxroute." If using the bloxroute transaction sender on Polygon, this is the auth header to supply with the requests. (default: None)
-  - env: `BUILDER_BLOXROUTE_AUTH_HEADER`
-- `--builder.index_offset`: If running multiple builder processes, this is the index offset to assign unique indexes to each bundle sender. (default: 0)
-  - env: `BUILDER_INDEX_OFFSET`
+  - env: *BUILDER_BLOXROUTE_AUTH_HEADER*
 - `--builder.pool_url`: If running in distributed mode, the URL of the pool server to use.
-  - env: `BUILDER_POOL_URL`
+  - env: *BUILDER_POOL_URL*
   - *Only required when running in distributed mode*
 
 ### Key management

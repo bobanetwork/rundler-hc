@@ -13,7 +13,8 @@
 
 use std::fmt::Display;
 
-use ethers::types::{Address, Bytes, U256};
+use alloy_json_rpc::RpcError;
+use alloy_primitives::{Address, Bytes, U128, U256, U32};
 use jsonrpsee::types::{
     error::{CALL_EXECUTION_FAILED_CODE, INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
     ErrorObjectOwned,
@@ -104,12 +105,15 @@ pub enum EthRpcError {
     /// The user operation uses a paymaster that returns a context while being unstaked
     #[error("Unstaked paymaster must not return context")]
     UnstakedPaymasterContext,
-    /// The user operation uses an aggregator entity and it is not staked
-    #[error("An aggregator must be staked, regardless of storager usage")]
-    UnstakedAggregator,
     /// Unsupported aggregator
     #[error("unsupported aggregator")]
     UnsupportedAggregator(UnsupportedAggregatorData),
+    /// Aggregator error
+    #[error("signature aggregator error: {0}")]
+    AggregatorError(String),
+    /// Aggregator mismatch
+    #[error("signature aggregator mismatch. RPC: {0:?}, Simulated: {1:?}")]
+    AggregatorMismatch(Address, Address),
     /// Replacement underpriced
     #[error("replacement underpriced")]
     ReplacementUnderpriced(ReplacementUnderpricedData),
@@ -161,7 +165,7 @@ pub struct StakeTooLowData {
     accessed_entity: Option<EntityType>,
     slot: U256,
     minimum_stake: U256,
-    minimum_unstake_delay: U256,
+    minimum_unstake_delay: U32,
 }
 
 impl StakeTooLowData {
@@ -172,7 +176,7 @@ impl StakeTooLowData {
         accessed_entity: Option<EntityType>,
         slot: U256,
         minimum_stake: U256,
-        minimum_unstake_delay: U256,
+        minimum_unstake_delay: U32,
     ) -> Self {
         Self {
             needs_stake,
@@ -228,6 +232,11 @@ impl From<ValidationRevert> for ValidationRevertData {
                 inner_reason: None,
                 revert_data: Some(data),
             },
+            ValidationRevert::Panic(data) => Self {
+                reason: Some(format!("evm panicked: {}", data.code)),
+                inner_reason: None,
+                revert_data: None,
+            },
         }
     }
 }
@@ -235,15 +244,15 @@ impl From<ValidationRevert> for ValidationRevertData {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplacementUnderpricedData {
-    pub current_max_priority_fee: U256,
-    pub current_max_fee: U256,
+    pub current_max_priority_fee: U128,
+    pub current_max_fee: U128,
 }
 
 impl ReplacementUnderpricedData {
-    pub fn new(current_max_priority_fee: U256, current_max_fee: U256) -> Self {
+    pub fn new(current_max_priority_fee: u128, current_max_fee: u128) -> Self {
         Self {
-            current_max_priority_fee,
-            current_max_fee,
+            current_max_priority_fee: U128::from(current_max_priority_fee),
+            current_max_fee: U128::from(current_max_fee),
         }
     }
 }
@@ -277,10 +286,7 @@ impl From<MempoolError> for EthRpcError {
             MempoolError::Other(e) => Self::Internal(e),
             MempoolError::OperationAlreadyKnown => Self::OperationAlreadyKnown,
             MempoolError::ReplacementUnderpriced(priority_fee, fee) => {
-                Self::ReplacementUnderpriced(ReplacementUnderpricedData {
-                    current_max_priority_fee: priority_fee,
-                    current_max_fee: fee,
-                })
+                Self::ReplacementUnderpriced(ReplacementUnderpricedData::new(priority_fee, fee))
             }
             MempoolError::MaxOperationsReached(count, address) => {
                 Self::MaxOperationsReached(count, address)
@@ -301,13 +307,21 @@ impl From<MempoolError> for EthRpcError {
             }
             MempoolError::PrecheckViolation(violation) => violation.into(),
             MempoolError::SimulationViolation(violation) => violation.into(),
-            MempoolError::UnsupportedAggregator(a) => {
-                Self::UnsupportedAggregator(UnsupportedAggregatorData { aggregator: a })
-            }
+            MempoolError::AggregatorError(a) => Self::AggregatorError(a),
             MempoolError::UnknownEntryPoint(a) => {
                 Self::EntryPointValidationRejected(format!("unknown entry point: {}", a))
             }
             MempoolError::OperationDropTooSoon(_, _, _) => Self::InvalidParams(value.to_string()),
+            MempoolError::PreOpGasLimitEfficiencyTooLow(_, _) => {
+                Self::InvalidParams(value.to_string())
+            }
+            MempoolError::ExecutionGasLimitEfficiencyTooLow(_, _) => {
+                Self::InvalidParams(value.to_string())
+            }
+            MempoolError::TooManyExpectedStorageSlots(_, _) => {
+                Self::InvalidParams(value.to_string())
+            }
+            MempoolError::EIPNotSupported(_) => Self::InvalidParams(value.to_string()),
         }
     }
 }
@@ -361,10 +375,10 @@ impl From<SimulationViolation> for EthRpcError {
                     stake_data.accessed_entity,
                     stake_data.slot,
                     stake_data.min_stake,
-                    stake_data.min_unstake_delay,
+                    U32::from(stake_data.min_unstake_delay),
                 )))
             }
-            SimulationViolation::AggregatorValidationFailed => Self::SignatureCheckFailed,
+            SimulationViolation::AggregatorMismatch(e, a) => Self::AggregatorMismatch(e, a),
             SimulationViolation::OutOfGas(entity) => Self::OutOfGas(entity),
             SimulationViolation::ValidationRevert(revert) => Self::ValidationRevert(revert.into()),
             _ => Self::SimulationFailed(value),
@@ -374,7 +388,7 @@ impl From<SimulationViolation> for EthRpcError {
 
 impl From<EthRpcError> for ErrorObjectOwned {
     fn from(error: EthRpcError) -> Self {
-        let msg = error.to_string();
+        let msg = format!("{}", error);
 
         match error {
             EthRpcError::Internal(_) => rpc_err(INTERNAL_ERROR_CODE, msg),
@@ -389,7 +403,6 @@ impl From<EthRpcError> for ErrorObjectOwned {
             EthRpcError::OpcodeViolation(_, _)
             | EthRpcError::OpcodeViolationMap(_)
             | EthRpcError::OutOfGas(_)
-            | EthRpcError::UnstakedAggregator
             | EthRpcError::MultipleRolesViolation(_)
             | EthRpcError::UnstakedPaymasterContext
             | EthRpcError::SenderAddressUsedAsAlternateEntity(_)
@@ -413,9 +426,9 @@ impl From<EthRpcError> for ErrorObjectOwned {
             EthRpcError::MaxOperationsReached(_, _) => rpc_err(STAKE_TOO_LOW_CODE, msg),
             EthRpcError::SignatureCheckFailed
             | EthRpcError::AccountSignatureCheckFailed
-            | EthRpcError::PaymasterSignatureCheckFailed => {
-                rpc_err(SIGNATURE_CHECK_FAILED_CODE, msg)
-            }
+            | EthRpcError::PaymasterSignatureCheckFailed
+            | EthRpcError::AggregatorError(_)
+            | EthRpcError::AggregatorMismatch(_, _) => rpc_err(SIGNATURE_CHECK_FAILED_CODE, msg),
             EthRpcError::PrecheckFailed(_) => rpc_err(CALL_EXECUTION_FAILED_CODE, msg),
             EthRpcError::ExecutionReverted(_) => rpc_err(EXECUTION_REVERTED, msg),
             EthRpcError::ExecutionRevertedWithBytes(data) => {
@@ -439,12 +452,59 @@ impl From<tonic::Status> for EthRpcError {
     }
 }
 
-impl From<ProviderError> for EthRpcError {
-    fn from(e: ProviderError) -> Self {
-        Self::Internal(anyhow::anyhow!("provider error: {e:?}"))
+struct ProviderErrorWithContext {
+    error: ProviderError,
+    context: Option<String>,
+}
+
+impl From<ProviderErrorWithContext> for EthRpcError {
+    fn from(e: ProviderErrorWithContext) -> Self {
+        let inner_msg = match &e.error {
+            ProviderError::RPC(rpc_error) => match rpc_error {
+                RpcError::ErrorResp(error_payload) => {
+                    format!("rpc error with code: {} ", error_payload.code)
+                }
+                RpcError::Transport(e) => {
+                    format!("transport error: {}", e)
+                }
+                _ => e.error.to_string(),
+            },
+            ProviderError::ContractError(error) => match &error {
+                alloy_contract::Error::TransportError(rpc_error) => match rpc_error {
+                    RpcError::ErrorResp(error_payload) => {
+                        format!("rpc error with code: {} ", error_payload.code)
+                    }
+                    RpcError::Transport(err) => {
+                        format!("transport error: {}", err)
+                    }
+                    _ => error.to_string(),
+                },
+                _ => error.to_string(),
+            },
+            ProviderError::Other(error) => {
+                format!("other error: {}", error)
+            }
+        };
+        if let Some(context_msg) = e.context {
+            Self::Internal(anyhow::anyhow!(
+                "{}: provider error: {}",
+                context_msg,
+                inner_msg
+            ))
+        } else {
+            Self::Internal(anyhow::anyhow!("provider error: {}", inner_msg))
+        }
     }
 }
 
+impl From<ProviderError> for ProviderErrorWithContext {
+    fn from(value: ProviderError) -> Self {
+        Self {
+            error: value,
+            context: None,
+        }
+    }
+}
 impl From<GasEstimationError> for EthRpcError {
     fn from(e: GasEstimationError) -> Self {
         match e {
@@ -464,7 +524,22 @@ impl From<GasEstimationError> for EthRpcError {
             error @ GasEstimationError::GasFieldTooLarge(_, _) => {
                 Self::InvalidParams(error.to_string())
             }
-            GasEstimationError::Other(error) => Self::Internal(error),
+            GasEstimationError::ProviderError(provider_error) => {
+                EthRpcError::from(ProviderErrorWithContext::from(provider_error))
+            }
+            GasEstimationError::UnsupportedAggregator(aggregator) => {
+                Self::UnsupportedAggregator(UnsupportedAggregatorData { aggregator })
+            }
+            GasEstimationError::Other(error) => {
+                let context = error.to_string();
+                match error.downcast::<ProviderError>() {
+                    Ok(provider_error) => EthRpcError::from(ProviderErrorWithContext {
+                        error: provider_error,
+                        context: Some(context),
+                    }),
+                    Err(error) => Self::Internal(error),
+                }
+            }
         }
     }
 }

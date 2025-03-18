@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use ethers::types::{Address, U256};
+use alloy_primitives::{Address, U256};
 
 use crate::{
     validation_results::ValidationRevert, Entity, EntityType, StorageSlot, Timestamp,
@@ -53,7 +53,7 @@ pub enum MempoolError {
     /// Operation with same sender/nonce already in pool
     /// and the replacement operation has lower gas price.
     #[error("Replacement operation underpriced. Existing priority fee: {0}. Existing fee: {1}")]
-    ReplacementUnderpriced(U256, U256),
+    ReplacementUnderpriced(u128, u128),
     /// Max operations reached for unstaked sender [UREP-010] or unstaked non-sender entity [UREP-020]
     #[error("Max operations ({0}) reached for entity {1}")]
     MaxOperationsReached(usize, Entity),
@@ -85,15 +85,27 @@ pub enum MempoolError {
     /// Operation was rejected due to a simulation violation
     #[error("Operation violation during simulation {0}")]
     SimulationViolation(SimulationViolation),
-    /// Operation was rejected because it used an unsupported aggregator
-    #[error("Unsupported aggregator {0}")]
-    UnsupportedAggregator(Address),
+    /// Operation was rejected because of an aggregator error
+    #[error("Aggregator error {0}")]
+    AggregatorError(String),
     /// An unknown entry point was specified
     #[error("Unknown entry point {0}")]
     UnknownEntryPoint(Address),
     /// The operation drop attempt too soon after being added to the pool
     #[error("Operation drop attempt too soon after being added to the pool. Added at {0}, attempted to drop at {1}, must wait {2} blocks.")]
     OperationDropTooSoon(u64, u64, u64),
+    /// Pre-op gas limit efficiency too low
+    #[error("Pre-op gas limit efficiency too low. Required: {0}, Actual: {1}")]
+    PreOpGasLimitEfficiencyTooLow(f32, f32),
+    /// Execution gas limit efficiency too low
+    #[error("Execution gas limit efficiency too low. Required: {0}, Actual: {1}")]
+    ExecutionGasLimitEfficiencyTooLow(f32, f32),
+    /// Too many expected storage slots
+    #[error("Too many expected storage slots. Maximum: {0}, Actual: {1}")]
+    TooManyExpectedStorageSlots(usize, usize),
+    /// Use unsupported EIP
+    #[error("{0} is not supported")]
+    EIPNotSupported(String),
 }
 
 /// Precheck violation enumeration
@@ -113,13 +125,13 @@ pub enum PrecheckViolation {
     /// The total gas limit of the user operation is too high.
     /// See `gas::user_operation_execution_gas_limit` for calculation.
     #[display("total gas limit is {0} but must be at most {1}")]
-    TotalGasLimitTooHigh(U256, U256),
+    TotalGasLimitTooHigh(u128, u128),
     /// The verification gas limit of the user operation is too high.
     #[display("verificationGasLimit is {0} but must be at most {1}")]
-    VerificationGasLimitTooHigh(U256, U256),
+    VerificationGasLimitTooHigh(u128, u128),
     /// The pre-verification gas of the user operation is too low.
     #[display("preVerificationGas is {0} but must be at least {1}")]
-    PreVerificationGasTooLow(U256, U256),
+    PreVerificationGasTooLow(u128, u128),
     /// A paymaster is provided, but the address is not deployed.
     #[display("paymasterAndData indicates paymaster with no code: {0:?}")]
     PaymasterIsNotContract(Address),
@@ -132,13 +144,16 @@ pub enum PrecheckViolation {
     SenderFundsTooLow(U256, U256),
     /// The provided max priority fee per gas is too low based on the current network rate.
     #[display("maxPriorityFeePerGas is {0} but must be at least {1}")]
-    MaxPriorityFeePerGasTooLow(U256, U256),
+    MaxPriorityFeePerGasTooLow(u128, u128),
     /// The provided max fee per gas is too low based on the current network rate.
     #[display("maxFeePerGas is {0} but must be at least {1}")]
-    MaxFeePerGasTooLow(U256, U256),
+    MaxFeePerGasTooLow(u128, u128),
     /// The call gas limit is too low to account for any possible call.
     #[display("callGasLimit is {0} but must be at least {1}")]
-    CallGasLimitTooLow(U256, U256),
+    CallGasLimitTooLow(u128, u128),
+    /// The Uo contains both factory and authorization tuple.
+    #[display("Factory must be empty when authorization contract is set")]
+    FactoryMustBeEmpty(Address),
 }
 
 /// All possible simulation violations
@@ -198,16 +213,13 @@ pub enum SimulationViolation {
     /// The user operation uses a paymaster that returns a context while being unstaked
     #[display("Unstaked paymaster must not return context")]
     UnstakedPaymasterContext,
-    /// The user operation uses an aggregator entity and it is not staked
-    #[display("An aggregator must be staked, regardless of storager usage")]
-    UnstakedAggregator,
     /// Simulation reverted with an unintended reason, containing a message
     #[display("reverted while simulating {0} validation: {1}")]
     UnintendedRevertWithMessage(EntityType, String, Option<Address>),
     /// Simulation reverted with an unintended reason
     #[display("reverted while simulating {0} validation")]
     UnintendedRevert(EntityType, Option<Address>),
-    /// Validation revert (only used for unsafe sim)
+    /// Validation revert (used for v0_7 sim and unsafe sim)
     #[display("validation revert: {0}")]
     ValidationRevert(ValidationRevert),
     /// Simulation did not revert, a revert is always expected
@@ -219,12 +231,12 @@ pub enum SimulationViolation {
     /// The user operation ran out of gas during validation
     #[display("ran out of gas during {0.kind} validation")]
     OutOfGas(Entity),
-    /// The user operation aggregator signature validation failed
-    #[display("aggregator signature validation failed")]
-    AggregatorValidationFailed,
+    /// The returned signature aggregator did not match the expected one
+    #[display("signature aggregator mismatch. RPC: {0:?}, Simulated: {1:?}")]
+    AggregatorMismatch(Address, Address),
     /// Verification gas limit doesn't have the required buffer on the measured gas
     #[display("verification gas limit doesn't have the required buffer on the measured gas, limit: {0}, needed: {1}")]
-    VerificationGasLimitBufferTooLow(U256, U256),
+    VerificationGasLimitBufferTooLow(u128, u128),
     /// Unsupported contract type
     #[display("accessed unsupported contract type: {0:?} at {1:?}. Address must be whitelisted")]
     AccessedUnsupportedContractType(String, Address),
@@ -246,5 +258,5 @@ pub struct NeedsStakeInformation {
     /// Minumum stake
     pub min_stake: U256,
     /// Minumum delay after an unstake event
-    pub min_unstake_delay: U256,
+    pub min_unstake_delay: u32,
 }

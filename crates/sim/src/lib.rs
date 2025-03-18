@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-#![warn(missing_docs, unreachable_pub)]
+#![warn(missing_docs, unreachable_pub, unused_crate_dependencies)]
 #![deny(unused_must_use, rust_2018_idioms)]
 #![doc(test(
     no_crate_inject,
@@ -41,13 +41,16 @@ pub use estimation::{
 };
 
 pub mod gas;
+#[cfg(feature = "test-utils")]
+pub use gas::MockFeeEstimator;
 pub use gas::{FeeEstimator, PriorityFeeMode};
 
 mod precheck;
 #[cfg(feature = "test-utils")]
 pub use precheck::MockPrechecker;
 pub use precheck::{
-    PrecheckError, Prechecker, PrecheckerImpl, Settings as PrecheckSettings, MIN_CALL_GAS_LIMIT,
+    FeeUpdate, PrecheckError, PrecheckReturn, Prechecker, PrecheckerImpl,
+    Settings as PrecheckSettings, MIN_CALL_GAS_LIMIT,
 };
 
 /// Simulation and violation checking
@@ -60,6 +63,4 @@ pub use simulation::{
 };
 
 mod types;
-pub use types::{ExpectedStorage, ViolationError};
-
-mod utils;
+pub use types::{BundleExpectedStorage, ExpectedStorage, ViolationError};

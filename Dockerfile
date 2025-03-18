@@ -1,7 +1,7 @@
 # Adapted from https://github.com/paradigmxyz/reth/blob/main/Dockerfile
 # syntax=docker/dockerfile:1.4
 
-FROM --platform=$TARGETPLATFORM rust:1.82.0 AS chef-builder
+FROM rust:1.85.0 AS chef-builder
 
 # Install system dependencies
 RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - && echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-
 SHELL ["/bin/bash", "-c"]
 RUN curl -L https://foundry.paradigm.xyz | bash
 ENV PATH="/root/.foundry/bin:${PATH}"
-RUN foundryup -C 2044faec # Pin to a seemingly good version
+RUN foundryup -i v0.3.0  # Formerly pinned to -C 2044faec
 
 RUN cargo install cargo-chef --locked
 
@@ -48,7 +48,8 @@ FROM ubuntu AS runtime
 WORKDIR /app
 # Install system dependencies for the runtime
 # install curl for healthcheck
-RUN apt-get -y update; apt-get -y install curl
+RUN apt-get -y update; apt-get -y install curl ca-certificates
+RUN update-ca-certificates
 
 # Copy rundler over from the build stage
 COPY --from=builder /app/target/release/rundler /usr/local/bin

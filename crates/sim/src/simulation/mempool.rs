@@ -13,8 +13,8 @@
 
 use std::{collections::HashMap, str::FromStr};
 
-use ethers::types::{Address, H256, U256};
-use rundler_types::{Entity, EntityType, Opcode};
+use alloy_primitives::{Address, B256, U256};
+use rundler_types::{Entity, EntityType, Opcode, UserOperation, UserOperationVariant};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 
@@ -29,7 +29,11 @@ pub struct MempoolConfig {
     /// Entry point address this mempool is associated with.
     pub(crate) entry_point: Address,
     /// Allowlist to match violations against.
+    #[serde(default)]
     pub(crate) allowlist: Vec<AllowlistEntry>,
+    /// Mempool filters to tag operations
+    #[serde(default)]
+    filters: Vec<MempoolFilter>,
 }
 
 impl MempoolConfig {
@@ -37,15 +41,23 @@ impl MempoolConfig {
     pub fn entry_point(&self) -> Address {
         self.entry_point
     }
+
+    /// Match an operation against the mempool filters, returning the first ID that matches, or None
+    pub fn match_filter(&self, operation: &UserOperationVariant) -> Option<String> {
+        self.filters
+            .iter()
+            .find(|f| f.apply(operation))
+            .map(|f| f.id.clone())
+    }
 }
 
 /// A collection of mempool configurations keyed by their ID.
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct MempoolConfigs(HashMap<H256, MempoolConfig>);
+pub struct MempoolConfigs(pub HashMap<B256, MempoolConfig>);
 
 impl MempoolConfigs {
     /// Get the mempool configs for a specific entry point address
-    pub fn get_for_entry_point(&self, entry_point: Address) -> HashMap<H256, MempoolConfig> {
+    pub fn get_for_entry_point(&self, entry_point: Address) -> HashMap<B256, MempoolConfig> {
         self.0
             .iter()
             .filter(|(_, config)| config.entry_point == entry_point)
@@ -89,6 +101,33 @@ impl AllowEntity {
             AllowEntity::Address(address) => entity.address == *address,
         }
     }
+}
+
+/// A mempool filter
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MempoolFilter {
+    /// The filter ID
+    id: String,
+    /// The filter to apply
+    filter: Filter,
+}
+
+impl MempoolFilter {
+    /// Apply the filter to an operation
+    fn apply(&self, operation: &UserOperationVariant) -> bool {
+        match &self.filter {
+            Filter::Aggregator(address) => operation.aggregator().is_some_and(|a| a == *address),
+        }
+    }
+}
+
+/// A filter kind
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum Filter {
+    /// Filter operations by aggregator address
+    Aggregator(Address),
 }
 
 /// An allowlist rule.
@@ -196,7 +235,7 @@ impl AllowlistEntry {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MempoolMatchResult {
     /// One or more matched mempools by ID
-    Matches(Vec<H256>),
+    Matches(Vec<B256>),
     /// No mempools matched, with the index of the first violation that didn't match
     NoMatch(usize),
 }
@@ -205,10 +244,10 @@ pub(crate) enum MempoolMatchResult {
 /// mempools in which all of their violations are allowlisted. If zero violations,
 /// an operation will match all mempools.
 pub(crate) fn match_mempools(
-    mempools: &HashMap<H256, MempoolConfig>,
+    mempools: &HashMap<B256, MempoolConfig>,
     violations: &[SimulationViolation],
 ) -> MempoolMatchResult {
-    let mut candidate_pools: Vec<H256> = mempools.keys().cloned().collect();
+    let mut candidate_pools: Vec<B256> = mempools.keys().cloned().collect();
     for (i, violation) in violations.iter().enumerate() {
         candidate_pools.retain(|p| {
             mempools[p]
@@ -225,7 +264,7 @@ pub(crate) fn match_mempools(
 
 #[cfg(test)]
 mod tests {
-    use ethers::types::U256;
+    use alloy_primitives::U256;
     use rundler_types::{pool::NeedsStakeInformation, StorageSlot, ViolationOpCode};
 
     use super::*;
@@ -236,7 +275,7 @@ mod tests {
 
         let account_entity = Entity {
             kind: EntityType::Account,
-            address: Address::zero(),
+            address: Address::ZERO,
         };
         assert!(allow.is_allowed(&account_entity));
 
@@ -259,7 +298,7 @@ mod tests {
 
         let account_entity = Entity {
             kind: EntityType::Account,
-            address: Address::zero(),
+            address: Address::ZERO,
         };
         assert!(!allow.is_allowed(&account_entity));
 
@@ -314,7 +353,7 @@ mod tests {
         let violation = SimulationViolation::UsedForbiddenOpcode(
             Entity {
                 kind: EntityType::Account,
-                address: Address::zero(),
+                address: Address::ZERO,
             },
             contract,
             ViolationOpCode(Opcode::GAS),
@@ -324,7 +363,7 @@ mod tests {
         let violation = SimulationViolation::UsedForbiddenOpcode(
             Entity {
                 kind: EntityType::Account,
-                address: Address::zero(),
+                address: Address::ZERO,
             },
             contract,
             ViolationOpCode(Opcode::BLOCKHASH),
@@ -418,7 +457,7 @@ mod tests {
             },
             StorageSlot {
                 address: slot_addr,
-                slot: U256::from(0),
+                slot: U256::ZERO,
             },
         );
         assert!(!entry.is_allowed(&violation));
@@ -465,9 +504,9 @@ mod tests {
             accessing_entity: EntityType::Paymaster,
             accessed_entity: Some(EntityType::Paymaster),
             accessed_address: entity_addr,
-            slot: U256::zero(),
-            min_stake: U256::zero(),
-            min_unstake_delay: U256::zero(),
+            slot: U256::ZERO,
+            min_stake: U256::ZERO,
+            min_unstake_delay: 0,
         }));
 
         assert!(entry.is_allowed(&violation));
@@ -477,9 +516,9 @@ mod tests {
             accessing_entity: EntityType::Paymaster,
             accessed_entity: Some(EntityType::Paymaster),
             accessed_address: entity_addr,
-            slot: U256::zero(),
-            min_stake: U256::zero(),
-            min_unstake_delay: U256::zero(),
+            slot: U256::ZERO,
+            min_stake: U256::ZERO,
+            min_unstake_delay: 0,
         }));
 
         assert!(!entry.is_allowed(&violation));
@@ -489,9 +528,9 @@ mod tests {
     fn test_match_none() {
         let contract = Address::random();
         let mempools = HashMap::from([
-            (H256::random(), MempoolConfig::default()),
+            (B256::random(), MempoolConfig::default()),
             (
-                H256::random(),
+                B256::random(),
                 MempoolConfig {
                     entry_point: Address::random(),
                     allowlist: vec![AllowlistEntry::new(
@@ -501,6 +540,7 @@ mod tests {
                             opcode: Opcode::GAS,
                         },
                     )],
+                    filters: vec![],
                 },
             ),
         ]);
@@ -522,9 +562,9 @@ mod tests {
     fn test_match_none_second() {
         let contract = Address::random();
         let mempools = HashMap::from([
-            (H256::random(), MempoolConfig::default()),
+            (B256::random(), MempoolConfig::default()),
             (
-                H256::random(),
+                B256::random(),
                 MempoolConfig {
                     entry_point: Address::random(),
                     allowlist: vec![AllowlistEntry::new(
@@ -534,6 +574,7 @@ mod tests {
                             opcode: Opcode::GAS,
                         },
                     )],
+                    filters: vec![],
                 },
             ),
         ]);
@@ -563,8 +604,8 @@ mod tests {
 
     #[test]
     fn test_match_one() {
-        let mempool0 = H256::random();
-        let mempool1 = H256::random();
+        let mempool0 = B256::random();
+        let mempool1 = B256::random();
         let contract = Address::random();
         let mempools = HashMap::from([
             (mempool0, MempoolConfig::default()),
@@ -579,6 +620,7 @@ mod tests {
                             opcode: Opcode::GAS,
                         },
                     )],
+                    filters: vec![],
                 },
             ),
         ]);
@@ -598,9 +640,9 @@ mod tests {
 
     #[test]
     fn test_match_multiple() {
-        let mempool0 = H256::random();
-        let mempool1 = H256::random();
-        let mempool2 = H256::random();
+        let mempool0 = B256::random();
+        let mempool1 = B256::random();
+        let mempool2 = B256::random();
         let contract = Address::random();
         let mempools = HashMap::from([
             (mempool0, MempoolConfig::default()),
@@ -624,6 +666,7 @@ mod tests {
                             },
                         ),
                     ],
+                    filters: vec![],
                 },
             ),
             (
@@ -653,6 +696,7 @@ mod tests {
                             },
                         ),
                     ],
+                    filters: vec![],
                 },
             ),
         ]);

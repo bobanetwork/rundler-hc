@@ -12,13 +12,13 @@ git submodule update --init --recursive
 
 2. Install prerequisites
 
-* [Rust/Cargo](https://www.rust-lang.org/tools/install): 1.72 or higher with nightly 
+* [Rust/Cargo](https://www.rust-lang.org/tools/install): 1.85 or higher with nightly 
 * [Cocogitto](https://github.com/cocogitto/cocogitto): Commit linting
 * [Docker](https://docs.docker.com/engine/install/): Run spec tests
 * [PDM](https://pdm.fming.dev/latest/#installation): Run spec tests
 * [Protoc](https://grpc.io/docs/protoc-installation/): Compile protobuf
 * [Buf](https://buf.build/docs/installation): Protobuf linting
-* [Foundry](https://book.getfoundry.sh/getting-started/installation): Compile contracts
+* [Foundry ^0.3.0](https://book.getfoundry.sh/getting-started/installation): Compile contracts
 
 ## Build & Test
 
@@ -80,21 +80,3 @@ cargo run node
 ```
 
 will run a full Rundler node locally.
-
-## Dev Tools
-
-Development tools can be found in [`bin/tools`](../bin/tools/). These tools are meant to help get Rundler running locally against a development network.
-
-### Deploy Dev Contracts
-
-Fund and deploy contracts. Contracts are deployed from the [account-abstraction](https://github.com/eth-infinitism/account-abstraction) repo. This does the following: 
-    * Creates an account for the bundler to use.
-    * Deploys the `EntryPoint`.
-    * Deploys a `SimpleAccountFactory`.
-    * Deploys a `VerifyingPaymaster`.
-    * Deploys a `SimpleAccount`.
-    * Funds each of the accounts.
-```
-cd bin/tools
-cargo run --bin deploy_dev_contracts
-```

@@ -75,9 +75,9 @@ l2_util = eth_utils(w3)
 
 contract_info = {}
 if ep7:
-    OUT_PREFIX = "../crates/types/contracts/out/hc0_7/"
+    OUT_PREFIX = "../crates/contracts/contracts/out/hc0_7/"
 else:
-    OUT_PREFIX = "../crates/types/contracts/out/hc0_6/"
+    OUT_PREFIX = "../crates/contracts/contracts/out/hc0_6/"
 
 def load_contract(w, name, path, address):
     """Loads a contract's JSON ABI"""
@@ -275,7 +275,7 @@ def deploy_forge(script, cmd_env):
         cmd_env['ENTRY_POINTS'] = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
     print("Using EntryPoint address:", cmd_env['ENTRY_POINTS'])
 
-    out = subprocess.run(args, cwd="../crates/types/contracts", env=cmd_env,
+    out = subprocess.run(args, cwd="../crates/contracts/contracts", env=cmd_env,
         capture_output=True, check=True)
 
     # Subprocess will fail if contracts were previously deployed but those addresses were
@@ -338,9 +338,9 @@ def boba_balance(addr):
     return Web3.to_int(bal)
 
 if ep7:
-    EP = load_contract(w3, "EntryPoint", "../crates/types/contracts/out/v0_7/EntryPoint.sol/EntryPoint.json", "0x0000000071727De22E5E9d8BAf0edAc6f37da032")
+    EP = load_contract(w3, "EntryPoint", "../crates/contracts/contracts/out/v0_7/EntryPoint.sol/EntryPoint.json", "0x0000000071727De22E5E9d8BAf0edAc6f37da032")
 else:
-    EP = load_contract(w3, "EntryPoint", "../crates/types/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
+    EP = load_contract(w3, "EntryPoint", "../crates/contracts/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
 
 assert l1.eth.get_balance(deploy_addr) > Web3.to_wei(1000, 'ether')
 

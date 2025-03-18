@@ -18,12 +18,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use ethers::{
-    abi::{AbiDecode, AbiEncode},
-    signers::{LocalWallet, Signer},
-    types::{Address, BigEndianHash, Bytes, RecoveryMessage::Data, H256, U128, U256},
-    utils::keccak256,
-};
+//use alloy_sol_types::SolType;
+use alloy_primitives::map::FbBuildHasher;
+use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, B256, U256};
+use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
+use alloy_signer::{Signature /*, SignerSync*/, Signer};
+use alloy_signer_local::{LocalSigner, PrivateKeySigner};
+use alloy_sol_types::{/*SolCall, SolStruct,*/ SolValue};
 use once_cell::sync::Lazy;
 
 use crate::{
@@ -48,9 +49,9 @@ pub struct HcErr {
 /// Cache entry containing an offchain operation
 pub struct HcEntry {
     /// Partial key, to be combined with msg.sender in the Helper contract
-    pub sub_key: H256,
+    pub sub_key: B256,
     /// Merged key, used for end-of-bundle cleanup
-    pub map_key: H256,
+    pub map_key: B256,
     /// Extracted calldata (also in user_op; duplicated for easier access)
     pub call_data: Bytes,
     /// Full operation
@@ -58,9 +59,9 @@ pub struct HcEntry {
     /// Creation timestamp, used to prune expired entries
     pub ts: SystemTime,
     /// The total computed offchain gas (all 3 phases)
-    pub oc_gas: U256,
+    pub oc_gas: u128,
     /// The required preVerificationGas incl. HC overhead (set during successful gas estimation)
-    pub needed_pvg: U256,
+    pub needed_pvg: u128,
     /// Version flag
     pub is_v7: bool,
 }
@@ -82,7 +83,7 @@ impl Clone for HcEntry {
     }
 }
 
-static HC_MAP: Lazy<Mutex<HashMap<ethers::types::H256, HcEntry>>> = Lazy::new(|| {
+static HC_MAP: Lazy<Mutex<HashMap<B256, HcEntry>>> = Lazy::new(|| {
     let m = HashMap::new();
     Mutex::new(m)
 });
@@ -97,7 +98,7 @@ pub struct HcCfg {
     /// Owner/signer for sys_account
     pub sys_owner: Address,
     /// Private key for sys_account
-    pub sys_privkey: H256,
+    pub sys_privkey: B256,
     /// Chain spec
     pub chain_spec: ChainSpec,
     /// Temporary workaround; would be better to use an existing Provider.
@@ -108,18 +109,18 @@ pub struct HcCfg {
     pub slot_idx: U256,
 }
 
-//pub static mut HC_CONFIG: HcCfg = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:H256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new(), from_addr: Address::zero()};
+//pub static mut HC_CONFIG: HcCfg = HcCfg { helper_addr:Address::zero(), sys_account:Address::zero(),  sys_owner:Address::zero(), sys_privkey:B256::zero(), entry_point: Address::zero(), chain_id: 0, node_http:String::new(), from_addr: Address::zero()};
 
 /// Parameters needed for Hybrid Compute, accessed from various modules.
 pub static HC_CONFIG: Lazy<Mutex<HcCfg>> = Lazy::new(|| {
     let c = HcCfg {
-        helper_addr: Address::zero(),
-        sys_account: Address::zero(),
-        sys_owner: Address::zero(),
-        sys_privkey: H256::zero(),
+        helper_addr: Address::ZERO,
+        sys_account: Address::ZERO,
+        sys_owner: Address::ZERO,
+        sys_privkey: B256::ZERO,
         chain_spec: ChainSpec::default(),
         node_http: String::new(),
-        from_addr: Address::zero(),
+        from_addr: Address::ZERO,
         slot_idx: U256::from(0),
     };
     Mutex::new(c)
@@ -130,7 +131,7 @@ pub fn init(
     helper_addr: Address,
     sys_account: Address,
     sys_owner: Address,
-    sys_privkey: H256,
+    sys_privkey: B256,
     chain_spec: ChainSpec,
     node_http: String,
     slot_idx: U256,
@@ -153,42 +154,46 @@ pub fn set_signer(from_addr: Address) {
 }
 
 /// Wrap the response payload into calldata for the HybridAccount + HCHelper contracts
-pub fn make_op_calldata(sender: Address, map_key: ethers::types::H256, payload: Bytes) -> Bytes {
+pub fn make_op_calldata(sender: Address, map_key: B256, payload: Bytes) -> Bytes {
     let mut put_data = [0xdfu8, 0xc9, 0x8a, 0xe8].to_vec(); // helper "PutResponse(bytes32,bytes)" selector
-    put_data.extend(AbiEncode::encode((map_key, payload)));
-    let put_bytes: Bytes = put_data.into();
+
+    //put_data.extend(AbiEncode::encode((map_key, payload)));
+    let p1_enc = Bytes((map_key, payload).abi_encode().into()).slice(32..);
+    put_data.extend(p1_enc);
 
     let mut tmp_data = [0xb6u8, 0x1d, 0x27, 0xf6].to_vec(); // account "execute" selector
-    tmp_data.extend(AbiEncode::encode((sender, U256::zero(), put_bytes)));
+    let p2_bytes = Bytes((sender, U256::ZERO, put_data).abi_encode().into()).slice(32..);
+    tmp_data.extend(&p2_bytes);
+
     tmp_data.into()
 }
 
 /// Wrap the error response payload into calldata for the HybridAccount + HCHelper contracts
-pub fn make_err_calldata(sender: Address, map_key: ethers::types::H256, payload: Bytes) -> Bytes {
+pub fn make_err_calldata(sender: Address, map_key: B256, payload: Bytes) -> Bytes {
     let mut put_data = [0xfdu8, 0xe8, 0x9b, 0x64].to_vec(); // helper "PutSysResponse(bytes32,bytes)" selector
-    put_data.extend(AbiEncode::encode((map_key, payload)));
-    let put_bytes: Bytes = put_data.into();
+
+    let p1_enc = Bytes((map_key, payload).abi_encode().into()).slice(32..);
+    put_data.extend(p1_enc);
 
     let mut tmp_data = [0xb6u8, 0x1d, 0x27, 0xf6].to_vec(); // account "execute" selector
-    tmp_data.extend(AbiEncode::encode((sender, U256::zero(), put_bytes)));
+    let p2_bytes = Bytes((sender, U256::ZERO, put_data).abi_encode().into()).slice(32..);
+    tmp_data.extend(p2_bytes);
+
     tmp_data.into()
 }
 
 /// Cleanup to remove any leaked responses at the end of a bundle
-pub fn make_rr_calldata(keys: Vec<H256>) -> Bytes {
-    //    let mut put_data = [0xcbu8, 0x74, 0x30, 0xae].to_vec(); // helper RemoveResponse(bytes32[])
+pub fn make_rr_calldata(keys: Vec<B256>) -> Bytes {
     let mut put_data = [0x10u8, 0x40, 0x4d, 0x34].to_vec(); // helper RemoveResponses(bytes32[])
     let cfg = HC_CONFIG.lock().unwrap();
 
-    put_data.extend(AbiEncode::encode(keys));
-    let put_bytes: Bytes = put_data.into();
+    let k_bytes = Bytes(keys.abi_encode().into()); // note - prefix is not removed from this abi.encode()
+    put_data.extend(k_bytes);
 
     let mut tmp_data = [0xb6u8, 0x1d, 0x27, 0xf6].to_vec(); // account "execute" selector
-    tmp_data.extend(AbiEncode::encode((
-        cfg.helper_addr,
-        U256::zero(),
-        put_bytes,
-    )));
+    let p2_bytes = Bytes((cfg.helper_addr, U256::ZERO, put_data).abi_encode().into()).slice(32..);
+    tmp_data.extend(p2_bytes);
+
     tmp_data.into()
 }
 
@@ -207,25 +212,26 @@ pub fn check_trigger(rev: &Bytes) -> bool {
 }
 
 /// Key used to store response in the HCHelper mapping
-pub fn hc_map_key(revert_data: &Bytes) -> H256 {
-    let sub_key: H256 = keccak256(&revert_data[28..]).into();
-    let map_key: H256 = keccak256([&revert_data[8..28], &sub_key.to_fixed_bytes()].concat()).into();
+pub fn hc_map_key(revert_data: &Bytes) -> B256 {
+    let sub_key: B256 = keccak256(&revert_data[28..]);
+    let map_key: B256 = keccak256([&revert_data[8..28], sub_key.as_slice()].concat());
     map_key
 }
 
 /// Calculates the HCHelper storage slot key for a ResponseCache entry
-pub fn hc_storage_key(map_key: H256) -> H256 {
+pub fn hc_storage_key(map_key: B256) -> B256 {
     let cfg = HC_CONFIG.lock().unwrap();
-    let slot_idx_bytes: Bytes = cfg.slot_idx.encode().into();
+    let slot_idx_bytes: Bytes = cfg.slot_idx.abi_encode().into();
 
-    let storage_key: H256 =
-        keccak256([Bytes::from(map_key.to_fixed_bytes()), slot_idx_bytes].concat()).into();
+    let mut tmp = map_key.to_vec();
+    tmp.extend(slot_idx_bytes);
+    let storage_key: B256 = keccak256(tmp); // [Bytes::from(map_key.to_fixed_bytes()), slot_idx_bytes].concat()).into();
     storage_key
 }
 
 /// Partial key, to be combined with msg.sender
-pub fn hc_sub_key(revert_data: &Bytes) -> H256 {
-    let sub_key: H256 = keccak256(&revert_data[28..]).into();
+pub fn hc_sub_key(revert_data: &Bytes) -> B256 {
+    let sub_key: B256 = keccak256(&revert_data[28..]);
     sub_key
 }
 
@@ -252,7 +258,7 @@ fn make_external_op(
     nonce: U256,
     op_success: bool,
     response_payload: &Bytes,
-    sub_key: H256,
+    sub_key: B256,
     ha_addr: Address,
     sig_hex: String,
     oo_nonce: U256,
@@ -262,13 +268,12 @@ fn make_external_op(
     let tmp_bytes: Bytes = Bytes::from(response_payload.to_vec());
 
     let err_code: u32 = if op_success { 0 } else { 1 };
-    let merged_response = AbiEncode::encode((src_addr, nonce, err_code, tmp_bytes));
 
-    let call_data = make_op_calldata(
-        cfg.helper_addr,
-        sub_key,
-        Bytes::from(merged_response.to_vec()),
-    );
+    let enc_merged_response =
+        Bytes((src_addr, nonce, err_code, tmp_bytes).abi_encode().into()).slice(32..);
+
+    let call_data = make_op_calldata(cfg.helper_addr, sub_key, enc_merged_response);
+
     let call_gas = 705 * response_payload.len() + 170000;
 
     println!(
@@ -283,11 +288,11 @@ fn make_external_op(
             sender: ha_addr,
             nonce: oo_nonce,
             call_data: call_data.clone(),
-            call_gas_limit: Some(U128::from(call_gas)),
-            verification_gas_limit: Some(U128::from(0x10000)),
-            pre_verification_gas: Some(U256::from(0x10000)),
-            max_fee_per_gas: Some(U128::zero()),
-            max_priority_fee_per_gas: Some(U128::zero()),
+            call_gas_limit: Some(call_gas.try_into().unwrap()),
+            verification_gas_limit: Some(0x10000),
+            pre_verification_gas: Some(0x10000),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature: Bytes::new(),
             paymaster: None,
@@ -295,6 +300,8 @@ fn make_external_op(
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            eip7702_auth_address: None,
+            aggregator: None,
         };
 
         new_op.signature = sig_hex.parse::<Bytes>().unwrap();
@@ -305,13 +312,15 @@ fn make_external_op(
             nonce: oo_nonce,
             init_code: Bytes::new(),
             call_data: call_data.clone(),
-            call_gas_limit: Some(U256::from(call_gas)),
-            verification_gas_limit: Some(U256::from(0x10000)),
-            pre_verification_gas: Some(U256::from(0x10000)),
-            max_fee_per_gas: Some(U256::zero()),
-            max_priority_fee_per_gas: Some(U256::zero()),
+            call_gas_limit: Some(call_gas.try_into().unwrap()),
+            verification_gas_limit: Some(0x10000),
+            pre_verification_gas: Some(0x10000),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             paymaster_and_data: Bytes::new(),
             signature: Bytes::new(),
+            eip7702_auth_address: None,
+            aggregator: None,
         };
 
         new_op.signature = sig_hex.parse::<Bytes>().unwrap();
@@ -324,16 +333,16 @@ fn make_external_op(
 #[allow(clippy::too_many_arguments)] // FIXME later
 pub async fn external_op(
     entry_point: Address,
-    op_key: H256,
+    op_key: B256,
     src_addr: Address,
     nonce: U256,
     op_success: bool,
     response_payload: &Bytes,
-    sub_key: H256,
+    sub_key: B256,
     ha_addr: Address,
     sig_hex: String,
     oo_nonce: U256,
-    map_key: H256,
+    map_key: B256,
     cfg: &HcCfg,
     ha_owner: Address,
     nn: U256,
@@ -354,23 +363,32 @@ pub async fn external_op(
 
     let check_hash = new_op
         .into_variant(&cfg.chain_spec)
-        .hash(entry_point, cfg.chain_spec.id);
-    let check_sig: ethers::types::Signature =
-        ethers::types::Signature::from_str(&sig_hex).expect("Signature decode");
-    let check_msg: ethers::types::RecoveryMessage = Data(check_hash.to_fixed_bytes().to_vec());
+        .hash(/*entry_point, cfg.chain_spec.id*/);
+    let check_sig: Signature = Signature::from_str(&sig_hex).expect("Signature decode");
+    let check_msg = check_hash.to_vec(); // check_hash.to_fixed_bytes().to_vec();
 
     let mut hc_err = HcErr {
         code: 0,
         message: "".to_string(),
     };
-    if check_sig.verify(check_msg, ha_owner).is_err() {
+
+    let s2: PrimitiveSignature = check_sig;
+
+    // let sig_bytes = Bytes::from_str(&sig_hex)
+    // let test_sig = PrimitiveSignature::decode_rlp_vrs(
+    let test2 = s2
+        .recover_address_from_msg(check_msg)
+        .expect("Recover signature");
+
+    //    if check_sig.verify(check_msg, ha_owner).is_err() {
+    if test2 != ha_owner {
         println!("HC Bad offchain signature");
         hc_err = HcErr {
             code: 3,
             message: "HC03: Bad offchain signature".to_string(),
         };
-        let key_bytes: Bytes = cfg.sys_privkey.as_fixed_bytes().into();
-        let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
+        let key_bytes: B256 = cfg.sys_privkey;
+        let wallet = LocalSigner::from_bytes(&key_bytes).unwrap();
 
         (new_op, new_cd) = make_err_op(
             hc_err.clone(),
@@ -392,8 +410,8 @@ pub async fn external_op(
         call_data: new_cd.clone(),
         user_op: new_op.clone(),
         ts: SystemTime::now(),
-        oc_gas: U256::zero(),
-        needed_pvg: U256::zero(),
+        oc_gas: 0,
+        needed_pvg: 0,
         is_v7,
     };
     HC_MAP.lock().unwrap().insert(op_key, ent);
@@ -404,17 +422,24 @@ pub async fn external_op(
 #[allow(clippy::too_many_arguments)] // FIXME later
 async fn make_err_op(
     err_hc: HcErr,
-    sub_key: H256,
+    sub_key: B256,
     src_addr: Address,
     nn: U256,
     oo_nonce: U256,
     cfg: &HcCfg,
-    entry_point: Address,
-    wallet: LocalWallet,
+    _entry_point: Address,
+    wallet: PrivateKeySigner,
     is_v7: bool,
 ) -> (UserOperationOptionalGas, Bytes) {
-    let response_payload: Bytes =
-        AbiEncode::encode((src_addr, nn, err_hc.code, err_hc.message)).into();
+    //    let response_payload: Bytes =
+    //        AbiEncode::encode((src_addr, nn, err_hc.code, err_hc.message)).into();
+
+    //let response_call = PutResponseCall { src_addr: src_addr, nn: nn.into(), errCode: err_hc.code, msgBytes: err_hc.message.into() };
+    //let response_struct = InnerResponse {a1: src_addr, b1: nn, c1: err_hc.code.into(), d1: err_hc.message.into() };
+    let err_num = U256::from(err_hc.code); // actually U32
+    let err_str: String = err_hc.message;
+
+    let response_payload = Bytes((src_addr, nn, err_num, err_str).abi_encode().into()).slice(32..);
 
     let call_data = make_err_calldata(
         cfg.helper_addr,
@@ -427,11 +452,11 @@ async fn make_err_op(
             sender: cfg.sys_account,
             nonce: oo_nonce,
             call_data: call_data.clone(),
-            call_gas_limit: Some(U128::from(0x40000)),
-            verification_gas_limit: Some(U128::from(0x10000)),
-            pre_verification_gas: Some(U256::from(0x10000)),
-            max_fee_per_gas: Some(U128::zero()),
-            max_priority_fee_per_gas: Some(U128::zero()),
+            call_gas_limit: Some(0x40000),
+            verification_gas_limit: Some(0x10000),
+            pre_verification_gas: Some(0x10000),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature: Bytes::new(),
             paymaster: None,
@@ -439,12 +464,14 @@ async fn make_err_op(
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            eip7702_auth_address: None,
+            aggregator: None,
         };
         let hh = UserOperationOptionalGas::V0_7(new_op.clone())
             .into_variant(&cfg.chain_spec)
-            .hash(entry_point, cfg.chain_spec.id);
-        let signature = wallet.sign_message(hh).await;
-        let sig_bytes: Bytes = signature.as_ref().unwrap().to_vec().into();
+            .hash(/*entry_point, cfg.chain_spec.id*/);
+        let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
+        let sig_bytes: Bytes = signature.as_bytes().into();
         println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
         new_op.signature = sig_bytes;
 
@@ -455,19 +482,21 @@ async fn make_err_op(
             nonce: oo_nonce,
             init_code: Bytes::new(),
             call_data: call_data.clone(),
-            call_gas_limit: Some(U256::from(0x40000)),
-            verification_gas_limit: Some(U256::from(0x10000)),
-            pre_verification_gas: Some(U256::from(0x10000)),
-            max_fee_per_gas: Some(U256::zero()),
-            max_priority_fee_per_gas: Some(U256::zero()),
+            call_gas_limit: Some(0x40000),
+            verification_gas_limit: Some(0x10000),
+            pre_verification_gas: Some(0x10000),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             paymaster_and_data: Bytes::new(),
             signature: Bytes::new(),
+            eip7702_auth_address: None,
+            aggregator: None,
         };
         let hh = UserOperationOptionalGas::V0_6(new_op.clone())
             .into_variant(&cfg.chain_spec)
-            .hash(entry_point, cfg.chain_spec.id);
-        let signature = wallet.sign_message(hh).await;
-        let sig_bytes: Bytes = signature.as_ref().unwrap().to_vec().into();
+            .hash(/*entry_point, cfg.chain_spec.id*/);
+        let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
+        let sig_bytes: Bytes = signature.as_bytes().into();
         println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
         new_op.signature = sig_bytes;
 
@@ -478,14 +507,14 @@ async fn make_err_op(
 /// Encapsulate an error code into a UserOperation
 #[allow(clippy::too_many_arguments)] // FIXME later
 pub async fn err_op(
-    op_key: H256,
+    op_key: B256,
     entry_point: Address,
     err_hc: HcErr,
-    sub_key: H256,
+    sub_key: B256,
     src_addr: Address,
     nn: U256,
     oo_nonce: U256,
-    map_key: H256,
+    map_key: B256,
     cfg: &HcCfg,
     is_v7: bool,
 ) {
@@ -494,8 +523,8 @@ pub async fn err_op(
         op_key, err_hc.message
     );
     assert!(err_hc.code >= 2);
-    let key_bytes: Bytes = cfg.sys_privkey.as_fixed_bytes().into();
-    let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
+    let key_bytes: B256 = cfg.sys_privkey;
+    let wallet = LocalSigner::from_bytes(&key_bytes).unwrap();
 
     let (new_op, new_cd) = make_err_op(
         err_hc,
@@ -516,8 +545,8 @@ pub async fn err_op(
         call_data: new_cd.clone(),
         user_op: new_op.clone(),
         ts: SystemTime::now(),
-        oc_gas: U256::zero(),
-        needed_pvg: U256::zero(),
+        oc_gas: 0,
+        needed_pvg: 0,
         is_v7,
     };
     HC_MAP.lock().unwrap().insert(op_key, ent);
@@ -526,9 +555,9 @@ pub async fn err_op(
 /// Encapsulate a RemoveResponses into a UserOperation
 pub async fn rr_op(
     cfg: &HcCfg,
-    entry_point: Address,
+    _entry_point: Address,
     oo_nonce: U256,
-    keys: Vec<H256>,
+    keys: Vec<B256>,
     is_v7: bool,
 ) -> UserOperationOptionalGas {
     let call_data = make_rr_calldata(keys);
@@ -539,11 +568,11 @@ pub async fn rr_op(
             sender: cfg.sys_account,
             nonce: oo_nonce,
             call_data: call_data.clone(),
-            call_gas_limit: Some(U128::from(0x6000)),
-            verification_gas_limit: Some(U128::from(0x10000)),
-            pre_verification_gas: Some(U256::from(0x10000)),
-            max_fee_per_gas: Some(U128::zero()),
-            max_priority_fee_per_gas: Some(U128::zero()),
+            call_gas_limit: Some(0x6000),
+            verification_gas_limit: Some(0x10000),
+            pre_verification_gas: Some(0x10000),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature: Bytes::new(),
             paymaster: None,
@@ -551,17 +580,19 @@ pub async fn rr_op(
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            eip7702_auth_address: None,
+            aggregator: None,
         };
 
-        let key_bytes: Bytes = cfg.sys_privkey.as_fixed_bytes().into();
-        let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
+        let key_bytes: B256 = cfg.sys_privkey;
+        let wallet = LocalSigner::from_bytes(&key_bytes).unwrap();
 
         let hh = UserOperationOptionalGas::V0_7(new_op.clone())
             .into_variant(&cfg.chain_spec)
-            .hash(entry_point, cfg.chain_spec.id);
+            .hash(/*entry_point, cfg.chain_spec.id*/);
 
-        let signature = wallet.sign_message(hh).await;
-        new_op.signature = signature.as_ref().unwrap().to_vec().into();
+        let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
+        new_op.signature = signature.as_bytes().into();
         println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
 
         UserOperationOptionalGas::V0_7(new_op)
@@ -571,25 +602,27 @@ pub async fn rr_op(
             nonce: oo_nonce,
             init_code: Bytes::new(),
             call_data: call_data.clone(),
-            call_gas_limit: Some(U256::from(0x6000)),
-            verification_gas_limit: Some(U256::from(0x10000)),
-            pre_verification_gas: Some(U256::from(0x10000)),
-            max_fee_per_gas: Some(U256::zero()),
-            max_priority_fee_per_gas: Some(U256::zero()),
+            call_gas_limit: Some(0x6000),
+            verification_gas_limit: Some(0x10000),
+            pre_verification_gas: Some(0x10000),
+            max_fee_per_gas: Some(0), // Some(U256::zero()),
+            max_priority_fee_per_gas: Some(0),
             paymaster_and_data: Bytes::new(),
             signature: Bytes::new(),
+            eip7702_auth_address: None,
+            aggregator: None,
         };
 
-        let key_bytes: Bytes = cfg.sys_privkey.as_fixed_bytes().into();
-        let wallet = LocalWallet::from_bytes(&key_bytes).unwrap();
+        let key_bytes: B256 = cfg.sys_privkey;
+        let wallet = LocalSigner::from_bytes(&key_bytes).unwrap();
 
         let hh = UserOperationOptionalGas::V0_6(new_op.clone())
             .into_variant(&cfg.chain_spec)
-            .hash(entry_point, cfg.chain_spec.id);
+            .hash(/*entry_point, cfg.chain_spec.id*/);
         println!("HC pre_sign hash {:?}", hh);
 
-        let signature = wallet.sign_message(hh).await;
-        new_op.signature = signature.as_ref().unwrap().to_vec().into();
+        let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
+        new_op.signature = signature.as_bytes().into();
         println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
 
         UserOperationOptionalGas::V0_6(new_op)
@@ -597,36 +630,35 @@ pub async fn rr_op(
 }
 
 /// Retrieve a cached HC operation
-pub fn get_hc_ent(key: H256) -> Option<HcEntry> {
+pub fn get_hc_ent(key: B256) -> Option<HcEntry> {
     HC_MAP.lock().unwrap().get(&key).cloned()
 }
 
 /// Remove a cache entry
-pub fn del_hc_ent(key: H256) {
+pub fn del_hc_ent(key: B256) {
     HC_MAP.lock().unwrap().remove(&key);
 }
 
 /// Retrieve the PutResponse() payload from a cached HC operation
-pub fn get_hc_op_payload(key: H256) -> Bytes {
+pub fn get_hc_op_payload(key: B256) -> Bytes {
     let op = HC_MAP.lock().unwrap().get(&key).cloned().unwrap();
     let cd1 = &op.call_data[4..];
-    let dec1 = <(Address, U256, Bytes) as AbiDecode>::decode(cd1).unwrap();
-    let cd2 = &dec1.2[4..];
-    let dec2 = <(H256, Bytes) as AbiDecode>::decode(cd2).unwrap();
+
+    let ddd = <(Address, B256, Bytes)>::abi_decode_sequence(cd1, true).unwrap();
+    let db2: Bytes = ddd.2;
+
+    let dec2 = <(B256, Bytes)>::abi_decode_sequence(&db2.slice(4..), true).unwrap();
     dec2.1
 }
 
 /// Retrieve the map_key for a cached op
-pub fn get_hc_map_key(key: H256) -> H256 {
+pub fn get_hc_map_key(key: B256) -> B256 {
     let map_key = HC_MAP.lock().unwrap().get(&key).cloned().unwrap().map_key;
     map_key
 }
 
 /// Retrieve a stateDiff object containing the encoded payload
-pub fn get_hc_op_statediff(
-    op_hash: H256,
-    mut s2: ethers::types::spoof::State,
-) -> ethers::types::spoof::State {
+pub fn get_hc_op_statediff(op_hash: B256, mut s2: StateOverride) -> StateOverride {
     if HC_MAP.lock().unwrap().get(&op_hash).is_none() {
         return s2;
     }
@@ -637,27 +669,42 @@ pub fn get_hc_op_statediff(
     let cfg = HC_CONFIG.lock().unwrap();
 
     // Store an encoded length for the response bytes
-    let val = H256::from_low_u64_be((payload.len() * 2 + 1).try_into().unwrap());
+    //let val = B256::from_low_u64_be((payload.len() * 2 + 1).try_into().unwrap());
+    let val64: u64 = (payload.len() * 2 + 1).try_into().unwrap();
+    let val: B256 = U256::from(val64).into();
 
-    s2.account(cfg.helper_addr).store(key, val);
-    key = keccak256(key).into();
+    let s = FbBuildHasher::<32>::default();
+
+    let mut hm = HashMap::with_hasher(s);
+    //s2.account(cfg.helper_addr).store(key, val);
+    hm.insert(key, val);
+
+    key = keccak256(key);
 
     let mut i = 0;
     while i < payload.len() {
-        let next_chunk: H256 = H256::from_slice(&payload[i..32 + i]);
-        s2.account(cfg.helper_addr).store(key, next_chunk);
-        let u_key: U256 = key.into_uint() + 1;
-        key = H256::from_uint(&u_key);
+        let next_chunk: B256 = B256::from_slice(&payload[i..32 + i]);
+        //s2.account(cfg.helper_addr).store(key, next_chunk);
+        hm.insert(key, next_chunk);
+        let u_key: U256 = key.into();
+        key = B256::from(u_key.wrapping_add(U256::from(1)));
         i += 32;
     }
+
+    let ao = AccountOverride {
+        state_diff: Some(hm),
+        ..Default::default()
+    };
+
+    s2.insert(cfg.helper_addr, ao);
     s2
 }
 
 /// Updates the preVerificationGas after a successful simulation.
-pub fn hc_set_pvg(key: H256, needed_pvg: U256, oc_gas: U256) {
+pub fn hc_set_pvg(key: B256, needed_pvg: u128, oc_gas: u128) {
     let mut map = HC_MAP.lock().unwrap();
     let ent = map.get(&key).unwrap();
-    //assert!(ent.needed_pvg == U256::zero()); // This is now allowed as an error flag
+    //assert!(ent.needed_pvg == 0); // This is now allowed as an error flag
     // FIXME - should be a better way to do this.
     let new_ent = HcEntry {
         sub_key: ent.sub_key,
@@ -674,7 +721,7 @@ pub fn hc_set_pvg(key: H256, needed_pvg: U256, oc_gas: U256) {
 }
 
 /// Updates the preVerificationGas after a successful simulation.
-pub fn hc_get_pvg(key: H256) -> Option<U256> {
+pub fn hc_get_pvg(key: B256) -> Option<u128> {
     if let Some(ent) = HC_MAP.lock().unwrap().get(&key).cloned() {
         return Some(ent.needed_pvg);
     }
@@ -705,7 +752,7 @@ mod test {
                 .parse::<Address>()
                 .unwrap(),
             "0x1111111111111111111111111111111111111111111111111111111111111111"
-                .parse::<H256>()
+                .parse::<B256>()
                 .unwrap(),
             ChainSpec::default(),
             "http://test.local/rpc".to_string(),
@@ -728,7 +775,7 @@ mod test {
                 .parse::<Address>()
                 .unwrap(),
             sys_privkey: "0x1111111111111111111111111111111111111111111111111111111111111111"
-                .parse::<H256>()
+                .parse::<B256>()
                 .unwrap(),
             chain_spec: ChainSpec::default(),
             node_http: "http://test.local/rpc".to_string(),
@@ -762,10 +809,10 @@ mod test {
     fn test_req_parse() {
         let rev_data = "0x5f48435f545249479c6df0d4c9d8f527221b59c66ad5279c16a1dbc221e8f4e33617575840a20013d516f1be1937bb52bbd7d525d996fd557d3d597f97e0d7ba00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001".parse::<Bytes>().unwrap();
         let e_map_key = "0xa12faae2eedc0b231c96ab3c88c0b7e1e5dbc6fd02c462e79751c1eff7484efb"
-            .parse::<H256>()
+            .parse::<B256>()
             .unwrap();
         let e_sub_key = "0x16d7f606293dca5dbbe97735b2913e6dade6e3f216310b12148cb67a6fd86947"
-            .parse::<H256>()
+            .parse::<B256>()
             .unwrap();
         let e_ha_addr = "0x9c6df0d4c9d8f527221b59c66ad5279c16a1dbc2"
             .parse::<Address>()
@@ -797,7 +844,7 @@ mod test {
             U256::from(100),
             true,
             &payload,
-            "0x2222222222222222222222222222222222222222222222222222222222222222".parse::<H256>().unwrap(),
+            "0x2222222222222222222222222222222222222222222222222222222222222222".parse::<B256>().unwrap(),
             "0x2000000000000000000000000000000000000002".parse::<Address>().unwrap(),
             "0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c".to_string(),
             U256::from(222),
@@ -810,11 +857,11 @@ mod test {
             sender: "0x2000000000000000000000000000000000000002".parse::<Address>().unwrap(),
             nonce: U256::from(222),
             call_data: e_calldata,
-            call_gas_limit: Some(U128::from(192560)),
-            verification_gas_limit: Some(U128::from(65536)),
-            pre_verification_gas: Some(U256::from(65536)),
-            max_fee_per_gas: Some(U128::from(0)),
-            max_priority_fee_per_gas: Some(U128::from(0)),
+            call_gas_limit: Some(192560),
+            verification_gas_limit: Some(65536),
+            pre_verification_gas: Some(65536),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature: "0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c".parse::<Bytes>().unwrap(),
             paymaster: None,
@@ -822,6 +869,8 @@ mod test {
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            eip7702_auth_address: None,
+            aggregator: None,
         };
         if let UserOperationOptionalGas::V0_7(op7) = op {
             assert_eq!(expected, op7);
@@ -843,7 +892,7 @@ mod test {
                 .parse::<Address>()
                 .unwrap(),
             sys_privkey: "0x1111111111111111111111111111111111111111111111111111111111111111"
-                .parse::<H256>()
+                .parse::<B256>()
                 .unwrap(),
             chain_spec: ChainSpec::default(),
             node_http: "http://test.local/rpc".to_string(),
@@ -853,14 +902,14 @@ mod test {
             slot_idx: U256::from(0),
         };
 
-        let wallet = LocalWallet::from_bytes(&cfg.sys_privkey.to_fixed_bytes()).unwrap();
+        let wallet = LocalSigner::from_bytes(&cfg.sys_privkey).unwrap();
         let op_future = make_err_op(
             HcErr {
                 code: 4,
                 message: "unit test".to_string(),
             },
             "0x2222222222222222222222222222222222222222222222222222222222222222"
-                .parse::<H256>()
+                .parse::<B256>()
                 .unwrap(),
             "0x2000000000000000000000000000000000000002"
                 .parse::<Address>()
@@ -882,11 +931,11 @@ mod test {
                 .unwrap(),
             nonce: U256::from(222),
             call_data: e_calldata,
-            call_gas_limit: Some(U128::from(262144)),
-            verification_gas_limit: Some(U128::from(65536)),
-            pre_verification_gas: Some(U256::from(65536)),
-            max_fee_per_gas: Some(U128::from(0)),
-            max_priority_fee_per_gas: Some(U128::from(0)),
+            call_gas_limit: Some(262144),
+            verification_gas_limit: Some(65536),
+            pre_verification_gas: Some(65536),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature:"0xfe10d7b74cc08f195b44caa8ce3dbd084941c5b26231f456d54cd101efe4e1ea37793d70c6732bbea5f10e9214ea2596fd5dfaf3f7c162b0c4d41a5d5eca64af1b"
                 .parse::<Bytes>()
@@ -896,6 +945,8 @@ mod test {
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            eip7702_auth_address: None,
+            aggregator: None,
         };
         let (op, _) = op_future.await;
         if let UserOperationOptionalGas::V0_7(op7) = op {

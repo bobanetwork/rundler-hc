@@ -11,27 +11,40 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{marker::PhantomData, sync::Arc, time::Duration};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
+use alloy_primitives::{Address, B256};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use ethers::types::{transaction::eip2718::TypedTransaction, Address, H256, U256};
+use futures::Stream;
 use futures_util::StreamExt;
+use metrics::Counter;
+use metrics_derive::Metrics;
 #[cfg(test)]
 use mockall::automock;
-use rundler_provider::{BundleHandler, EntryPoint};
+use rundler_provider::{
+    BundleHandler, EntryPoint, EvmProvider, GethDebugBuiltInTracerType, GethDebugTracerCallConfig,
+    GethDebugTracerType, GethDebugTracingOptions, HandleOpsOut, ProvidersWithEntryPointT,
+    TransactionRequest,
+};
 use rundler_sim::ExpectedStorage;
+use rundler_task::TaskSpawner;
 use rundler_types::{
     builder::BundlingMode,
     chain::ChainSpec,
     hybrid_compute,
     pool::{NewHead, Pool},
+    proxy::SubmissionProxy,
     EntityUpdate, UserOperation,
 };
 use rundler_utils::emit::WithEntryPoint;
 use tokio::{
     join,
-    sync::{broadcast, mpsc, mpsc::UnboundedReceiver, oneshot},
+    sync::{
+        broadcast, mpsc,
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
 };
 use tracing::{debug, error, info, instrument, warn};
 
@@ -42,8 +55,8 @@ use crate::{
 };
 
 #[async_trait]
-pub(crate) trait BundleSender: Send + Sync + 'static {
-    async fn send_bundles_in_loop(self) -> anyhow::Result<()>;
+pub(crate) trait BundleSender: Send + Sync {
+    async fn send_bundles_in_loop<T: TaskSpawner>(self, task_spawner: T);
 }
 
 #[derive(Debug)]
@@ -54,26 +67,28 @@ pub(crate) struct Settings {
 }
 
 #[derive(Debug)]
-pub(crate) struct BundleSenderImpl<UO, P, E, T, C> {
-    builder_index: u64,
+pub(crate) struct BundleSenderImpl<P, EP, T, C> {
+    builder_tag: String,
     bundle_action_receiver: Option<mpsc::Receiver<BundleSenderAction>>,
     chain_spec: ChainSpec,
-    beneficiary: Address,
+    sender_eoa: Address,
+    // Optional submission proxy - bundles are sent through this contract
+    submission_proxy: Option<Arc<dyn SubmissionProxy>>,
     proposer: P,
-    entry_point: E,
+    ep_providers: EP,
     transaction_tracker: Option<T>,
     pool: C,
     settings: Settings,
     event_sender: broadcast::Sender<WithEntryPoint<BuilderEvent>>,
-    metrics: BuilderMetrics,
-    _uo_type: PhantomData<UO>,
+    metrics: BuilderMetric,
+    ep_address: Address,
 }
 
 #[derive(Debug)]
 struct BundleTx {
-    tx: TypedTransaction,
+    tx: TransactionRequest,
     expected_storage: ExpectedStorage,
-    op_hashes: Vec<H256>,
+    op_hashes: Vec<B256>,
 }
 
 pub enum BundleSenderAction {
@@ -93,7 +108,7 @@ pub enum SendBundleResult {
     Success {
         block_number: u64,
         attempt_number: u64,
-        tx_hash: H256,
+        tx_hash: B256,
     },
     NoOperationsInitially,
     StalledAtMaxFeeIncreases,
@@ -110,35 +125,40 @@ enum SendBundleAttemptResult {
     NoOperationsAfterFeeFilter,
     // There were no operations after the bundle was simulated
     NoOperationsAfterSimulation,
+    // Underpriced
+    Underpriced,
     // Replacement Underpriced
     ReplacementUnderpriced,
     // Condition not met
     ConditionNotMet,
+    // Rejected
+    Rejected,
     // Nonce too low
     NonceTooLow,
 }
 
 #[async_trait]
-impl<UO, P, E, T, C> BundleSender for BundleSenderImpl<UO, P, E, T, C>
+impl<P, EP, T, C> BundleSender for BundleSenderImpl<P, EP, T, C>
 where
-    UO: UserOperation,
-    P: BundleProposer<UO = UO>,
-    E: EntryPoint + BundleHandler<UO = UO>,
+    EP: ProvidersWithEntryPointT,
+    P: BundleProposer<UO = EP::UO>,
     T: TransactionTracker,
     C: Pool,
 {
     /// Loops forever, attempting to form and send a bundle on each new block,
     /// then waiting for one bundle to be mined or dropped before forming the
     /// next one.
-    #[instrument(skip_all, fields(entry_point = self.entry_point.address().to_string(), builder_index = self.builder_index))]
-    async fn send_bundles_in_loop(mut self) -> anyhow::Result<()> {
+    #[instrument(skip_all, fields(entry_point = self.ep_address.to_string(), tag = self.builder_tag))]
+    async fn send_bundles_in_loop<TS: TaskSpawner>(mut self, task_spawner: TS) {
         // trigger for sending bundles
         let sender_trigger = BundleSenderTrigger::new(
+            &task_spawner,
             &self.pool,
             self.bundle_action_receiver.take().unwrap(),
             Duration::from_millis(self.chain_spec.bundle_max_send_interval_millis),
         )
-        .await?;
+        .await
+        .expect("Failed to create bundle sender trigger");
 
         // initial state
         let mut state =
@@ -148,50 +168,54 @@ where
         loop {
             if let Err(e) = self.step_state(&mut state).await {
                 error!("Error in bundle sender loop: {e:#?}");
-                self.metrics.increment_state_machine_errors();
+                self.metrics.state_machine_errors.increment(1);
                 state.reset();
             }
         }
     }
 }
 
-impl<UO, P, E, T, C> BundleSenderImpl<UO, P, E, T, C>
+impl<P, EP, T, C> BundleSenderImpl<P, EP, T, C>
 where
-    UO: UserOperation,
-    P: BundleProposer<UO = UO>,
-    E: EntryPoint + BundleHandler<UO = UO>,
+    EP: ProvidersWithEntryPointT,
+    P: BundleProposer<UO = EP::UO>,
     T: TransactionTracker,
     C: Pool,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        builder_index: u64,
+        builder_tag: String,
         bundle_action_receiver: mpsc::Receiver<BundleSenderAction>,
         chain_spec: ChainSpec,
-        beneficiary: Address,
+        sender_eoa: Address,
+        submission_proxy: Option<Arc<dyn SubmissionProxy>>,
         proposer: P,
-        entry_point: E,
+        ep_providers: EP,
         transaction_tracker: T,
         pool: C,
         settings: Settings,
         event_sender: broadcast::Sender<WithEntryPoint<BuilderEvent>>,
     ) -> Self {
         Self {
-            builder_index,
+            builder_tag: builder_tag.clone(),
             bundle_action_receiver: Some(bundle_action_receiver),
             chain_spec,
-            beneficiary,
+            sender_eoa,
+            submission_proxy,
             proposer,
             transaction_tracker: Some(transaction_tracker),
             pool,
             settings,
             event_sender,
-            metrics: BuilderMetrics {
-                builder_index,
-                entry_point: entry_point.address(),
-            },
-            entry_point,
-            _uo_type: PhantomData,
+            metrics: BuilderMetric::new_with_labels(&[
+                (
+                    "entry_point",
+                    ep_providers.entry_point().address().to_string(),
+                ),
+                ("builder_tag", builder_tag),
+            ]),
+            ep_address: *ep_providers.entry_point().address(),
+            ep_providers,
         }
     }
 
@@ -243,41 +267,44 @@ where
             }
             Ok(SendBundleAttemptResult::NoOperationsInitially) => {
                 debug!("No operations available initially");
-                state.complete(Some(SendBundleResult::NoOperationsInitially));
+                state.no_operations();
             }
             Ok(SendBundleAttemptResult::NoOperationsAfterSimulation) => {
                 debug!("No operations available after simulation");
-                state.complete(Some(SendBundleResult::NoOperationsInitially));
+                state.no_operations();
             }
             Ok(SendBundleAttemptResult::NoOperationsAfterFeeFilter) => {
                 debug!("No operations to bundle after fee filtering");
                 if let Some(underpriced_info) = inner.underpriced_info {
                     // If we are here, there are UOs in the pool that may be correctly priced, but are being blocked by an underpriced replacement
                     // after a fee increase. If we repeatedly get into this state, initiate a cancellation.
-                    if block_number - underpriced_info.since_block
+                    if block_number.saturating_sub(underpriced_info.since_block)
                         >= self.settings.max_replacement_underpriced_blocks
                     {
                         warn!("No operations available, but last replacement underpriced, moving to cancelling state. Round: {}. Since block {}. Current block {}. Max underpriced blocks: {}", underpriced_info.rounds, underpriced_info.since_block, block_number, self.settings.max_replacement_underpriced_blocks);
                         state.update(InnerState::Cancelling(inner.to_cancelling()));
                     } else {
                         info!("No operations available, but last replacement underpriced, starting over and waiting for next trigger. Round: {}. Since block {}. Current block {}", underpriced_info.rounds, underpriced_info.since_block, block_number);
-                        state.update_and_abandon(InnerState::Building(inner.underpriced_round()));
+                        // Abandon the transaction tracker when we start the next bundle attempt fresh, may cause a `ReplacementUnderpriced` in next round
+                        state.transaction_tracker.abandon();
+                        state.update(InnerState::Building(inner.underpriced_round()));
                     }
                 } else if inner.fee_increase_count > 0 {
                     warn!(
                         "Abandoning bundle after {} fee increases, no operations available after fee increase",
                         inner.fee_increase_count
                     );
-                    self.metrics.increment_bundle_txns_abandoned();
+                    self.metrics.bundle_txns_abandoned.increment(1);
 
                     // abandon the bundle by starting a new bundle process
                     // If the node we are using still has the transaction in the mempool, its
                     // possible we will get a `ReplacementUnderpriced` on the next iteration
                     // and will start a cancellation.
-                    state.abandon();
+                    state.transaction_tracker.abandon();
+                    state.initial();
                 } else {
                     debug!("No operations available, waiting for next trigger");
-                    state.complete(Some(SendBundleResult::NoOperationsInitially));
+                    state.no_operations();
                 }
             }
             Ok(SendBundleAttemptResult::NonceTooLow) => {
@@ -285,23 +312,38 @@ where
                 info!("Nonce too low, starting new bundle attempt");
                 state.reset();
             }
+            Ok(SendBundleAttemptResult::Underpriced) => {
+                info!(
+                    "Bundle underpriced, marking as underpriced. Num fee increases {:?}",
+                    inner.fee_increase_count
+                );
+                state.update(InnerState::Building(inner.underpriced(block_number)));
+            }
             Ok(SendBundleAttemptResult::ReplacementUnderpriced) => {
                 info!("Replacement transaction underpriced, marking as underpriced. Num fee increases {:?}", inner.fee_increase_count);
                 // unabandon to allow fee estimation to consider any submitted transactions, wait for next trigger
-                state.update_and_unabandon(InnerState::Building(
-                    inner.replacement_underpriced(block_number),
-                ));
+                state.transaction_tracker.unabandon();
+                state.update(InnerState::Building(inner.underpriced(block_number)));
             }
             Ok(SendBundleAttemptResult::ConditionNotMet) => {
                 info!("Condition not met, notifying proposer and starting new bundle attempt");
                 self.proposer.notify_condition_not_met();
                 state.update(InnerState::Building(inner.retry()));
             }
+            Ok(SendBundleAttemptResult::Rejected) => {
+                // Bundle was rejected, try with a higher price
+                // May want to consider a simple retry instead of increasing fees, but this should be rare
+                info!(
+                    "Bundle rejected, assuming underpriced. Num fee increases {:?}",
+                    inner.fee_increase_count
+                );
+                state.update(InnerState::Building(inner.underpriced(block_number)));
+            }
             Err(error) => {
                 error!("Bundle send error {error:?}");
-                self.metrics.increment_bundle_txns_failed();
-                let send_bundle_result = Some(SendBundleResult::Error(error));
-                state.complete(send_bundle_result);
+                self.metrics.bundle_txns_failed.increment(1);
+                state.bundle_error(error);
+                state.transaction_tracker.reset().await;
             }
         }
 
@@ -323,40 +365,45 @@ where
                     gas_used,
                     tx_hash,
                     nonce,
+                    is_success,
                     ..
                 } => {
-                    info!("Bundle transaction mined");
-                    self.metrics.process_bundle_txn_success(gas_limit, gas_used);
+                    info!("Bundle transaction mined: block number {block_number}, attempt number {attempt_number}, gas limit {gas_limit:?}, gas used {gas_used:?}, tx hash {tx_hash}, nonce {nonce}, success {is_success}");
+
+                    self.metrics
+                        .process_bundle_txn_mined(gas_limit, gas_used, is_success);
+
+                    if !is_success {
+                        if let Err(e) = self.process_revert(tx_hash).await {
+                            error!("Failed to process revert for bundle transaction {tx_hash:?}: {e:#?}");
+                        }
+                    }
+
                     self.emit(BuilderEvent::transaction_mined(
-                        self.builder_index,
+                        self.builder_tag.clone(),
                         tx_hash,
-                        nonce.low_u64(),
+                        nonce,
                         block_number,
                     ));
-                    let send_bundle_result = Some(SendBundleResult::Success {
-                        block_number,
-                        attempt_number,
-                        tx_hash,
-                    });
-                    state.complete(send_bundle_result);
+                    state.bundle_mined(block_number, attempt_number, tx_hash);
                 }
                 TrackerUpdate::LatestTxDropped { nonce } => {
                     info!("Latest transaction dropped, starting new bundle attempt");
                     self.emit(BuilderEvent::latest_transaction_dropped(
-                        self.builder_index,
-                        nonce.low_u64(),
+                        self.builder_tag.clone(),
+                        nonce,
                     ));
-                    self.metrics.increment_bundle_txns_dropped();
+                    self.metrics.bundle_txns_dropped.increment(1);
                     // try again, increasing fees
                     state.update(InnerState::Building(inner.to_building()));
                 }
                 TrackerUpdate::NonceUsedForOtherTx { nonce } => {
                     info!("Nonce used externally, starting new bundle attempt");
                     self.emit(BuilderEvent::nonce_used_for_other_transaction(
-                        self.builder_index,
-                        nonce.low_u64(),
+                        self.builder_tag.clone(),
+                        nonce,
                     ));
-                    self.metrics.increment_bundle_txns_nonce_used();
+                    self.metrics.bundle_txns_nonce_used.increment(1);
                     state.reset();
                 }
             }
@@ -369,7 +416,7 @@ where
                 self.settings.max_blocks_to_wait_for_mine,
                 inner.fee_increase_count + 1
             );
-            self.metrics.increment_bundle_txn_fee_increases();
+            self.metrics.bundle_txn_fee_increases.increment(1);
             state.update(InnerState::Building(inner.to_building()))
         }
 
@@ -394,13 +441,13 @@ where
 
         let cancel_res = state
             .transaction_tracker
-            .cancel_transaction(self.entry_point.address(), estimated_fees)
+            .cancel_transaction(estimated_fees)
             .await;
 
         match cancel_res {
             Ok(Some(_)) => {
                 info!("Cancellation transaction sent, waiting for confirmation");
-                self.metrics.increment_cancellation_txns_sent();
+                self.metrics.cancellation_txns_sent.increment(1);
 
                 state.update(InnerState::CancelPending(inner.to_cancel_pending(
                     state.block_number() + self.settings.max_blocks_to_wait_for_mine,
@@ -408,15 +455,17 @@ where
             }
             Ok(None) => {
                 info!("Soft cancellation or no transaction to cancel, starting new bundle attempt");
-                self.metrics.increment_soft_cancellations();
+                self.metrics.soft_cancellations.increment(1);
                 state.reset();
             }
-            Err(TransactionTrackerError::ReplacementUnderpriced) => {
-                info!("Replacement transaction underpriced during cancellation, trying again");
+            Err(TransactionTrackerError::Rejected)
+            | Err(TransactionTrackerError::Underpriced)
+            | Err(TransactionTrackerError::ReplacementUnderpriced) => {
+                info!("Transaction underpriced/rejected during cancellation, trying again. {cancel_res:?}");
                 if inner.fee_increase_count >= self.settings.max_cancellation_fee_increases {
                     // abandon the cancellation
                     warn!("Abandoning cancellation after max fee increases {}, starting new bundle attempt", inner.fee_increase_count);
-                    self.metrics.increment_cancellations_abandoned();
+                    self.metrics.cancellations_abandoned.increment(1);
                     state.reset();
                 } else {
                     // Increase fees again
@@ -432,9 +481,16 @@ where
                 info!("Nonce too low during cancellation, starting new bundle attempt");
                 state.reset();
             }
-            Err(e) => {
+            Err(TransactionTrackerError::ConditionNotMet) => {
+                error!(
+                    "Unexpected condition not met during cancellation, starting new bundle attempt"
+                );
+                self.metrics.cancellation_txns_failed.increment(1);
+                state.reset();
+            }
+            Err(TransactionTrackerError::Other(e)) => {
                 error!("Failed to cancel transaction, moving back to building state: {e:#?}");
-                self.metrics.increment_cancellation_txns_failed();
+                self.metrics.cancellation_txns_failed.increment(1);
                 state.reset();
             }
         }
@@ -459,10 +515,11 @@ where
                     // mined
                     let fee = gas_used.zip(gas_price).map(|(used, price)| used * price);
                     info!("Cancellation transaction mined. Price (wei) {fee:?}");
-                    self.metrics.increment_cancellation_txns_mined();
+                    self.metrics.cancellation_txns_mined.increment(1);
                     if let Some(fee) = fee {
                         self.metrics
-                            .increment_cancellation_txns_total_fee(fee.as_u64());
+                            .cancellation_txns_total_fee
+                            .increment(fee as u64);
                     };
                 }
                 TrackerUpdate::LatestTxDropped { .. } => {
@@ -481,7 +538,7 @@ where
             if inner.fee_increase_count >= self.settings.max_cancellation_fee_increases {
                 // abandon the cancellation
                 warn!("Abandoning cancellation after max fee increases {}, starting new bundle attempt", inner.fee_increase_count);
-                self.metrics.increment_cancellations_abandoned();
+                self.metrics.cancellations_abandoned.increment(1);
                 state.reset();
             } else {
                 // start replacement, don't wait for trigger
@@ -510,6 +567,16 @@ where
     ) -> anyhow::Result<SendBundleAttemptResult> {
         let (nonce, required_fees) = state.transaction_tracker.get_nonce_and_required_fees()?;
 
+        let mut update_idle = |metrics: &BuilderMetric| {
+            let block_number = state.block_number();
+            if let Some(last_idle_block) = state.last_idle_block {
+                metrics
+                    .builder_idle_blocks
+                    .increment(block_number.saturating_sub(last_idle_block));
+            }
+            state.last_idle_block = Some(block_number);
+        };
+
         let bundle = match self
             .proposer
             .make_bundle(required_fees, fee_increase_count > 0)
@@ -517,9 +584,11 @@ where
         {
             Ok(bundle) => bundle,
             Err(BundleProposerError::NoOperationsInitially) => {
+                update_idle(&self.metrics);
                 return Ok(SendBundleAttemptResult::NoOperationsInitially);
             }
             Err(BundleProposerError::NoOperationsAfterFeeFilter) => {
+                update_idle(&self.metrics);
                 return Ok(SendBundleAttemptResult::NoOperationsAfterFeeFilter);
             }
             Err(e) => bail!("Failed to make bundle: {e:?}"),
@@ -527,38 +596,41 @@ where
 
         let Some(bundle_tx) = self.get_bundle_tx(nonce, bundle).await? else {
             self.emit(BuilderEvent::formed_bundle(
-                self.builder_index,
+                self.builder_tag.clone(),
                 None,
-                nonce.low_u64(),
+                nonce,
                 fee_increase_count,
                 required_fees,
             ));
+            update_idle(&self.metrics);
             return Ok(SendBundleAttemptResult::NoOperationsAfterSimulation);
         };
         println!("HC before BundleTx op_hashes {:?}", bundle_tx.op_hashes);
+
+        state.last_idle_block = None;
+
         let BundleTx {
             tx,
             expected_storage,
             op_hashes,
         } = bundle_tx;
 
-        self.metrics.increment_bundle_txns_sent();
-
         let send_result = state
             .transaction_tracker
-            .send_transaction(tx.clone(), &expected_storage)
+            .send_transaction(tx.clone(), &expected_storage, state.block_number())
             .await;
+        self.metrics.bundle_txns_sent.increment(1);
 
         match send_result {
             Ok(tx_hash) => {
                 self.emit(BuilderEvent::formed_bundle(
-                    self.builder_index,
+                    self.builder_tag.clone(),
                     Some(BundleTxDetails {
                         tx_hash,
                         tx,
                         op_hashes: Arc::new(op_hashes),
                     }),
-                    nonce.low_u64(),
+                    nonce,
                     fee_increase_count,
                     required_fees,
                 ));
@@ -566,23 +638,33 @@ where
                 Ok(SendBundleAttemptResult::Success)
             }
             Err(TransactionTrackerError::NonceTooLow) => {
-                self.metrics.increment_bundle_txn_nonce_too_low();
+                self.metrics.bundle_txn_nonce_too_low.increment(1);
                 warn!("Bundle attempt nonce too low");
                 Ok(SendBundleAttemptResult::NonceTooLow)
             }
+            Err(TransactionTrackerError::Underpriced) => {
+                self.metrics.bundle_txn_underpriced.increment(1);
+                warn!("Bundle attempt underpriced");
+                Ok(SendBundleAttemptResult::Underpriced)
+            }
             Err(TransactionTrackerError::ReplacementUnderpriced) => {
-                self.metrics.increment_bundle_txn_replacement_underpriced();
+                self.metrics.bundle_replacement_underpriced.increment(1);
                 warn!("Bundle attempt replacement transaction underpriced");
                 Ok(SendBundleAttemptResult::ReplacementUnderpriced)
             }
             Err(TransactionTrackerError::ConditionNotMet) => {
-                self.metrics.increment_bundle_txn_condition_not_met();
+                self.metrics.bundle_txn_condition_not_met.increment(1);
                 warn!("Bundle attempt condition not met");
                 Ok(SendBundleAttemptResult::ConditionNotMet)
             }
-            Err(e) => {
+            Err(TransactionTrackerError::Rejected) => {
+                self.metrics.bundle_txn_rejected.increment(1);
+                warn!("Bundle attempt rejected");
+                Ok(SendBundleAttemptResult::Rejected)
+            }
+            Err(TransactionTrackerError::Other(e)) => {
                 error!("Failed to send bundle with unexpected error: {e:?}");
-                Err(e.into())
+                Err(e)
             }
         }
     }
@@ -591,8 +673,8 @@ where
     /// it, or `None` if there are no valid operations available.
     async fn get_bundle_tx(
         &mut self,
-        nonce: U256,
-        bundle: Bundle<UO>,
+        nonce: u64,
+        bundle: Bundle<EP::UO>,
     ) -> anyhow::Result<Option<BundleTx>> {
         let remove_ops_future = async {
             if bundle.rejected_ops.is_empty() {
@@ -634,15 +716,19 @@ where
             bundle.rejected_ops.len(),
             bundle.entity_updates.len()
         );
-        let op_hashes: Vec<_> = bundle.iter_ops().map(|op| self.op_hash(op)).collect();
+
+        let op_hashes: Vec<_> = bundle.iter_ops().map(|op| op.hash()).collect();
         println!("HC bundle_sender bundle {:?} OH {:?}", bundle, op_hashes);
-        let mut tx = self.entry_point.get_send_bundle_transaction(
+
+        let mut tx = self.ep_providers.entry_point().get_send_bundle_transaction(
             bundle.ops_per_aggregator,
-            self.beneficiary,
+            self.sender_eoa,
             bundle.gas_estimate,
             bundle.gas_fees,
+            self.submission_proxy.as_ref().map(|p| p.address()),
         );
-        tx.set_nonce(nonce);
+
+        tx = tx.nonce(nonce);
         Ok(Some(BundleTx {
             tx,
             expected_storage: bundle.expected_storage,
@@ -650,43 +736,126 @@ where
         }))
     }
 
-    async fn remove_ops_from_pool(&self, ops: &[UO]) -> anyhow::Result<()> {
+    async fn remove_ops_from_pool(&self, ops: &[EP::UO]) -> anyhow::Result<()> {
         self.pool
-            .remove_ops(
-                self.entry_point.address(),
-                ops.iter()
-                    .map(|op| op.hash(self.entry_point.address(), self.chain_spec.id))
-                    .collect(),
-            )
+            .remove_ops(self.ep_address, ops.iter().map(|op| op.hash()).collect())
+            .await
+            .context("builder should remove rejected ops from pool")
+    }
+
+    async fn remove_ops_from_pool_by_hash(&self, hashes: Vec<B256>) -> anyhow::Result<()> {
+        self.pool
+            .remove_ops(self.ep_address, hashes)
             .await
             .context("builder should remove rejected ops from pool")
     }
 
     async fn update_entities_in_pool(&self, entity_updates: &[EntityUpdate]) -> anyhow::Result<()> {
         self.pool
-            .update_entities(self.entry_point.address(), entity_updates.to_vec())
+            .update_entities(self.ep_address, entity_updates.to_vec())
             .await
             .context("builder should remove update entities in the pool")
     }
 
-    fn emit(&self, event: BuilderEvent) {
-        let _ = self.event_sender.send(WithEntryPoint {
-            entry_point: self.entry_point.address(),
-            event,
-        });
+    async fn process_revert(&self, tx_hash: B256) -> anyhow::Result<()> {
+        warn!("Bundle transaction {tx_hash:?} reverted onchain");
+
+        let trace_options = GethDebugTracingOptions::new_tracer(
+            GethDebugTracerType::BuiltInTracer(GethDebugBuiltInTracerType::CallTracer),
+        )
+        .with_call_config(GethDebugTracerCallConfig::default().only_top_call());
+
+        let trace = self
+            .ep_providers
+            .evm()
+            .debug_trace_transaction(tx_hash, trace_options)
+            .await
+            .context("should have fetched trace from provider")?;
+
+        let frame = trace
+            .try_into_call_frame()
+            .context("trace is not a call tracer")?;
+
+        let ops = EP::EntryPoint::decode_ops_from_calldata(&self.chain_spec, &frame.input);
+
+        let Some(revert_data) = frame.output else {
+            tracing::error!("revert has not output, removing all ops from bundle from pool");
+            let to_remove = ops
+                .iter()
+                .flat_map(|ops| ops.user_ops.iter().map(|op| op.hash()))
+                .collect();
+            return self.remove_ops_from_pool_by_hash(to_remove).await;
+        };
+        tracing::warn!("Onchain revert data for {tx_hash:?}: {revert_data:?}");
+
+        // If we have a submission proxy, use it to process the revert first
+        if let Some(proxy) = &self.submission_proxy {
+            let ops = ops
+                .clone()
+                .into_iter()
+                .map(|uo| uo.into_uo_variants())
+                .collect::<Vec<_>>();
+            let to_remove = proxy.process_revert(&revert_data, &ops).await;
+            if !to_remove.is_empty() {
+                return self.remove_ops_from_pool_by_hash(to_remove).await;
+            }
+        }
+
+        let handle_ops_out = EP::EntryPoint::decode_handle_ops_revert(
+            frame.error.as_ref().map_or("", |e| e),
+            &revert_data,
+        );
+        tracing::warn!(
+            "reverted transaction {tx_hash:?} decoded handle ops out: {handle_ops_out:?}"
+        );
+
+        let to_remove = match handle_ops_out {
+            HandleOpsOut::Success => {
+                bail!("handle ops returned success");
+            }
+            HandleOpsOut::FailedOp(index, _) => {
+                tracing::warn!("removing op from pool for reverted bundle op index {index:?}",);
+                ops.iter()
+                    .flat_map(|ops| ops.user_ops.iter())
+                    .nth(index)
+                    .map(|op| vec![op.hash()])
+                    .unwrap_or_default()
+            }
+            HandleOpsOut::SignatureValidationFailed(aggregator) => {
+                tracing::warn!(
+                    "removing all ops from pool for reverted bundle for aggregator {aggregator:?}",
+                );
+                ops.iter()
+                    .find(|op| op.aggregator == aggregator)
+                    .map(|ops| ops.user_ops.iter().map(|op| op.hash()).collect())
+                    .unwrap_or_default()
+            }
+            HandleOpsOut::Revert(_) | HandleOpsOut::PostOpRevert => {
+                tracing::warn!("removing all ops from pool for reverted bundle");
+                ops.iter()
+                    .flat_map(|ops| ops.user_ops.iter().map(|op| op.hash()))
+                    .collect()
+            }
+        };
+
+        self.remove_ops_from_pool_by_hash(to_remove).await
     }
 
-    fn op_hash(&self, op: &UO) -> H256 {
-        op.hash(self.entry_point.address(), self.chain_spec.id)
+    fn emit(&self, event: BuilderEvent) {
+        let _ = self.event_sender.send(WithEntryPoint {
+            entry_point: self.ep_address,
+            event,
+        });
     }
 }
 
 struct SenderMachineState<T, TRIG> {
     trigger: TRIG,
-    transaction_tracker: T,
+    pub transaction_tracker: T,
     send_bundle_response: Option<oneshot::Sender<SendBundleResult>>,
     inner: InnerState,
     requires_reset: bool,
+    pub last_idle_block: Option<u64>,
 }
 
 impl<T: TransactionTracker, TRIG: Trigger> SenderMachineState<T, TRIG> {
@@ -697,14 +866,26 @@ impl<T: TransactionTracker, TRIG: Trigger> SenderMachineState<T, TRIG> {
             send_bundle_response: None,
             inner: InnerState::new(),
             requires_reset: false,
+            last_idle_block: None,
         }
     }
 
+    // Custom update function, use to move to a non-building state
     fn update(&mut self, inner: InnerState) {
         self.inner = inner;
     }
 
-    // resets the state machine to the initial state, doesn't wait for next trigger
+    /*
+     * Reset moves
+     */
+
+    // Move to the initial state, will wait for the next trigger.
+    // Preserves the transaction tracker state.
+    fn initial(&mut self) {
+        self.inner = InnerState::new();
+    }
+
+    // Resets the state and transaction tracker, doesn't wait for next trigger
     fn reset(&mut self) {
         self.requires_reset = true;
         let building_state = BuildingState {
@@ -715,34 +896,53 @@ impl<T: TransactionTracker, TRIG: Trigger> SenderMachineState<T, TRIG> {
         self.inner = InnerState::Building(building_state);
     }
 
-    fn update_and_abandon(&mut self, inner: InnerState) {
-        self.update(inner);
-        self.transaction_tracker.abandon();
+    /*
+     * Completion moves, these always end back at the Building state and send a result.
+     */
+
+    // Sends an error result and moves to initial state
+    fn bundle_error(&mut self, err: anyhow::Error) {
+        self.send_result(SendBundleResult::Error(err));
+        self.initial();
     }
 
-    // update the state and unabandoned the transaction tracker
-    // this will cause any "abandoned" transactions to be considered during the next
-    // fee estimation.
-    fn update_and_unabandon(&mut self, next_state: InnerState) {
-        self.transaction_tracker.unabandon();
-        self.inner = next_state;
+    // Sends a success result and moves to initial state
+    //
+    // In auto mode, will not wait for trigger and will move to the next bundle.
+    // In manual mode, will wait for the next trigger
+    fn bundle_mined(&mut self, block_number: u64, attempt_number: u64, tx_hash: B256) {
+        self.send_result(SendBundleResult::Success {
+            block_number,
+            attempt_number,
+            tx_hash,
+        });
+        self.update(InnerState::Building(BuildingState {
+            wait_for_trigger: self.trigger.builder_must_wait_for_trigger(),
+            fee_increase_count: 0,
+            underpriced_info: None,
+        }));
     }
 
-    fn abandon(&mut self) {
-        self.transaction_tracker.abandon();
-        self.inner = InnerState::new();
-    }
+    // No operations are available, send result, move to initial state
+    // Preserves fee/underpriced info for further rounds.
+    fn no_operations(&mut self) {
+        self.send_result(SendBundleResult::NoOperationsInitially);
 
-    fn complete(&mut self, result: Option<SendBundleResult>) {
-        if let Some(result) = result {
-            if let Some(r) = self.send_bundle_response.take() {
-                if r.send(result).is_err() {
-                    error!("Failed to send bundle result to manual caller");
-                }
+        self.inner = match &self.inner {
+            InnerState::Building(s) => InnerState::Building(BuildingState {
+                wait_for_trigger: true,
+                fee_increase_count: s.fee_increase_count,
+                underpriced_info: s.underpriced_info,
+            }),
+            _ => {
+                panic!("invalid state transition, no_operations called when not in building state")
             }
         }
-        self.inner = InnerState::new();
     }
+
+    /*
+     * Helpers
+     */
 
     async fn wait_for_trigger(&mut self) -> anyhow::Result<Option<TrackerUpdate>> {
         if self.requires_reset {
@@ -775,6 +975,14 @@ impl<T: TransactionTracker, TRIG: Trigger> SenderMachineState<T, TRIG> {
 
     fn block_number(&self) -> u64 {
         self.trigger.last_block().block_number
+    }
+
+    fn send_result(&mut self, result: SendBundleResult) {
+        if let Some(r) = self.send_bundle_response.take() {
+            if r.send(result).is_err() {
+                error!("Failed to send bundle result to manual caller");
+            }
+        }
     }
 }
 
@@ -835,10 +1043,10 @@ impl BuildingState {
         self
     }
 
-    // Mark a replacement as underpriced
+    // Mark as underpriced
     //
     // The next state will wait for a trigger to reduce bundle building loops
-    fn replacement_underpriced(self, block_number: u64) -> Self {
+    fn underpriced(self, block_number: u64) -> Self {
         let ui = if let Some(underpriced_info) = self.underpriced_info {
             underpriced_info
         } else {
@@ -857,7 +1065,7 @@ impl BuildingState {
 
     // Finalize an underpriced round.
     //
-    // This will clear out the number of fee increases and increment the number of underpriced rounds.
+    // This will clear out the count of fee increases and increment the count of underpriced rounds.
     // Use this when we are in an underpriced state, but there are no longer any UOs available to bundle.
     fn underpriced_round(self) -> Self {
         let mut underpriced_info = self
@@ -925,12 +1133,21 @@ impl CancelPendingState {
 #[async_trait]
 #[cfg_attr(test, automock)]
 trait Trigger {
+    // Wait for the next trigger to send a bundle
+    // Depending on the mode this will either wait for the next block, a timer tick, or a manual trigger
     async fn wait_for_trigger(
         &mut self,
     ) -> anyhow::Result<Option<oneshot::Sender<SendBundleResult>>>;
 
+    // Wait for the next block
     async fn wait_for_block(&mut self) -> anyhow::Result<NewHead>;
 
+    // Whether the builder must wait for a trigger to send a bundle
+    //
+    // When in auto mode the builder doesn't need to wait for a trigger to send a bundle
+    fn builder_must_wait_for_trigger(&self) -> bool;
+
+    // Get the last block processed by the trigger
     fn last_block(&self) -> &NewHead;
 }
 
@@ -982,7 +1199,7 @@ impl Trigger for BundleSenderTrigger {
                 a = self.bundle_action_receiver.recv() => {
                     match a {
                         Some(BundleSenderAction::ChangeMode(mode)) => {
-                            debug!("changing bundling mode to {mode:?}");
+                            info!("changing bundling mode to {mode:?}");
                             self.bundling_mode = mode;
                             continue;
                         },
@@ -1022,18 +1239,35 @@ impl Trigger for BundleSenderTrigger {
         Ok(self.last_block.clone())
     }
 
+    fn builder_must_wait_for_trigger(&self) -> bool {
+        match self.bundling_mode {
+            BundlingMode::Manual => true,
+            BundlingMode::Auto => false,
+        }
+    }
+
     fn last_block(&self) -> &NewHead {
         &self.last_block
     }
 }
 
 impl BundleSenderTrigger {
-    async fn new<P: Pool>(
+    async fn new<P: Pool, T: TaskSpawner>(
+        task_spawner: &T,
         pool_client: &P,
         bundle_action_receiver: mpsc::Receiver<BundleSenderAction>,
         timer_interval: Duration,
     ) -> anyhow::Result<Self> {
-        let block_rx = Self::start_block_stream(pool_client).await?;
+        let Ok(new_heads) = pool_client.subscribe_new_heads().await else {
+            error!("Failed to subscribe to new blocks");
+            bail!("failed to subscribe to new blocks");
+        };
+        let (block_tx, block_rx) = mpsc::unbounded_channel();
+
+        task_spawner.spawn_critical(
+            "block stream",
+            Box::pin(Self::block_stream_task(new_heads, block_tx)),
+        );
 
         Ok(Self {
             bundling_mode: BundlingMode::Auto,
@@ -1041,39 +1275,30 @@ impl BundleSenderTrigger {
             bundle_action_receiver,
             timer: tokio::time::interval(timer_interval),
             last_block: NewHead {
-                block_hash: H256::zero(),
+                block_hash: B256::ZERO,
                 block_number: 0,
             },
         })
     }
 
-    async fn start_block_stream<P: Pool>(
-        pool_client: &P,
-    ) -> anyhow::Result<UnboundedReceiver<NewHead>> {
-        let Ok(mut new_heads) = pool_client.subscribe_new_heads().await else {
-            error!("Failed to subscribe to new blocks");
-            bail!("failed to subscribe to new blocks");
-        };
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            loop {
-                match new_heads.next().await {
-                    Some(b) => {
-                        if tx.send(b).is_err() {
-                            error!("Failed to buffer new block for bundle sender");
-                            return;
-                        }
-                    }
-                    None => {
-                        error!("Block stream ended");
+    async fn block_stream_task(
+        mut new_heads: Pin<Box<dyn Stream<Item = NewHead> + Send>>,
+        block_tx: UnboundedSender<NewHead>,
+    ) {
+        loop {
+            match new_heads.next().await {
+                Some(b) => {
+                    if block_tx.send(b).is_err() {
+                        error!("Failed to buffer new block for bundle sender");
                         return;
                     }
                 }
+                None => {
+                    error!("Block stream ended");
+                    return;
+                }
             }
-        });
-
-        Ok(rx)
+        }
     }
 
     fn consume_blocks(&mut self) -> anyhow::Result<()> {
@@ -1095,99 +1320,91 @@ impl BundleSenderTrigger {
     }
 }
 
-#[derive(Debug, Clone)]
-struct BuilderMetrics {
-    builder_index: u64,
-    entry_point: Address,
+#[derive(Metrics)]
+#[metrics(scope = "builder")]
+struct BuilderMetric {
+    #[metric(describe = "the count of bundle transactions already sent.")]
+    bundle_txns_sent: Counter,
+    #[metric(describe = "the count of successful bundle transactions.")]
+    bundle_txns_success: Counter,
+    #[metric(describe = "the count of reverted bundle transactions.")]
+    bundle_txns_reverted: Counter,
+    #[metric(describe = "the count of bundle gas limit.")]
+    bundle_gas_limit: Counter,
+    #[metric(describe = "the count of bundle gas used.")]
+    bundle_gas_used: Counter,
+    #[metric(describe = "the count of dropped bundle transactions.")]
+    bundle_txns_dropped: Counter,
+    #[metric(describe = "the count of anabdoned bundle transactions.")]
+    bundle_txns_abandoned: Counter,
+    #[metric(describe = "the count of failed bundle transactions.")]
+    bundle_txns_failed: Counter,
+    #[metric(describe = "the count of bundle transaction nonce used events.")]
+    bundle_txns_nonce_used: Counter,
+    #[metric(describe = "the count of bundle transactions fee increase events.")]
+    bundle_txn_fee_increases: Counter,
+    #[metric(describe = "the count of bundle transactions underpriced events.")]
+    bundle_txn_underpriced: Counter,
+    #[metric(describe = "the count of bundle transactions underpriced replacement events.")]
+    bundle_replacement_underpriced: Counter,
+    #[metric(describe = "the count of bundle transactions nonce too low events.")]
+    bundle_txn_nonce_too_low: Counter,
+    #[metric(describe = "the count of bundle transactions condition not met events.")]
+    bundle_txn_condition_not_met: Counter,
+    #[metric(describe = "the count of bundle transactions rejected.")]
+    bundle_txn_rejected: Counter,
+    #[metric(describe = "the count of cancellation bundle transactions sent events.")]
+    cancellation_txns_sent: Counter,
+    #[metric(describe = "the count of cancellation bundle transactions mined events.")]
+    cancellation_txns_mined: Counter,
+    #[metric(describe = "the total fee of cancellation bundle transactions.")]
+    cancellation_txns_total_fee: Counter,
+    #[metric(describe = "the count of cancellation bundle transactions abandon events.")]
+    cancellations_abandoned: Counter,
+    #[metric(describe = "the count of soft cancellation bundle transactions events.")]
+    soft_cancellations: Counter,
+    #[metric(describe = "the count of cancellation bundle transactions failed events.")]
+    cancellation_txns_failed: Counter,
+    #[metric(describe = "the count of state machine errors.")]
+    state_machine_errors: Counter,
+    #[metric(describe = "the count of blocks this builder has been idle.")]
+    builder_idle_blocks: Counter,
 }
 
-impl BuilderMetrics {
-    fn increment_bundle_txns_sent(&self) {
-        metrics::counter!("builder_bundle_txns_sent", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string())
-            .increment(1);
-    }
-
-    fn process_bundle_txn_success(&self, gas_limit: Option<U256>, gas_used: Option<U256>) {
-        metrics::counter!("builder_bundle_txns_success", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
+impl BuilderMetric {
+    fn process_bundle_txn_mined(
+        &self,
+        gas_limit: Option<u64>,
+        gas_used: Option<u128>,
+        is_success: bool,
+    ) {
+        if is_success {
+            self.bundle_txns_success.increment(1);
+        } else {
+            self.bundle_txns_reverted.increment(1);
+        }
 
         if let Some(limit) = gas_limit {
-            metrics::counter!("builder_bundle_gas_limit", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(limit.as_u64());
+            self.bundle_gas_limit.increment(limit);
         }
         if let Some(used) = gas_used {
-            metrics::counter!("builder_bundle_gas_used", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(used.as_u64());
+            self.bundle_gas_used
+                .increment(used.try_into().unwrap_or(u64::MAX));
         }
-    }
-
-    fn increment_bundle_txns_dropped(&self) {
-        metrics::counter!("builder_bundle_txns_dropped", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    // used when we decide to stop trying a transaction
-    fn increment_bundle_txns_abandoned(&self) {
-        metrics::counter!("builder_bundle_txns_abandoned", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    // used when sending a transaction fails
-    fn increment_bundle_txns_failed(&self) {
-        metrics::counter!("builder_bundle_txns_failed", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_bundle_txns_nonce_used(&self) {
-        metrics::counter!("builder_bundle_txns_nonce_used", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_bundle_txn_fee_increases(&self) {
-        metrics::counter!("builder_bundle_fee_increases", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_bundle_txn_replacement_underpriced(&self) {
-        metrics::counter!("builder_bundle_replacement_underpriced", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_bundle_txn_nonce_too_low(&self) {
-        metrics::counter!("builder_bundle_nonce_too_low", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_bundle_txn_condition_not_met(&self) {
-        metrics::counter!("builder_bundle_condition_not_met", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_cancellation_txns_sent(&self) {
-        metrics::counter!("builder_cancellation_txns_sent", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_cancellation_txns_mined(&self) {
-        metrics::counter!("builder_cancellation_txns_mined", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_cancellation_txns_total_fee(&self, fee: u64) {
-        metrics::counter!("builder_cancellation_txns_total_fee", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(fee);
-    }
-
-    fn increment_cancellations_abandoned(&self) {
-        metrics::counter!("builder_cancellations_abandoned", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_soft_cancellations(&self) {
-        metrics::counter!("builder_soft_cancellations", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_cancellation_txns_failed(&self) {
-        metrics::counter!("builder_cancellation_txns_failed", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
-    }
-
-    fn increment_state_machine_errors(&self) {
-        metrics::counter!("builder_state_machine_errors", "entry_point" => self.entry_point.to_string(), "builder_index" => self.builder_index.to_string()).increment(1);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ethers::types::Bytes;
+    use alloy_primitives::{bytes, Bytes};
     use mockall::Sequence;
-    use rundler_provider::MockEntryPointV0_6;
+    use rundler_provider::{
+        GethDebugTracerCallFrame, MockDAGasOracleSync, MockEntryPointV0_6, MockEvmProvider,
+        ProvidersWithEntryPoint,
+    };
     use rundler_types::{
-        chain::ChainSpec, pool::MockPool, v0_6::UserOperation, GasFees, UserOpsPerAggregator,
+        chain::ChainSpec, pool::MockPool, v0_6::UserOperation, GasFees, UserOperation as _,
+        UserOpsPerAggregator,
     };
     use tokio::sync::{broadcast, mpsc};
 
@@ -1205,6 +1422,7 @@ mod tests {
             mock_entry_point,
             mut mock_tracker,
             mut mock_trigger,
+            mock_evm,
         } = new_mocks();
 
         // block 0
@@ -1218,7 +1436,7 @@ mod tests {
         // zero nonce
         mock_tracker
             .expect_get_nonce_and_required_fees()
-            .returning(|| Ok((U256::zero(), None)));
+            .returning(|| Ok((0, None)));
 
         // empty bundle
         mock_proposer
@@ -1226,7 +1444,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Box::pin(async { Ok(Bundle::<UserOperation>::default()) }));
 
-        let mut sender = new_sender(mock_proposer, mock_entry_point);
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, MockPool::new());
 
         // start in building state
         let mut state = SenderMachineState::new(mock_trigger, mock_tracker);
@@ -1250,6 +1468,7 @@ mod tests {
             mut mock_entry_point,
             mut mock_tracker,
             mut mock_trigger,
+            mock_evm,
         } = new_mocks();
 
         // block 0
@@ -1263,7 +1482,7 @@ mod tests {
         // zero nonce
         mock_tracker
             .expect_get_nonce_and_required_fees()
-            .returning(|| Ok((U256::zero(), None)));
+            .returning(|| Ok((0, None)));
 
         // bundle with one op
         mock_proposer
@@ -1274,14 +1493,14 @@ mod tests {
         // should create the bundle txn
         mock_entry_point
             .expect_get_send_bundle_transaction()
-            .returning(|_, _, _, _| TypedTransaction::default());
+            .returning(|_, _, _, _, _| TransactionRequest::default());
 
         // should send the bundle txn
         mock_tracker
             .expect_send_transaction()
-            .returning(|_, _| Box::pin(async { Ok(H256::zero()) }));
+            .returning(|_, _, _| Box::pin(async { Ok(B256::ZERO) }));
 
-        let mut sender = new_sender(mock_proposer, mock_entry_point);
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, MockPool::new());
 
         // start in building state
         let mut state = SenderMachineState::new(mock_trigger, mock_tracker);
@@ -1305,6 +1524,7 @@ mod tests {
             mock_entry_point,
             mut mock_tracker,
             mut mock_trigger,
+            mock_evm,
         } = new_mocks();
 
         let mut seq = Sequence::new();
@@ -1317,7 +1537,7 @@ mod tests {
                 Box::pin(async {
                     Ok(NewHead {
                         block_number: 2,
-                        block_hash: H256::zero(),
+                        block_hash: B256::ZERO,
                     })
                 })
             });
@@ -1337,17 +1557,18 @@ mod tests {
                 Box::pin(async {
                     Ok(Some(TrackerUpdate::Mined {
                         block_number: 2,
-                        nonce: U256::zero(),
+                        nonce: 0,
                         gas_limit: None,
                         gas_used: None,
                         gas_price: None,
-                        tx_hash: H256::zero(),
+                        tx_hash: B256::ZERO,
                         attempt_number: 0,
+                        is_success: true,
                     }))
                 })
             });
 
-        let mut sender = new_sender(mock_proposer, mock_entry_point);
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, MockPool::new());
 
         // start in pending state
         let mut state = SenderMachineState {
@@ -1359,6 +1580,7 @@ mod tests {
                 fee_increase_count: 0,
             }),
             requires_reset: false,
+            last_idle_block: None,
         };
 
         // first step has no update
@@ -1373,7 +1595,7 @@ mod tests {
         assert!(matches!(
             state.inner,
             InnerState::Building(BuildingState {
-                wait_for_trigger: true,
+                wait_for_trigger: false, // don't wait for trigger in auto mode
                 fee_increase_count: 0,
                 underpriced_info: None,
             })
@@ -1387,6 +1609,7 @@ mod tests {
             mock_entry_point,
             mut mock_tracker,
             mut mock_trigger,
+            mock_evm,
         } = new_mocks();
 
         let mut seq = Sequence::new();
@@ -1399,7 +1622,7 @@ mod tests {
             .times(3)
             .returning(|| Box::pin(async { Ok(None) }));
 
-        let mut sender = new_sender(mock_proposer, mock_entry_point);
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, MockPool::new());
 
         // start in pending state
         let mut state = SenderMachineState {
@@ -1411,6 +1634,7 @@ mod tests {
                 fee_increase_count: 0,
             }),
             requires_reset: false,
+            last_idle_block: None,
         };
 
         // first and second step has no update
@@ -1441,6 +1665,7 @@ mod tests {
             mock_entry_point,
             mut mock_tracker,
             mut mock_trigger,
+            mock_evm,
         } = new_mocks();
 
         let mut seq = Sequence::new();
@@ -1449,7 +1674,7 @@ mod tests {
         // zero nonce
         mock_tracker
             .expect_get_nonce_and_required_fees()
-            .returning(|| Ok((U256::zero(), None)));
+            .returning(|| Ok((0, None)));
 
         // fee filter error
         mock_proposer
@@ -1459,7 +1684,7 @@ mod tests {
                 Box::pin(async { Err(BundleProposerError::NoOperationsAfterFeeFilter) })
             });
 
-        let mut sender = new_sender(mock_proposer, mock_entry_point);
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, MockPool::new());
 
         // start in underpriced meta-state
         let mut state = SenderMachineState {
@@ -1475,6 +1700,7 @@ mod tests {
                 }),
             }),
             requires_reset: false,
+            last_idle_block: None,
         };
 
         // step state, block number should trigger move to cancellation
@@ -1494,21 +1720,22 @@ mod tests {
             mock_entry_point,
             mut mock_tracker,
             mut mock_trigger,
+            mock_evm,
         } = new_mocks();
 
         mock_proposer
             .expect_estimate_gas_fees()
             .once()
-            .returning(|_| Box::pin(async { Ok((GasFees::default(), U256::zero())) }));
+            .returning(|_| Box::pin(async { Ok((GasFees::default(), 0)) }));
 
         mock_tracker
             .expect_cancel_transaction()
             .once()
-            .returning(|_, _| Box::pin(async { Ok(Some(H256::zero())) }));
+            .returning(|_| Box::pin(async { Ok(Some(B256::ZERO)) }));
 
         mock_trigger.expect_last_block().return_const(NewHead {
             block_number: 0,
-            block_hash: H256::zero(),
+            block_hash: B256::ZERO,
         });
 
         let mut state = SenderMachineState {
@@ -1519,9 +1746,10 @@ mod tests {
                 fee_increase_count: 0,
             }),
             requires_reset: false,
+            last_idle_block: None,
         };
 
-        let mut sender = new_sender(mock_proposer, mock_entry_point);
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, MockPool::new());
 
         sender.step_state(&mut state).await.unwrap();
         assert!(matches!(
@@ -1540,6 +1768,7 @@ mod tests {
             mock_entry_point,
             mut mock_tracker,
             mut mock_trigger,
+            mock_evm,
         } = new_mocks();
 
         let mut seq = Sequence::new();
@@ -1561,9 +1790,10 @@ mod tests {
                 fee_increase_count: 0,
             }),
             requires_reset: false,
+            last_idle_block: None,
         };
 
-        let mut sender = new_sender(mock_proposer, mock_entry_point);
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, MockPool::new());
 
         for _ in 0..2 {
             sender.step_state(&mut state).await.unwrap();
@@ -1592,6 +1822,7 @@ mod tests {
             mut mock_entry_point,
             mut mock_tracker,
             mut mock_trigger,
+            mock_evm,
         } = new_mocks();
 
         let mut seq = Sequence::new();
@@ -1600,7 +1831,7 @@ mod tests {
         // zero nonce
         mock_tracker
             .expect_get_nonce_and_required_fees()
-            .returning(|| Ok((U256::zero(), None)));
+            .returning(|| Ok((0, None)));
 
         // bundle with one op
         mock_proposer
@@ -1611,12 +1842,12 @@ mod tests {
         // should create the bundle txn
         mock_entry_point
             .expect_get_send_bundle_transaction()
-            .returning(|_, _, _, _| TypedTransaction::default());
+            .returning(|_, _, _, _, _| TransactionRequest::default());
 
         // should send the bundle txn, returns condition not met
         mock_tracker
             .expect_send_transaction()
-            .returning(|_, _| Box::pin(async { Err(TransactionTrackerError::ConditionNotMet) }));
+            .returning(|_, _, _| Box::pin(async { Err(TransactionTrackerError::ConditionNotMet) }));
 
         // should notify proposer that condition was not met
         mock_proposer
@@ -1634,9 +1865,10 @@ mod tests {
                 underpriced_info: None,
             }),
             requires_reset: false,
+            last_idle_block: None,
         };
 
-        let mut sender = new_sender(mock_proposer, mock_entry_point);
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, MockPool::new());
 
         sender.step_state(&mut state).await.unwrap();
 
@@ -1651,11 +1883,137 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn test_revert_remove() {
+        let Mocks {
+            mock_proposer,
+            mock_entry_point,
+            mut mock_tracker,
+            mut mock_trigger,
+            mut mock_evm,
+        } = new_mocks();
+
+        let mut seq = Sequence::new();
+        add_trigger_wait_for_block_last_block(&mut mock_trigger, &mut seq, 1);
+        mock_trigger
+            .expect_wait_for_block()
+            .once()
+            .in_sequence(&mut seq)
+            .returning(|| {
+                Box::pin(async {
+                    Ok(NewHead {
+                        block_number: 2,
+                        block_hash: B256::ZERO,
+                    })
+                })
+            });
+        // no call to last_block after mine
+
+        let mut seq = Sequence::new();
+        mock_tracker
+            .expect_check_for_update()
+            .once()
+            .in_sequence(&mut seq)
+            .returning(|| Box::pin(async { Ok(None) }));
+        mock_tracker
+            .expect_check_for_update()
+            .once()
+            .in_sequence(&mut seq)
+            .returning(|| {
+                Box::pin(async {
+                    Ok(Some(TrackerUpdate::Mined {
+                        block_number: 2,
+                        nonce: 0,
+                        gas_limit: None,
+                        gas_used: None,
+                        gas_price: None,
+                        tx_hash: B256::ZERO,
+                        attempt_number: 0,
+                        is_success: false, // revert
+                    }))
+                })
+            });
+
+        let input = bytes!("1234");
+        let input_clone = input.clone();
+        let output = bytes!("5678");
+        let output_clone = output.clone();
+        let op = UserOperation::default();
+        let op_hash = op.hash();
+
+        mock_evm
+            .expect_debug_trace_transaction()
+            .returning(move |_, _| {
+                Ok(GethDebugTracerCallFrame {
+                    input: input.clone(),
+                    output: Some(output.clone()),
+                    ..Default::default()
+                }
+                .into())
+            });
+
+        let ctx = MockEntryPointV0_6::decode_ops_from_calldata_context();
+        ctx.expect()
+            .withf(move |_, data| *data == input_clone)
+            .returning(move |_, _| {
+                vec![UserOpsPerAggregator {
+                    user_ops: vec![op.clone()],
+                    ..Default::default()
+                }]
+            });
+
+        let ctx = MockEntryPointV0_6::decode_handle_ops_revert_context();
+        ctx.expect()
+            .withf(move |_, data| *data == output_clone)
+            .returning(|_, _| HandleOpsOut::FailedOp(0, "revert".to_string()));
+
+        let mut mock_pool = MockPool::new();
+        mock_pool
+            .expect_remove_ops()
+            .once()
+            .withf(move |_, hashes| hashes.len() == 1 && hashes[0] == op_hash)
+            .returning(|_, _| Ok(()));
+
+        let mut sender = new_sender(mock_proposer, mock_entry_point, mock_evm, mock_pool);
+
+        // start in pending state
+        let mut state = SenderMachineState {
+            trigger: mock_trigger,
+            transaction_tracker: mock_tracker,
+            send_bundle_response: None,
+            inner: InnerState::Pending(PendingState {
+                until: 3,
+                fee_increase_count: 0,
+            }),
+            requires_reset: false,
+            last_idle_block: None,
+        };
+
+        // first step has no update
+        sender.step_state(&mut state).await.unwrap();
+        assert!(matches!(
+            state.inner,
+            InnerState::Pending(PendingState { until: 3, .. })
+        ));
+
+        // second step is mined, revert processed, and moves back to building
+        sender.step_state(&mut state).await.unwrap();
+        assert!(matches!(
+            state.inner,
+            InnerState::Building(BuildingState {
+                wait_for_trigger: false, // don't wait for trigger in auto mode
+                fee_increase_count: 0,
+                underpriced_info: None,
+            })
+        ));
+    }
+
     struct Mocks {
         mock_proposer: MockBundleProposer,
         mock_entry_point: MockEntryPointV0_6,
         mock_tracker: MockTransactionTracker,
         mock_trigger: MockTrigger,
+        mock_evm: MockEvmProvider,
     }
 
     fn new_mocks() -> Mocks {
@@ -1669,28 +2027,37 @@ mod tests {
             mock_entry_point,
             mock_tracker: MockTransactionTracker::new(),
             mock_trigger: MockTrigger::new(),
+            mock_evm: MockEvmProvider::new(),
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn new_sender(
         mock_proposer: MockBundleProposer,
         mock_entry_point: MockEntryPointV0_6,
+        mock_evm: MockEvmProvider,
+        mock_pool: MockPool,
     ) -> BundleSenderImpl<
-        UserOperation,
         MockBundleProposer,
-        MockEntryPointV0_6,
+        ProvidersWithEntryPoint<
+            UserOperation,
+            Arc<MockEvmProvider>,
+            Arc<MockEntryPointV0_6>,
+            Arc<MockDAGasOracleSync>,
+        >,
         MockTransactionTracker,
         MockPool,
     > {
         BundleSenderImpl::new(
-            0,
+            "any:0".to_string(),
             mpsc::channel(1000).1,
             ChainSpec::default(),
             Address::default(),
+            None,
             mock_proposer,
-            mock_entry_point,
+            ProvidersWithEntryPoint::new(Arc::new(mock_evm), Arc::new(mock_entry_point), None),
             MockTransactionTracker::new(),
-            MockPool::new(),
+            mock_pool,
             Settings {
                 max_cancellation_fee_increases: 3,
                 max_blocks_to_wait_for_mine: 3,
@@ -1714,14 +2081,10 @@ mod tests {
         mock_tracker
             .expect_check_for_update()
             .returning(|| Box::pin(async { Ok(None) }));
-        mock_trigger
-            .expect_last_block()
-            .once()
-            .in_sequence(seq)
-            .return_const(NewHead {
-                block_number,
-                block_hash: H256::zero(),
-            });
+        mock_trigger.expect_last_block().return_const(NewHead {
+            block_number,
+            block_hash: B256::ZERO,
+        });
     }
 
     fn add_trigger_wait_for_block_last_block(
@@ -1737,7 +2100,7 @@ mod tests {
                 Box::pin(async move {
                     Ok(NewHead {
                         block_number,
-                        block_hash: H256::zero(),
+                        block_hash: B256::ZERO,
                     })
                 })
             });
@@ -1747,19 +2110,22 @@ mod tests {
             .in_sequence(seq)
             .return_const(NewHead {
                 block_number,
-                block_hash: H256::zero(),
+                block_hash: B256::ZERO,
             });
+        mock_trigger
+            .expect_builder_must_wait_for_trigger()
+            .return_const(false);
     }
 
     fn bundle() -> Bundle<UserOperation> {
         Bundle {
-            gas_estimate: U256::from(100_000),
+            gas_estimate: 100_000,
             gas_fees: GasFees::default(),
             expected_storage: Default::default(),
             rejected_ops: vec![],
             entity_updates: vec![],
             ops_per_aggregator: vec![UserOpsPerAggregator {
-                aggregator: Address::zero(),
+                aggregator: Address::ZERO,
                 signature: Bytes::new(),
                 user_ops: vec![UserOperation::default()],
             }],

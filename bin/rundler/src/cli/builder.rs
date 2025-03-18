@@ -11,26 +11,37 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
+use alloy_primitives::Address;
 use anyhow::{bail, Context};
 use clap::Args;
 use rundler_builder::{
-    self, BloxrouteSenderArgs, BuilderEvent, BuilderEventKind, BuilderTask, BuilderTaskArgs,
-    EntryPointBuilderSettings, FlashbotsSenderArgs, LocalBuilderBuilder, RawSenderArgs,
-    TransactionSenderArgs, TransactionSenderKind,
+    self, BloxrouteSenderArgs, BuilderEvent, BuilderEventKind, BuilderSettings, BuilderTask,
+    BuilderTaskArgs, EntryPointBuilderSettings, FlashbotsSenderArgs, LocalBuilderBuilder,
+    RawSenderArgs, TransactionSenderArgs, TransactionSenderKind,
 };
+use rundler_pbh::PbhSubmissionProxy;
 use rundler_pool::RemotePoolClient;
+use rundler_provider::Providers;
 use rundler_sim::{MempoolConfigs, PriorityFeeMode};
 use rundler_task::{
     server::{connect_with_retries_shutdown, format_socket_addr},
-    spawn_tasks_with_shutdown,
+    TaskSpawnerExt,
 };
-use rundler_types::{chain::ChainSpec, EntryPointVersion};
+use rundler_types::{
+    chain::{ChainSpec, ContractRegistry},
+    proxy::SubmissionProxy,
+    EntryPointVersion,
+};
 use rundler_utils::emit::{self, WithEntryPoint, EVENT_CHANNEL_CAPACITY};
+use serde::Deserialize;
 use tokio::sync::broadcast;
 
-use super::{json::get_json_config, CommonArgs};
+use super::{
+    proxy::{PassThroughProxy, SubmissionProxyType},
+    CommonArgs,
+};
 
 const REQUEST_CHANNEL_CAPACITY: usize = 1024;
 
@@ -223,7 +234,7 @@ pub struct BuilderArgs {
         env = "BUILDER_REPLACEMENT_FEE_PERCENT_INCREASE",
         default_value = "10"
     )]
-    replacement_fee_percent_increase: u64,
+    replacement_fee_percent_increase: u32,
 
     /// Maximum number of times to increase gas fees when retrying a cancellation transaction
     /// before giving up.
@@ -244,15 +255,6 @@ pub struct BuilderArgs {
         default_value = "20"
     )]
     max_replacement_underpriced_blocks: u64,
-
-    /// The index offset to apply to the builder index
-    #[arg(
-        long = "builder_index_offset",
-        name = "builder_index_offset",
-        env = "BUILDER_INDEX_OFFSET",
-        default_value = "0"
-    )]
-    pub builder_index_offset: u64,
 }
 
 impl BuilderArgs {
@@ -263,47 +265,68 @@ impl BuilderArgs {
         chain_spec: ChainSpec,
         common: &CommonArgs,
         remote_address: Option<SocketAddr>,
+        mempool_configs: Option<MempoolConfigs>,
+        entry_point_builders: Option<EntryPointBuilderConfigs>,
     ) -> anyhow::Result<BuilderTaskArgs> {
         let priority_fee_mode = PriorityFeeMode::try_from(
             common.priority_fee_mode_kind.as_str(),
             common.priority_fee_mode_value,
         )?;
 
-        let rpc_url = common
-            .node_http
-            .clone()
-            .context("should have a node HTTP URL")?;
+        let rpc_url = common.node_http.clone().context("must provide node_http")?;
 
-        let mempool_configs = match &common.mempool_config_path {
-            Some(path) => get_json_config::<MempoolConfigs>(path, &common.aws_region)
-                .await
-                .with_context(|| format!("should load mempool configurations from {path}"))?,
-            None => MempoolConfigs::default(),
-        };
-
+        let mempool_configs = mempool_configs.unwrap_or_default();
         let mut entry_points = vec![];
         let mut num_builders = 0;
 
         if !common.disable_entry_point_v0_6 {
+            let builders = entry_point_builders
+                .as_ref()
+                .and_then(|builder_configs| {
+                    builder_configs
+                        .get_for_entry_point(chain_spec.entry_point_address_v0_6)
+                        .map(|ep| ep.builders())
+                })
+                .unwrap_or_else(|| {
+                    builder_settings_from_cli(
+                        common.builder_index_offset_v0_6,
+                        common.num_builders_v0_6,
+                    )
+                });
+
             entry_points.push(EntryPointBuilderSettings {
                 address: chain_spec.entry_point_address_v0_6,
                 version: EntryPointVersion::V0_6,
-                num_bundle_builders: common.num_builders_v0_6,
-                bundle_builder_index_offset: self.builder_index_offset,
                 mempool_configs: mempool_configs
                     .get_for_entry_point(chain_spec.entry_point_address_v0_6),
+                builders,
             });
+
             num_builders += common.num_builders_v0_6;
         }
         if !common.disable_entry_point_v0_7 {
+            let builders = entry_point_builders
+                .as_ref()
+                .and_then(|builder_configs| {
+                    builder_configs
+                        .get_for_entry_point(chain_spec.entry_point_address_v0_7)
+                        .map(|ep| ep.builders())
+                })
+                .unwrap_or_else(|| {
+                    builder_settings_from_cli(
+                        common.builder_index_offset_v0_7,
+                        common.num_builders_v0_7,
+                    )
+                });
+
             entry_points.push(EntryPointBuilderSettings {
                 address: chain_spec.entry_point_address_v0_7,
                 version: EntryPointVersion::V0_7,
-                num_bundle_builders: common.num_builders_v0_7,
-                bundle_builder_index_offset: self.builder_index_offset,
                 mempool_configs: mempool_configs
                     .get_for_entry_point(chain_spec.entry_point_address_v0_7),
+                builders,
             });
+
             num_builders += common.num_builders_v0_7;
         }
 
@@ -336,6 +359,11 @@ impl BuilderArgs {
 
         let sender_args = self.sender_args(&chain_spec, &rpc_url)?;
 
+        let da_gas_tracking_enabled =
+            super::lint_da_gas_tracking(common.da_gas_tracking_enabled, &chain_spec);
+
+        let provider_client_timeout_seconds = common.provider_client_timeout_seconds;
+
         Ok(BuilderTaskArgs {
             entry_points,
             chain_spec,
@@ -343,14 +371,11 @@ impl BuilderArgs {
             rpc_url,
             private_keys,
             aws_kms_key_ids: self.aws_kms_key_ids.clone(),
-            aws_kms_region: common
-                .aws_region
-                .parse()
-                .context("should be a valid aws region")?,
             redis_uri: self.redis_uri.clone(),
             redis_lock_ttl_millis: self.redis_lock_ttl_millis,
             max_bundle_size: self.max_bundle_size,
             max_bundle_gas: common.max_bundle_gas,
+            bundle_base_fee_overhead_percent: common.bundle_base_fee_overhead_percent,
             bundle_priority_fee_overhead_percent: common.bundle_priority_fee_overhead_percent,
             priority_fee_mode,
             sender_args,
@@ -360,6 +385,9 @@ impl BuilderArgs {
             max_cancellation_fee_increases: self.max_cancellation_fee_increases,
             max_replacement_underpriced_blocks: self.max_replacement_underpriced_blocks,
             remote_address,
+            da_gas_tracking_enabled,
+            provider_client_timeout_seconds,
+            max_expected_storage_slots: common.max_expected_storage_slots.unwrap_or(usize::MAX),
         })
     }
 
@@ -410,6 +438,95 @@ impl BuilderArgs {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntryPointBuilderConfigs {
+    // Builder configs per entry point
+    entry_points: Vec<EntryPointBuilderConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntryPointBuilderConfig {
+    // Entry point address
+    pub(crate) address: Address,
+    // Builder configs
+    pub(crate) builders: Vec<BuilderConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BuilderConfig {
+    // Number of builders using this config
+    pub(crate) count: u64,
+    // Builder index offset - defaults to 0
+    pub(crate) index_offset: Option<u64>,
+    // Submitter proxy to use for builders
+    pub(crate) proxy: Option<Address>,
+    // Type of proxy to use for builders
+    pub(crate) proxy_type: Option<String>,
+    // Optional filter to apply to the builders
+    pub(crate) filter_id: Option<String>,
+}
+
+impl EntryPointBuilderConfigs {
+    pub(crate) fn get_for_entry_point(&self, address: Address) -> Option<&EntryPointBuilderConfig> {
+        self.entry_points.iter().find(|ep| ep.address == address)
+    }
+
+    pub(crate) fn set_proxies(&self, chain_spec: &mut ChainSpec) {
+        let mut registry = ContractRegistry::<Arc<dyn SubmissionProxy>>::default();
+
+        for entry_point in &self.entry_points {
+            for builder in &entry_point.builders {
+                if let Some(proxy) = builder.proxy {
+                    let proxy_type = if let Some(proxy_type) = &builder.proxy_type {
+                        SubmissionProxyType::from_str(proxy_type)
+                            .unwrap_or_else(|_| panic!("proxyType not supported: {}", proxy_type))
+                    } else {
+                        SubmissionProxyType::PassThrough
+                    };
+
+                    match proxy_type {
+                        SubmissionProxyType::PassThrough => {
+                            registry.register(proxy, Arc::new(PassThroughProxy::new(proxy)));
+                        }
+                        SubmissionProxyType::Pbh => {
+                            registry.register(proxy, Arc::new(PbhSubmissionProxy::new(proxy)));
+                        }
+                    }
+                }
+            }
+        }
+
+        chain_spec.set_submission_proxies(Arc::new(registry));
+    }
+}
+
+impl EntryPointBuilderConfig {
+    pub fn builders(&self) -> Vec<BuilderSettings> {
+        let mut builders = vec![];
+        for builder in &self.builders {
+            builders.extend((0..builder.count).map(|i| BuilderSettings {
+                index: builder.index_offset.unwrap_or(0) + i,
+                submission_proxy: builder.proxy,
+                filter_id: builder.filter_id.clone(),
+            }));
+        }
+        builders
+    }
+}
+
+fn builder_settings_from_cli(index_offset: u64, count: u64) -> Vec<BuilderSettings> {
+    (0..count)
+        .map(|i| BuilderSettings {
+            index: index_offset + i,
+            submission_proxy: None,
+            filter_id: None,
+        })
+        .collect()
+}
+
 /// CLI options for the Builder server standalone
 #[derive(Args, Debug)]
 pub struct BuilderCliArgs {
@@ -426,10 +543,12 @@ pub struct BuilderCliArgs {
     pool_url: String,
 }
 
-pub async fn run(
+pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
+    task_spawner: T,
     chain_spec: ChainSpec,
     builder_args: BuilderCliArgs,
     common_args: CommonArgs,
+    providers: impl Providers + 'static,
 ) -> anyhow::Result<()> {
     let BuilderCliArgs {
         builder: builder_args,
@@ -437,35 +556,44 @@ pub async fn run(
     } = builder_args;
 
     let (event_sender, event_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-    emit::receive_and_log_events_with_filter(event_rx, is_nonspammy_event);
+    task_spawner.spawn_critical(
+        "recv and log events",
+        Box::pin(emit::receive_and_log_events_with_filter(
+            event_rx,
+            is_nonspammy_event,
+        )),
+    );
+
+    let (mempool_config, entry_point_builders) = super::load_configs(&common_args).await?;
 
     let task_args = builder_args
         .to_args(
             chain_spec.clone(),
             &common_args,
             Some(format_socket_addr(&builder_args.host, builder_args.port).parse()?),
+            mempool_config,
+            entry_point_builders,
         )
         .await?;
 
     let pool = connect_with_retries_shutdown(
         "op pool from builder",
         &pool_url,
-        |url| RemotePoolClient::connect(url, chain_spec.clone()),
+        |url| RemotePoolClient::connect(url, chain_spec.clone(), Box::new(task_spawner.clone())),
         tokio::signal::ctrl_c(),
     )
     .await?;
 
-    spawn_tasks_with_shutdown(
-        [BuilderTask::new(
-            task_args,
-            event_sender,
-            LocalBuilderBuilder::new(REQUEST_CHANNEL_CAPACITY),
-            pool,
-        )
-        .boxed()],
-        tokio::signal::ctrl_c(),
+    BuilderTask::new(
+        task_args,
+        event_sender,
+        LocalBuilderBuilder::new(REQUEST_CHANNEL_CAPACITY),
+        pool,
+        providers,
     )
-    .await;
+    .spawn(task_spawner)
+    .await?;
+
     Ok(())
 }
 

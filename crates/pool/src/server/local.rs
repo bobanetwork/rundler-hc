@@ -13,12 +13,15 @@
 
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
+use alloy_primitives::{Address, B256};
 use async_stream::stream;
 use async_trait::async_trait;
-use ethers::types::{Address, H256};
-use futures::future;
+use futures::future::{self, BoxFuture};
 use futures_util::Stream;
-use rundler_task::server::{HealthCheck, ServerStatus};
+use rundler_task::{
+    server::{HealthCheck, ServerStatus},
+    GracefulShutdown, TaskSpawner,
+};
 use rundler_types::{
     pool::{
         MempoolError, NewHead, PaymasterMetadata, Pool, PoolError, PoolOperation, PoolResult,
@@ -26,12 +29,8 @@ use rundler_types::{
     },
     EntityUpdate, EntryPointVersion, UserOperationId, UserOperationVariant,
 };
-use tokio::{
-    sync::{broadcast, mpsc, oneshot},
-    task::JoinHandle,
-};
-use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::{error, info};
 
 use crate::{
     chain::ChainUpdate,
@@ -68,17 +67,19 @@ impl LocalPoolBuilder {
     /// Run the local pool server, consumes the builder
     pub fn run(
         self,
+        task_spawner: Box<dyn TaskSpawner>,
         mempools: HashMap<Address, Arc<dyn Mempool>>,
         chain_updates: broadcast::Receiver<Arc<ChainUpdate>>,
-        shutdown_token: CancellationToken,
-    ) -> JoinHandle<anyhow::Result<()>> {
-        let mut runner = LocalPoolServerRunner::new(
+        shutdown: GracefulShutdown,
+    ) -> BoxFuture<'static, ()> {
+        let runner = LocalPoolServerRunner::new(
             self.req_receiver,
             self.block_sender,
             mempools,
             chain_updates,
+            task_spawner,
         );
-        tokio::spawn(async move { runner.run(shutdown_token).await })
+        Box::pin(runner.run(shutdown))
     }
 }
 
@@ -95,6 +96,7 @@ struct LocalPoolServerRunner {
     block_sender: broadcast::Sender<NewHead>,
     mempools: HashMap<Address, Arc<dyn Mempool>>,
     chain_updates: broadcast::Receiver<Arc<ChainUpdate>>,
+    task_spawner: Box<dyn TaskSpawner>,
 }
 
 impl LocalPoolHandle {
@@ -106,9 +108,14 @@ impl LocalPoolHandle {
                 response: send,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("LocalPoolServer closed"))?;
-        recv.await
-            .map_err(|_| anyhow::anyhow!("LocalPoolServer closed"))?
+            .map_err(|_| {
+                error!("LocalPoolServer sender closed");
+                PoolError::UnexpectedResponse
+            })?;
+        recv.await.map_err(|_| {
+            error!("LocalPoolServer receiver closed");
+            PoolError::UnexpectedResponse
+        })?
     }
 }
 
@@ -123,7 +130,7 @@ impl Pool for LocalPoolHandle {
         }
     }
 
-    async fn add_op(&self, entry_point: Address, op: UserOperationVariant) -> PoolResult<H256> {
+    async fn add_op(&self, entry_point: Address, op: UserOperationVariant) -> PoolResult<B256> {
         let req = ServerRequestKind::AddOp {
             entry_point,
             op,
@@ -141,11 +148,13 @@ impl Pool for LocalPoolHandle {
         entry_point: Address,
         max_ops: u64,
         shard_index: u64,
+        filter_id: Option<String>,
     ) -> PoolResult<Vec<PoolOperation>> {
         let req = ServerRequestKind::GetOps {
             entry_point,
             max_ops,
             shard_index,
+            filter_id,
         };
         let resp = self.send(req).await?;
         match resp {
@@ -154,7 +163,7 @@ impl Pool for LocalPoolHandle {
         }
     }
 
-    async fn get_op_by_hash(&self, hash: H256) -> PoolResult<Option<PoolOperation>> {
+    async fn get_op_by_hash(&self, hash: B256) -> PoolResult<Option<PoolOperation>> {
         let req = ServerRequestKind::GetOpByHash { hash };
         let resp = self.send(req).await?;
         match resp {
@@ -163,7 +172,7 @@ impl Pool for LocalPoolHandle {
         }
     }
 
-    async fn remove_ops(&self, entry_point: Address, ops: Vec<H256>) -> PoolResult<()> {
+    async fn remove_ops(&self, entry_point: Address, ops: Vec<B256>) -> PoolResult<()> {
         let req = ServerRequestKind::RemoveOps { entry_point, ops };
         let resp = self.send(req).await?;
         match resp {
@@ -176,7 +185,7 @@ impl Pool for LocalPoolHandle {
         &self,
         entry_point: Address,
         id: UserOperationId,
-    ) -> PoolResult<Option<H256>> {
+    ) -> PoolResult<Option<B256>> {
         let req = ServerRequestKind::RemoveOpById { entry_point, id };
         let resp = self.send(req).await?;
         match resp {
@@ -327,7 +336,7 @@ impl Pool for LocalPoolHandle {
                             error!("new_heads_receiver lagged {c} blocks");
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            error!("new_heads_receiver closed");
+                            info!("new_heads_receiver closed, ending subscription");
                             break;
                         }
                     }
@@ -359,12 +368,14 @@ impl LocalPoolServerRunner {
         block_sender: broadcast::Sender<NewHead>,
         mempools: HashMap<Address, Arc<dyn Mempool>>,
         chain_updates: broadcast::Receiver<Arc<ChainUpdate>>,
+        task_spawner: Box<dyn TaskSpawner>,
     ) -> Self {
         Self {
             req_receiver,
             block_sender,
             mempools,
             chain_updates,
+            task_spawner,
         }
     }
 
@@ -379,16 +390,17 @@ impl LocalPoolServerRunner {
         entry_point: Address,
         max_ops: u64,
         shard_index: u64,
+        filter_id: Option<String>,
     ) -> PoolResult<Vec<PoolOperation>> {
         let mempool = self.get_pool(entry_point)?;
         Ok(mempool
-            .best_operations(max_ops as usize, shard_index)?
+            .best_operations(max_ops as usize, shard_index, filter_id)?
             .iter()
             .map(|op| (**op).clone())
             .collect())
     }
 
-    fn get_op_by_hash(&self, hash: H256) -> PoolResult<Option<PoolOperation>> {
+    fn get_op_by_hash(&self, hash: B256) -> PoolResult<Option<PoolOperation>> {
         for mempool in self.mempools.values() {
             if let Some(op) = mempool.get_user_operation_by_hash(hash) {
                 return Ok(Some((*op).clone()));
@@ -397,7 +409,7 @@ impl LocalPoolServerRunner {
         Ok(None)
     }
 
-    fn remove_ops(&self, entry_point: Address, ops: &[H256]) -> PoolResult<()> {
+    fn remove_ops(&self, entry_point: Address, ops: &[B256]) -> PoolResult<()> {
         let mempool = self.get_pool(entry_point)?;
         mempool.remove_operations(ops);
         Ok(())
@@ -407,7 +419,7 @@ impl LocalPoolServerRunner {
         &self,
         entry_point: Address,
         id: &UserOperationId,
-    ) -> PoolResult<Option<H256>> {
+    ) -> PoolResult<Option<B256>> {
         let mempool = self.get_pool(entry_point)?;
         mempool.remove_op_by_id(id).map_err(|e| e.into())
     }
@@ -502,7 +514,7 @@ impl LocalPoolServerRunner {
         match self.get_pool(entry_point) {
             Ok(mempool) => {
                 let mempool = Arc::clone(mempool);
-                tokio::spawn(f(mempool, response));
+                self.task_spawner.spawn(Box::pin(f(mempool, response)));
             }
             Err(e) => {
                 if let Err(e) = response.send(Err(e)) {
@@ -512,10 +524,10 @@ impl LocalPoolServerRunner {
         }
     }
 
-    async fn run(&mut self, shutdown_token: CancellationToken) -> anyhow::Result<()> {
+    async fn run(mut self, shutdown: GracefulShutdown) {
         loop {
             tokio::select! {
-                _ = shutdown_token.cancelled() => {
+                _ = shutdown.clone() => {
                     break;
                 }
                 chain_update = self.chain_updates.recv() => {
@@ -532,13 +544,13 @@ impl LocalPoolServerRunner {
                             let cu = Arc::clone(&chain_update);
                             async move { m.on_chain_update(&cu).await }
                         }).collect();
-                        tokio::spawn(async move {
+                        self.task_spawner.spawn(Box::pin(async move {
                             future::join_all(update_futures).await;
                             let _ = block_sender.send(NewHead {
                                 block_hash: chain_update.latest_block_hash,
                                 block_number: chain_update.latest_block_number,
                             });
-                        });
+                        }));
                     }
                 }
                 Some(req) = self.req_receiver.recv() => {
@@ -599,8 +611,8 @@ impl LocalPoolServerRunner {
                                 entry_points: self.mempools.keys().copied().collect()
                             })
                         },
-                        ServerRequestKind::GetOps { entry_point, max_ops, shard_index } => {
-                            match self.get_ops(entry_point, max_ops, shard_index) {
+                        ServerRequestKind::GetOps { entry_point, max_ops, shard_index, filter_id } => {
+                            match self.get_ops(entry_point, max_ops, shard_index, filter_id) {
                                 Ok(ops) => Ok(ServerResponse::GetOps { ops }),
                                 Err(e) => Err(e),
                             }
@@ -681,8 +693,6 @@ impl LocalPoolServerRunner {
                 }
             }
         }
-
-        Ok(())
     }
 }
 
@@ -704,13 +714,14 @@ enum ServerRequestKind {
         entry_point: Address,
         max_ops: u64,
         shard_index: u64,
+        filter_id: Option<String>,
     },
     GetOpByHash {
-        hash: H256,
+        hash: B256,
     },
     RemoveOps {
         entry_point: Address,
-        ops: Vec<H256>,
+        ops: Vec<B256>,
     },
     RemoveOpById {
         entry_point: Address,
@@ -760,7 +771,7 @@ enum ServerResponse {
         entry_points: Vec<Address>,
     },
     AddOp {
-        hash: H256,
+        hash: B256,
     },
     GetOps {
         ops: Vec<PoolOperation>,
@@ -770,7 +781,7 @@ enum ServerResponse {
     },
     RemoveOps,
     RemoveOpById {
-        hash: Option<H256>,
+        hash: Option<B256>,
     },
     UpdateEntities,
     DebugClearState,
@@ -801,6 +812,7 @@ mod tests {
     use std::{iter::zip, sync::Arc};
 
     use futures_util::StreamExt;
+    use reth_tasks::TaskManager;
     use rundler_types::v0_6::UserOperation;
 
     use super::*;
@@ -809,7 +821,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_op() {
         let mut mock_pool = MockMempool::new();
-        let hash0 = H256::random();
+        let hash0 = B256::random();
         mock_pool
             .expect_entry_point_version()
             .returning(|| EntryPointVersion::V0_6);
@@ -836,7 +848,7 @@ mod tests {
 
         let mut sub = state.handle.subscribe_new_heads().await.unwrap();
 
-        let hash = H256::random();
+        let hash = B256::random();
         let number = 1234;
         state
             .chain_update_tx
@@ -876,9 +888,9 @@ mod tests {
     async fn test_multiple_entry_points() {
         let eps = [Address::random(), Address::random(), Address::random()];
         let mut pools = [MockMempool::new(), MockMempool::new(), MockMempool::new()];
-        let h0 = H256::random();
-        let h1 = H256::random();
-        let h2 = H256::random();
+        let h0 = B256::random();
+        let h1 = B256::random();
+        let h2 = B256::random();
         let hashes = [h0, h1, h2];
         pools[0]
             .expect_entry_point_version()
@@ -916,18 +928,25 @@ mod tests {
     struct State {
         handle: LocalPoolHandle,
         chain_update_tx: broadcast::Sender<Arc<ChainUpdate>>,
-        _run_handle: JoinHandle<anyhow::Result<()>>,
+        _task_manager: TaskManager,
     }
 
     fn setup(pools: HashMap<Address, Arc<dyn Mempool>>) -> State {
         let builder = LocalPoolBuilder::new(10, 10);
         let handle = builder.get_handle();
         let (tx, rx) = broadcast::channel(10);
-        let run_handle = builder.run(pools, rx, CancellationToken::new());
+        let tm = TaskManager::current();
+        let ts = tm.executor();
+        let ts_box = Box::new(ts.clone());
+
+        ts.spawn_critical_with_graceful_shutdown_signal("test pool", |shutdown| {
+            builder.run(ts_box, pools, rx, shutdown)
+        });
+
         State {
             handle,
             chain_update_tx: tx,
-            _run_handle: run_handle,
+            _task_manager: tm,
         }
     }
 

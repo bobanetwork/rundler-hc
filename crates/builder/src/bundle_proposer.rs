@@ -14,48 +14,53 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,
-    marker::PhantomData,
     mem,
     pin::Pin,
     sync::Arc,
 };
 
+use alloy_primitives::{aliases::U192, Address, Bytes, B256, U256};
 use anyhow::Context;
 use async_trait::async_trait;
-use ethers::types::{Address, BlockId, Bytes, H256, U256};
 use futures::future;
 use futures_util::TryFutureExt;
 use linked_hash_map::LinkedHashMap;
+use metrics::{Counter, Histogram};
+use metrics_derive::Metrics;
 #[cfg(test)]
 use mockall::automock;
 use rundler_provider::{
-    BundleHandler, EntryPoint, HandleOpsOut, L1GasProvider, Provider, SignatureAggregator,
+    BundleHandler, DAGasOracleSync, DAGasProvider, EntryPoint, EvmProvider, HandleOpsOut,
+    ProvidersWithEntryPointT,
 };
 use rundler_sim::{
-    gas, ExpectedStorage, FeeEstimator, PriorityFeeMode, SimulationError, SimulationResult,
-    Simulator, ViolationError,
+    BundleExpectedStorage, ExpectedStorage, FeeEstimator, PriorityFeeMode, SimulationError,
+    SimulationResult, Simulator, ViolationError,
 };
 use rundler_types::{
+    aggregator::SignatureAggregatorResult,
     chain::ChainSpec,
+    da::DAGasBlockData,
     hybrid_compute,
     pool::{Pool, PoolOperation, SimulationViolation},
+    proxy::SubmissionProxy,
     Entity, EntityInfo, EntityInfos, EntityType, EntityUpdate, EntityUpdateType, GasFees,
-    Timestamp, UserOperation, UserOperationVariant, UserOpsPerAggregator, BUNDLE_BYTE_OVERHEAD,
-    TIME_RANGE_BUFFER, USER_OP_OFFSET_WORD_SIZE,
+    Timestamp, UserOperation, UserOperationVariant, UserOpsPerAggregator, ValidationRevert,
+    BUNDLE_BYTE_OVERHEAD, TIME_RANGE_BUFFER, USER_OP_OFFSET_WORD_SIZE,
 };
-use rundler_utils::{emit::WithEntryPoint, math};
+use rundler_utils::{emit::WithEntryPoint, guard_timer::CustomTimerGuard, math};
 use tokio::{sync::broadcast, try_join};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::emit::{BuilderEvent, ConditionNotMetReason, OpRejectionReason, SkipReason};
 
 /// Extra buffer percent to add on the bundle transaction gas estimate to be sure it will be enough
-const BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT: u64 = 5;
+const BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT: u32 = 5;
 
 #[derive(Debug)]
 pub(crate) struct Bundle<UO: UserOperation> {
     pub(crate) ops_per_aggregator: Vec<UserOpsPerAggregator<UO>>,
-    pub(crate) gas_estimate: U256,
+    pub(crate) gas_estimate: u64,
     pub(crate) gas_fees: GasFees,
     pub(crate) expected_storage: ExpectedStorage,
     pub(crate) rejected_ops: Vec<UO>,
@@ -66,7 +71,7 @@ impl<UO: UserOperation> Default for Bundle<UO> {
     fn default() -> Self {
         Self {
             ops_per_aggregator: Vec::new(),
-            gas_estimate: U256::zero(),
+            gas_estimate: 0,
             gas_fees: GasFees::default(),
             expected_storage: ExpectedStorage::default(),
             rejected_ops: Vec::new(),
@@ -94,7 +99,7 @@ impl<UO: UserOperation> Bundle<UO> {
 
 #[async_trait]
 #[cfg_attr(test, automock(type UO = rundler_types::v0_6::UserOperation;))]
-pub(crate) trait BundleProposer: Send + Sync + 'static {
+pub(crate) trait BundleProposer: Send + Sync {
     type UO: UserOperation;
 
     /// Constructs the next bundle
@@ -105,7 +110,7 @@ pub(crate) trait BundleProposer: Send + Sync + 'static {
         &mut self,
         min_fees: Option<GasFees>,
         is_replacement: bool,
-    ) -> BundleProposerResult<Bundle<Self::UO>>;
+    ) -> BundleProposerResult<Bundle<<Self as BundleProposer>::UO>>;
 
     /// Gets the current gas fees
     ///
@@ -113,7 +118,7 @@ pub(crate) trait BundleProposer: Send + Sync + 'static {
     async fn estimate_gas_fees(
         &self,
         min_fees: Option<GasFees>,
-    ) -> BundleProposerResult<(GasFees, U256)>;
+    ) -> BundleProposerResult<(GasFees, u128)>;
 
     /// Notifies the proposer that a condition was not met during the last bundle proposal
     fn notify_condition_not_met(&mut self);
@@ -134,52 +139,57 @@ pub(crate) enum BundleProposerError {
     Other(#[from] anyhow::Error),
 }
 
-#[derive(Debug)]
-pub(crate) struct BundleProposerImpl<UO, S, E, P, M> {
+pub(crate) struct BundleProposerImpl<EP, BP> {
     builder_index: u64,
-    pool: M,
-    simulator: S,
-    entry_point: E,
-    provider: Arc<P>,
+    builder_tag: String,
     settings: Settings,
-    fee_estimator: FeeEstimator<P>,
+    ep_providers: EP,
+    bundle_providers: BP,
     event_sender: broadcast::Sender<WithEntryPoint<BuilderEvent>>,
     condition_not_met_notified: bool,
-    _uo_type: PhantomData<UO>,
+    metric: BuilderProposerMetric,
+    filter_id: Option<String>,
 }
 
 #[derive(Debug)]
 pub(crate) struct Settings {
     pub(crate) chain_spec: ChainSpec,
     pub(crate) max_bundle_size: u64,
-    pub(crate) max_bundle_gas: u64,
-    pub(crate) beneficiary: Address,
-    pub(crate) bundle_priority_fee_overhead_percent: u64,
+    pub(crate) max_bundle_gas: u128,
+    pub(crate) sender_eoa: Address,
     pub(crate) priority_fee_mode: PriorityFeeMode,
+    pub(crate) da_gas_tracking_enabled: bool,
+    pub(crate) max_expected_storage_slots: usize,
+    pub(crate) submission_proxy: Option<Arc<dyn SubmissionProxy>>,
 }
 
 #[async_trait]
-impl<UO, S, E, P, M> BundleProposer for BundleProposerImpl<UO, S, E, P, M>
+impl<EP, BP> BundleProposer for BundleProposerImpl<EP, BP>
 where
-    UO: UserOperation + From<UserOperationVariant>,
-    UserOperationVariant: AsRef<UO>,
-    S: Simulator<UO = UO>,
-    E: EntryPoint
-        + SignatureAggregator<UO = UO>
-        + BundleHandler<UO = UO>
-        + L1GasProvider<UO = UO>
-        + SimulationProvider<UO = UO>,
-    P: Provider,
-    M: Pool,
+    EP: ProvidersWithEntryPointT,
+    BP: BundleProposerProvidersT,
+    /*
+        UO: UserOperation + From<UserOperationVariant>,
+        UserOperationVariant: AsRef<UO>,
+        S: Simulator<UO = UO>,
+        E: EntryPoint
+            + SignatureAggregator<UO = UO>
+            + BundleHandler<UO = UO>
+            + L1GasProvider<UO = UO>
+            + SimulationProvider<UO = UO>,
+        P: Provider,
+        M: Pool,
+    */
 {
-    type UO = UO;
+    type UO = EP::UO;
 
     async fn estimate_gas_fees(
         &self,
         required_fees: Option<GasFees>,
-    ) -> BundleProposerResult<(GasFees, U256)> {
+    ) -> BundleProposerResult<(GasFees, u128)> {
         Ok(self
-            .fee_estimator
+            .bundle_providers
+            .fee_estimator()
             .required_bundle_fees(required_fees)
             .await?)
     }
@@ -192,10 +202,12 @@ where
         &mut self,
         required_fees: Option<GasFees>,
         is_replacement: bool,
-    ) -> BundleProposerResult<Bundle<UO>> {
+    ) -> BundleProposerResult<Bundle<Self::UO>> {
+        let _bundler_build_timer = CustomTimerGuard::new(self.metric.bundle_build_ms.clone());
         let (ops, (block_hash, _), (bundle_fees, base_fee)) = try_join!(
             self.get_ops_from_pool(),
-            self.provider
+            self.ep_providers
+                .evm()
                 .get_latest_block_hash_and_number()
                 .map_err(BundleProposerError::from),
             self.estimate_gas_fees(required_fees)
@@ -204,24 +216,47 @@ where
             return Err(BundleProposerError::NoOperationsInitially);
         }
 
-        tracing::debug!("Starting bundle proposal with {} ops", ops.len());
-
         // (0) Determine fees required for ops to be included in a bundle
         // if replacing, just require bundle fees increase chances of unsticking
         let required_op_fees = if is_replacement {
             bundle_fees
         } else {
-            self.fee_estimator.required_op_fees(bundle_fees)
+            self.bundle_providers
+                .fee_estimator()
+                .required_op_fees(bundle_fees)
         };
         let all_paymaster_addresses = ops
             .iter()
             .filter_map(|op| op.uo.paymaster())
             .collect::<Vec<Address>>();
 
+        let da_block_data = if self.settings.da_gas_tracking_enabled
+            && self.ep_providers.da_gas_oracle_sync().is_some()
+        {
+            let da_gas_oracle = self.ep_providers.da_gas_oracle_sync().as_ref().unwrap();
+
+            match da_gas_oracle.block_data(block_hash.into()).await {
+                Ok(block_data) => Some(block_data),
+                Err(e) => {
+                    error!("Failed to get block data for block hash {block_hash:?}, falling back to async da gas calculations: {e:?}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         // (1) Filter out ops that don't pay enough to be included
         let fee_futs = ops
             .into_iter()
-            .map(|op| self.check_fees(op, base_fee, required_op_fees))
+            .map(|op| {
+                self.check_fees(
+                    op,
+                    block_hash,
+                    da_block_data.as_ref(),
+                    base_fee,
+                    required_op_fees,
+                )
+            })
             .collect::<Vec<_>>();
         let ops = future::join_all(fee_futs)
             .await
@@ -237,7 +272,7 @@ where
         // (2) Limit the amount of operations for simulation
         let (ops, gas_limit) = self.limit_user_operations_for_simulation(ops);
 
-        tracing::debug!(
+        debug!(
             "Bundle proposal after gas limit had {} ops and {:?} gas limit",
             ops.len(),
             gas_limit
@@ -252,8 +287,10 @@ where
         let ops_with_simulations_future = future::join_all(simulation_futures);
         let balances_by_paymaster_future =
             self.get_balances_by_paymaster(all_paymaster_addresses, block_hash);
+
         let (ops_with_simulations, balances_by_paymaster) =
             tokio::join!(ops_with_simulations_future, balances_by_paymaster_future);
+
         let balances_by_paymaster = balances_by_paymaster?;
         let ops_with_simulations = ops_with_simulations
             .into_iter()
@@ -269,7 +306,9 @@ where
             .assemble_context(ops_with_simulations, balances_by_paymaster)
             .await;
         while !context.is_empty() {
-            let gas_estimate = self.estimate_gas_rejecting_failed_ops(&mut context).await?;
+            let gas_estimate = self
+                .estimate_gas_rejecting_failed_ops(&mut context, bundle_fees)
+                .await?;
             if let Some(gas_estimate) = gas_estimate {
                 tracing::debug!(
                     "Bundle proposal succeeded with {} ops and {:?} gas limit",
@@ -287,22 +326,20 @@ where
                     }
                 }
 
-                let mut expected_storage = ExpectedStorage::default();
-                for op in context.iter_ops_with_simulations() {
-                    expected_storage.merge(&op.simulation.expected_storage)?;
-                }
-
                 return Ok(Bundle {
                     ops_per_aggregator: context.to_ops_per_aggregator(),
                     gas_estimate,
                     gas_fees: bundle_fees,
-                    expected_storage,
+                    expected_storage: context.bundle_expected_storage.inner,
                     rejected_ops: context.rejected_ops.iter().map(|po| po.0.clone()).collect(),
                     entity_updates: context.entity_updates.into_values().collect(),
                 });
             }
+
+            self.metric.bundle_simulation_failures.increment(1);
             info!("Bundle gas estimation failed. Retrying after removing rejected op(s).");
         }
+
         Ok(Bundle {
             rejected_ops: context.rejected_ops.iter().map(|po| po.0.clone()).collect(),
             entity_updates: context.entity_updates.into_values().collect(),
@@ -311,60 +348,76 @@ where
         })
     }
 }
-use rundler_provider::SimulationProvider;
-impl<UO, S, E, P, M> BundleProposerImpl<UO, S, E, P, M>
+
+#[derive(Metrics)]
+#[metrics(scope = "builder_proposer")]
+struct BuilderProposerMetric {
+    #[metric(describe = "the distribution of end to end bundle build time.")]
+    bundle_build_ms: Histogram,
+    #[metric(describe = "the distribution of op simulation time of a bundle.")]
+    op_simulation_ms: Histogram,
+    #[metric(describe = "the number of bundle simulation failures.")]
+    bundle_simulation_failures: Counter,
+}
+
+impl<EP, BP> BundleProposerImpl<EP, BP>
 where
-    UO: UserOperation + From<UserOperationVariant>,
-    UserOperationVariant: AsRef<UO>,
-    S: Simulator<UO = UO>,
-    E: EntryPoint
-        + SignatureAggregator<UO = UO>
-        + BundleHandler<UO = UO>
-        + L1GasProvider<UO = UO>
-        + SimulationProvider<UO = UO>,
-    P: Provider,
-    M: Pool,
+    EP: ProvidersWithEntryPointT,
+    BP: BundleProposerProvidersT,
+    /*
+    use rundler_provider::SimulationProvider;
+    impl<UO, S, E, P, M> BundleProposerImpl<UO, S, E, P, M>
+    where
+        UO: UserOperation + From<UserOperationVariant>,
+        UserOperationVariant: AsRef<UO>,
+        S: Simulator<UO = UO>,
+        E: EntryPoint
+            + SignatureAggregator<UO = UO>
+            + BundleHandler<UO = UO>
+            + L1GasProvider<UO = UO>
+            + SimulationProvider<UO = UO>,
+        P: Provider,
+        M: Pool,
+    */
 {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         builder_index: u64,
-        pool: M,
-        simulator: S,
-        entry_point: E,
-        provider: Arc<P>,
+        builder_tag: String,
+        ep_providers: EP,
+        bundle_providers: BP,
         settings: Settings,
         event_sender: broadcast::Sender<WithEntryPoint<BuilderEvent>>,
+        filter_id: Option<String>,
     ) -> Self {
         Self {
             builder_index,
-            pool,
-            simulator,
-            entry_point,
-            provider: provider.clone(),
-            fee_estimator: FeeEstimator::new(
-                &settings.chain_spec,
-                provider,
-                settings.priority_fee_mode,
-                settings.bundle_priority_fee_overhead_percent,
-            ),
+            builder_tag,
+            ep_providers,
+            bundle_providers,
             settings,
             event_sender,
             condition_not_met_notified: false,
-            _uo_type: PhantomData,
+            metric: BuilderProposerMetric::default(),
+            filter_id,
         }
     }
 
     // Check fees for a single user op. Returns None if the op should be skipped.
     //
     // Filters on:
-    // - insufficient gas fees
-    // - insufficient pre-verification gas
+    // - Insufficient gas fees
+    // - Insufficient pre-verification gas. The initial PVG check is done when the block is updated in the mempool. However,
+    //   that check uses the initial gas fee estimate, whereas this check uses the gas fees specifically from this bundle.
     async fn check_fees(
         &self,
         op: PoolOperation,
-        base_fee: U256,
+        block_hash: B256,
+        da_block_data: Option<&DAGasBlockData>,
+        base_fee: u128,
         required_op_fees: GasFees,
     ) -> Option<PoolOperation> {
-        let op_hash = self.op_hash(&op.uo);
+        let op_hash = op.uo.hash();
         println!("HC proposer check_fees op {:?}", op);
 
         // filter by fees
@@ -372,8 +425,8 @@ where
             || op.uo.max_priority_fee_per_gas() < required_op_fees.max_priority_fee_per_gas
         {
             self.emit(BuilderEvent::skipped_op(
-                self.builder_index,
-                self.op_hash(&op.uo),
+                self.builder_tag.clone(),
+                op_hash,
                 SkipReason::InsufficientFees {
                     required_fees: required_op_fees,
                     actual_fees: GasFees {
@@ -385,33 +438,66 @@ where
             return None;
         }
 
-        // Check if the pvg is enough
-        let mut required_pvg = match gas::calc_required_pre_verification_gas(
-            &self.settings.chain_spec,
-            &self.entry_point,
-            op.uo.as_ref(),
-            base_fee,
-        )
-        .await
+        if !self.settings.chain_spec.da_pre_verification_gas {
+            // Skip PVG check if no da pre-verification gas as this is checked on entry to the mempool.
+            return Some(op);
+        }
+
+        // TODO(bundle): assuming a bundle size of 1
+        let bundle_size = 1;
+
+        let required_da_gas = if self.settings.da_gas_tracking_enabled
+            && da_block_data.is_some()
+            && self.ep_providers.da_gas_oracle_sync().is_some()
         {
-            Ok(pvg) => pvg,
-            Err(e) => {
-                error!("Failed to calculate required pre-verification gas for op: {e:?}, skipping");
-                self.emit(BuilderEvent::skipped_op(
-                    self.builder_index,
-                    op_hash,
-                    SkipReason::Other {
-                        reason: Arc::new(format!(
-                            "Failed to calculate required pre-verification gas for op: {e:?}, skipping"
-                        )),
-                    },
-                ));
-                return None;
+            let da_gas_oracle = self.ep_providers.da_gas_oracle_sync().as_ref().unwrap();
+            let da_block_data = da_block_data.unwrap();
+            let extra_data_len = op.uo.extra_data_len(bundle_size);
+
+            da_gas_oracle.calc_da_gas_sync(
+                &op.da_gas_data,
+                da_block_data,
+                op.uo.gas_price(base_fee),
+                extra_data_len,
+            )
+        } else {
+            match self
+                .ep_providers
+                .entry_point()
+                .calc_da_gas(
+                    op.uo.clone().into(),
+                    block_hash.into(),
+                    op.uo.gas_price(base_fee),
+                    bundle_size,
+                )
+                .await
+            {
+                Ok((required_da_gas, _, _)) => required_da_gas,
+                Err(e) => {
+                    error!(
+                        "Failed to calculate required pre-verification gas for op: {e:?}, skipping"
+                    );
+                    self.emit(BuilderEvent::skipped_op(
+                        self.builder_tag.clone(),
+                        op_hash,
+                        SkipReason::Other {
+                            reason: Arc::new(format!(
+                                "Failed to calculate required pre-verification gas for op: {e:?}, skipping"
+                            )),
+                        },
+                    ));
+                    return None;
+                }
             }
         };
-
         let hc_hash = op.uo.hc_hash();
         let mut is_hc: bool = false;
+
+        let mut required_pvg = op.uo.required_pre_verification_gas(
+            &self.settings.chain_spec,
+            bundle_size,
+            required_da_gas,
+        );
 
         if let Some(hc_pvg) = hybrid_compute::hc_get_pvg(hc_hash) {
             println!(
@@ -440,7 +526,7 @@ where
                 );
 
                 self.emit(BuilderEvent::rejected_op(
-                    self.builder_index,
+                    self.builder_tag.clone(),
                     hc_hash,
                     OpRejectionReason::FailedInBundle {
                         message: Arc::new("HC insufficient pre_verification_gas".to_owned()),
@@ -451,7 +537,7 @@ where
                 return None; // FIXME
             } else {
                 self.emit(BuilderEvent::skipped_op(
-                    self.builder_index,
+                    self.builder_tag.clone(),
                     op_hash,
                     SkipReason::InsufficientPreVerificationGas {
                         base_fee,
@@ -476,16 +562,19 @@ where
     async fn simulate_op(
         &self,
         op: PoolOperation,
-        block_hash: H256,
+        block_hash: B256,
     ) -> Option<(PoolOperation, Result<SimulationResult, SimulationError>)> {
-        let op_hash = self.op_hash(&op.uo);
+        let _timer_guard =
+            rundler_utils::guard_timer::CustomTimerGuard::new(self.metric.op_simulation_ms.clone());
+        let op_hash = op.uo.hash();
 
         // Simulate
         let result = self
-            .simulator
+            .bundle_providers
+            .simulator()
             .simulate_validation(
                 op.uo.clone().into(),
-                Some(block_hash),
+                block_hash,
                 Some(op.expected_code_hash),
             )
             .await;
@@ -501,7 +590,7 @@ where
                     entity_infos: _,
                 } => {
                     self.emit(BuilderEvent::skipped_op(
-                        self.builder_index,
+                        self.builder_tag.clone(),
                         op_hash,
                         SkipReason::Other {
                             reason: Arc::new(format!("Failed to simulate op: {error:?}, skipping")),
@@ -519,16 +608,16 @@ where
         &self,
         ops_with_simulations: Vec<(PoolOperation, Result<SimulationResult, SimulationError>)>,
         mut balances_by_paymaster: HashMap<Address, U256>,
-    ) -> ProposalContext<UO> {
+    ) -> ProposalContext<<Self as BundleProposer>::UO> {
         let all_sender_addresses: HashSet<Address> = ops_with_simulations
             .iter()
             .map(|(op, _)| op.uo.sender())
             .collect();
-        let mut context = ProposalContext::<UO>::new();
+        let mut context = ProposalContext::<<Self as BundleProposer>::UO>::new();
         let mut paymasters_to_reject = Vec::<EntityInfo>::new();
 
-        let mut gas_spent = self.settings.chain_spec.transaction_intrinsic_gas;
-        let mut cleanup_keys: Vec<H256> = Vec::new();
+        let mut gas_spent = rundler_types::bundle_shared_gas(&self.settings.chain_spec);
+        let mut cleanup_keys: Vec<B256> = Vec::new();
         let mut constructed_bundle_size = BUNDLE_BYTE_OVERHEAD;
 
         for (po, simulation) in ops_with_simulations {
@@ -537,8 +626,8 @@ where
                 Ok(simulation) => simulation,
                 Err(error) => {
                     self.emit(BuilderEvent::rejected_op(
-                        self.builder_index,
-                        self.op_hash(&op),
+                        self.builder_tag.clone(),
+                        op.hash(),
                         OpRejectionReason::FailedRevalidation {
                             error: error.clone(),
                         },
@@ -550,8 +639,7 @@ where
                     {
                         // try to use EntityInfos from the latest simulation, but if it doesn't exist use the EntityInfos from the previous simulation
                         let infos = entity_infos.map_or(po.entity_infos, |e| e);
-                        context.process_simulation_violations(violations, infos);
-                        context.rejected_ops.push((op.into(), po.entity_infos));
+                        context.process_simulation_violations(op.into(), violations, infos);
                     }
                     continue;
                 }
@@ -563,8 +651,8 @@ where
                 .contains(Timestamp::now(), TIME_RANGE_BUFFER)
             {
                 self.emit(BuilderEvent::skipped_op(
-                    self.builder_index,
-                    self.op_hash(&op),
+                    self.builder_tag.clone(),
+                    op.hash(),
                     SkipReason::InvalidTimeRange {
                         valid_range: simulation.valid_time_range,
                     },
@@ -573,19 +661,23 @@ where
                 continue;
             }
 
+            // Limit by transaction size
             let op_size_bytes: usize = op.abi_encoded_size();
-
             let op_size_with_offset_word = op_size_bytes.saturating_add(USER_OP_OFFSET_WORD_SIZE);
-
             if op_size_with_offset_word.saturating_add(constructed_bundle_size)
                 >= self.settings.chain_spec.max_transaction_size_bytes
             {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_tag.clone(),
+                    op.hash(),
+                    SkipReason::TransactionSizeLimit,
+                ));
                 continue;
             }
 
             // Skip this op if the bundle does not have enough remaining gas to execute it.
-            let mut required_gas = gas_spent
-                + gas::user_operation_execution_gas_limit(&self.settings.chain_spec, &op, false);
+            let mut required_gas =
+                gas_spent + op.computation_gas_limit(&self.settings.chain_spec, None);
 
             let hc_hash = op.hc_hash();
             let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
@@ -597,7 +689,34 @@ where
                 );
             }
 
-            if required_gas > self.settings.max_bundle_gas.into() {
+            if required_gas > self.settings.max_bundle_gas {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_tag.clone(),
+                    op.hash(),
+                    SkipReason::GasLimit,
+                ));
+                continue;
+            }
+
+            // Merge the expected storage and skip if there is a conflict or if the storage is over max
+            if let Err(e) = context
+                .bundle_expected_storage
+                .add(&simulation.expected_storage)
+            {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_tag.clone(),
+                    op.hash(),
+                    SkipReason::ExpectedStorageConflict(e.to_string()),
+                ));
+                continue;
+            } else if context.bundle_expected_storage.inner.num_slots()
+                > self.settings.max_expected_storage_slots
+            {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_tag.clone(),
+                    op.hash(),
+                    SkipReason::ExpectedStorageLimit,
+                ));
                 continue;
             }
 
@@ -610,12 +729,13 @@ where
                 // batch, but don't reject them (remove them from pool).
                 info!("Excluding op from {:?} because it accessed the address of another sender in the bundle.", op.sender());
                 self.emit(BuilderEvent::skipped_op(
-                    self.builder_index,
-                    self.op_hash(&op),
+                    self.builder_tag.clone(),
+                    op.hash(),
                     SkipReason::AccessedOtherSender { other_sender },
                 ));
                 continue;
             }
+
             if let Some(paymaster) = op.paymaster() {
                 let Some(balance) = balances_by_paymaster.get_mut(&paymaster) else {
                     error!("Op had paymaster with unknown balance, but balances should have been loaded for all paymasters in bundle.");
@@ -632,12 +752,18 @@ where
             }
 
             // Update the running gas that would need to be be spent to execute the bundle so far.
-            gas_spent +=
-                gas::user_operation_execution_gas_limit(&self.settings.chain_spec, &op, false);
+            gas_spent += op.computation_gas_limit(&self.settings.chain_spec, None);
 
             if hc_ent.is_some() {
+                let (block_hash, _) = self
+                    .ep_providers
+                    .evm()
+                    .get_latest_block_hash_and_number()
+                    .await
+                    .expect("get block_hash for hc");
+
                 gas_spent += hc_ent.clone().unwrap().oc_gas;
-                //println!("HC insert, hc_ent {:?}", hc_ent);
+                println!("HC insert, hc_ent {:?}", hc_ent);
                 let u_op2: UserOperationVariant = hc_ent
                     .clone()
                     .unwrap()
@@ -645,14 +771,15 @@ where
                     .into_variant(&self.settings.chain_spec);
 
                 let sim_result = self
-                    .simulator
-                    .simulate_validation(u_op2.clone().into(), None, None)
+                    .bundle_providers
+                    .simulator()
+                    .simulate_validation(u_op2.clone().into(), block_hash, None)
                     .await
-                    .expect("Failed to unwrap sim_result"); // FIXME
+                    .expect("simulate u_op2");
 
                 context
                     .groups_by_aggregator
-                    .entry(simulation.aggregator_address())
+                    .entry(op.aggregator())
                     .or_default()
                     .ops_with_simulations
                     .push(OpWithSimulation {
@@ -667,7 +794,7 @@ where
 
             context
                 .groups_by_aggregator
-                .entry(simulation.aggregator_address())
+                .entry(op.aggregator())
                 .or_default()
                 .ops_with_simulations
                 .push(OpWithSimulation {
@@ -679,28 +806,29 @@ where
         if !cleanup_keys.is_empty() {
             println!("HC cleanup_keys {:?}", cleanup_keys);
             let cfg = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
-            let c_nonce = self
-                .entry_point
-                .get_nonce(cfg.sys_account, U256::zero())
+            let entry_point = self.ep_providers.entry_point();
+            let c_nonce = entry_point
+                .get_nonce(cfg.sys_account, U192::ZERO)
                 .await
                 .unwrap();
-            let is_v7 =
-                self.entry_point.address() == self.settings.chain_spec.entry_point_address_v0_7;
-            let cleanup_op: UserOperationVariant = hybrid_compute::rr_op(
-                &cfg,
-                self.entry_point.address(),
-                c_nonce,
-                cleanup_keys,
-                is_v7,
-            )
-            .await
-            .into_variant(&self.settings.chain_spec);
+            let is_v7 = *entry_point.address() == self.settings.chain_spec.entry_point_address_v0_7;
+            let cleanup_op: UserOperationVariant =
+                hybrid_compute::rr_op(&cfg, *entry_point.address(), c_nonce, cleanup_keys, is_v7)
+                    .await
+                    .into_variant(&self.settings.chain_spec);
+            let (block_hash, _) = self
+                .ep_providers
+                .evm()
+                .get_latest_block_hash_and_number()
+                .await
+                .expect("get block_hash for hc");
 
             let cleanup_sim = self
-                .simulator
-                .simulate_validation(cleanup_op.clone().into(), None, None)
+                .bundle_providers
+                .simulator()
+                .simulate_validation(cleanup_op.clone().into(), block_hash, None)
                 .await
-                .expect("Failed to unwrap sim_result");
+                .expect("simulate cleanup_op");
 
             context
                 .groups_by_aggregator
@@ -717,11 +845,16 @@ where
             // No need to update aggregator signatures because we haven't computed them yet.
             let _ = context.reject_entity(paymaster.entity, paymaster.is_staked);
         }
+
         self.compute_all_aggregator_signatures(&mut context).await;
+
         context
     }
 
-    async fn check_conditions_met(&self, context: &mut ProposalContext<UO>) -> anyhow::Result<()> {
+    async fn check_conditions_met(
+        &self,
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
+    ) -> anyhow::Result<()> {
         let futs = context
             .iter_ops_with_simulations()
             .enumerate()
@@ -736,11 +869,11 @@ where
 
         for (index, reason) in to_reject {
             self.emit(BuilderEvent::rejected_op(
-                self.builder_index,
-                self.op_hash(&context.get_op_at(index)?.op),
+                self.builder_tag.clone(),
+                context.get_op_at(index)?.op.hash(),
                 OpRejectionReason::ConditionNotMet(reason),
             ));
-            self.reject_index(context, index).await;
+            self.reject_index(context, index, false).await;
         }
 
         Ok(())
@@ -755,7 +888,8 @@ where
             .iter()
             .map(|(address, slots)| async move {
                 let storage = match self
-                    .provider
+                    .ep_providers
+                    .evm()
                     .batch_get_storage_at(*address, slots.keys().copied().collect())
                     .await
                 {
@@ -788,15 +922,37 @@ where
         None
     }
 
-    async fn reject_index(&self, context: &mut ProposalContext<UO>, i: usize) {
-        let changed_aggregator = context.reject_index(i);
+    async fn reject_bundle(&self, context: &mut ProposalContext<<Self as BundleProposer>::UO>) {
+        context.reject_all();
+    }
+
+    async fn reject_hash(
+        &self,
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
+        hash: B256,
+    ) -> bool {
+        let Some(index) = context.get_op_index(hash) else {
+            return false;
+        };
+
+        self.reject_index(context, index, false).await;
+        true
+    }
+
+    async fn reject_index(
+        &self,
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
+        i: usize,
+        paymaster_amendment: bool,
+    ) {
+        let changed_aggregator = context.reject_index(i, paymaster_amendment);
         self.compute_aggregator_signatures(context, &changed_aggregator)
             .await;
     }
 
     async fn reject_entity(
         &self,
-        context: &mut ProposalContext<UO>,
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
         entity: Entity,
         is_staked: bool,
     ) {
@@ -805,7 +961,10 @@ where
             .await;
     }
 
-    async fn compute_all_aggregator_signatures(&self, context: &mut ProposalContext<UO>) {
+    async fn compute_all_aggregator_signatures(
+        &self,
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
+    ) {
         let aggregators: Vec<_> = context
             .groups_by_aggregator
             .keys()
@@ -818,7 +977,7 @@ where
 
     async fn compute_aggregator_signatures<'a>(
         &self,
-        context: &mut ProposalContext<UO>,
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
         aggregators: impl IntoIterator<Item = &'a Address>,
     ) {
         let signature_futures = aggregators.into_iter().filter_map(|&aggregator| {
@@ -838,14 +997,19 @@ where
     /// op(s) caused the failure.
     async fn estimate_gas_rejecting_failed_ops(
         &self,
-        context: &mut ProposalContext<UO>,
-    ) -> BundleProposerResult<Option<U256>> {
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
+        bundle_fees: GasFees,
+    ) -> BundleProposerResult<Option<u64>> {
         // sum up the gas needed for all the ops in the bundle
         // and apply an overhead multiplier
         let gas = math::increase_by_percent(
             context.get_bundle_gas_limit(&self.settings.chain_spec),
             BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT,
         );
+
+        let gas_limit: u64 = gas
+            .try_into()
+            .context("estimated bundle gas limit is larger than u64::MAX")?;
 
         // call handle ops with the bundle to filter any rejected ops before sending
         println!(
@@ -854,21 +1018,25 @@ where
             context.to_ops_per_aggregator()
         );
         let handle_ops_out = self
-            .entry_point
+            .ep_providers
+            .entry_point()
             .call_handle_ops(
                 context.to_ops_per_aggregator(),
-                self.settings.beneficiary,
-                gas,
+                self.settings.sender_eoa,
+                gas_limit,
+                bundle_fees,
+                self.settings.submission_proxy.as_ref().map(|p| p.address()),
             )
             .await
             .context("should call handle ops with candidate bundle")?;
+
         println!("HC bundle_proposer gas2 result {:?}", handle_ops_out);
         match handle_ops_out {
-            HandleOpsOut::Success => Ok(Some(gas)),
+            HandleOpsOut::Success => Ok(Some(gas_limit)),
             HandleOpsOut::FailedOp(index, message) => {
                 self.emit(BuilderEvent::rejected_op(
-                    self.builder_index,
-                    self.op_hash(&context.get_op_at(index)?.op),
+                    self.builder_tag.clone(),
+                    context.get_op_at(index)?.op.hash(),
                     OpRejectionReason::FailedInBundle {
                         message: Arc::new(message.clone()),
                     },
@@ -878,13 +1046,43 @@ where
             }
             HandleOpsOut::SignatureValidationFailed(aggregator) => {
                 info!("Rejected aggregator {aggregator:?} because its signature validation failed during gas estimation.");
-                self.reject_entity(context, Entity::aggregator(aggregator), false)
+                self.reject_entity(context, Entity::aggregator(aggregator), true)
                     .await;
                 Ok(None)
             }
             HandleOpsOut::PostOpRevert => {
                 warn!("PostOpShortRevert error during gas estimation due to bug in the 0.6 entry point contract. Removing the offending op from the bundle.");
-                self.process_post_op_revert(context, gas).await?;
+                self.process_post_op_revert(context, gas_limit, bundle_fees)
+                    .await?;
+                Ok(None)
+            }
+            HandleOpsOut::Revert(revert_data) => {
+                // Process the revert.
+                // If we can't identify the offending op, reject the full bundle to avoid infinite failure loops.
+
+                if let Some(proxy) = self.settings.submission_proxy.as_ref() {
+                    let ops = context
+                        .to_ops_per_aggregator()
+                        .into_iter()
+                        .map(|uo| uo.into_uo_variants())
+                        .collect::<Vec<_>>();
+                    let to_remove = proxy.process_revert(&revert_data, &ops).await;
+                    let mut removed = false;
+                    for hash in to_remove {
+                        removed |= self.reject_hash(context, hash).await;
+                    }
+
+                    if !removed {
+                        warn!("HandleOps reverted during gas estimation, proxy {proxy:?} returned no hashes to remove. Rejecting full bundle. revert data: {revert_data:?}");
+                        self.reject_bundle(context).await;
+                    }
+                } else {
+                    warn!(
+                        "HandleOps reverted during gas estimation. Rejecting full bundle. revert data: {revert_data:?}"
+                    );
+                    self.reject_bundle(context).await;
+                }
+
                 Ok(None)
             }
         }
@@ -897,11 +1095,13 @@ where
         // NOTE: this assumes that the pool server has as many shards as there
         // are builders.
         Ok(self
-            .pool
+            .bundle_providers
+            .pool()
             .get_ops(
-                self.entry_point.address(),
+                *self.ep_providers.entry_point().address(),
                 self.settings.max_bundle_size,
                 self.builder_index,
+                self.filter_id.clone(),
             )
             .await
             .context("should get ops from pool")?
@@ -912,12 +1112,13 @@ where
     async fn get_balances_by_paymaster(
         &self,
         addresses: impl IntoIterator<Item = Address>,
-        block_hash: H256,
+        block_hash: B256,
     ) -> BundleProposerResult<HashMap<Address, U256>> {
         let futures = addresses.into_iter().map(|address| async move {
             let deposit = self
-                .entry_point
-                .balance_of(address, Some(BlockId::Hash(block_hash)))
+                .ep_providers
+                .entry_point()
+                .balance_of(address, Some(block_hash.into()))
                 .await?;
             Ok::<_, anyhow::Error>((address, deposit))
         });
@@ -930,24 +1131,37 @@ where
     async fn aggregate_signatures(
         &self,
         aggregator: Address,
-        group: &AggregatorGroup<UO>,
-    ) -> (Address, anyhow::Result<Option<Bytes>>) {
-        let ops = group
+        group: &AggregatorGroup<<Self as BundleProposer>::UO>,
+    ) -> (Address, SignatureAggregatorResult<Bytes>) {
+        let Some(agg) = self
+            .settings
+            .chain_spec
+            .get_signature_aggregator(&aggregator)
+        else {
+            // this should be checked prior to calling this function
+            panic!("BUG: aggregator {aggregator:?} not found in chain spec");
+        };
+
+        let uos = group
             .ops_with_simulations
             .iter()
-            .map(|op_with_simulation| op_with_simulation.op.clone())
-            .collect();
-        let result = self
-            .entry_point
-            .aggregate_signatures(aggregator, ops)
-            .await
-            .map_err(anyhow::Error::from);
-        (aggregator, result)
+            // Mempool ops are transformed during insertion - use the original signature to aggregate
+            .map(|op| op.op.clone().with_original_signature().into())
+            .collect::<Vec<_>>();
+
+        let aggregated = match agg.aggregate_signatures(uos).await {
+            Ok(aggregated) => aggregated,
+            Err(e) => {
+                return (aggregator, Err(e));
+            }
+        };
+
+        (aggregator, Ok(aggregated))
     }
 
     async fn process_failed_op(
         &self,
-        context: &mut ProposalContext<UO>,
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
         index: usize,
         message: String,
     ) -> anyhow::Result<()> {
@@ -965,7 +1179,7 @@ where
                         .simulation
                         .entity_infos
                         .factory
-                        .map_or(false, |f| f.is_staked),
+                        .is_some_and(|f| f.is_staked),
                 )
                 .await;
             }
@@ -984,7 +1198,7 @@ where
                         .simulation
                         .entity_infos
                         .paymaster
-                        .map_or(false, |p| p.is_staked),
+                        .is_some_and(|p| p.is_staked),
                 )
                 .await;
             }
@@ -992,7 +1206,7 @@ where
                 info!(
                     "Rejected op because it failed during gas estimation with message {message}."
                 );
-                self.reject_index(context, index).await;
+                self.reject_index(context, index, true).await;
                 return Ok(());
             }
         };
@@ -1007,8 +1221,9 @@ where
     // from the bundle and from the pool.
     async fn process_post_op_revert(
         &self,
-        context: &mut ProposalContext<UO>,
-        gas: U256,
+        context: &mut ProposalContext<<Self as BundleProposer>::UO>,
+        gas_limit: u64,
+        bundle_fees: GasFees,
     ) -> anyhow::Result<()> {
         let agg_groups = context.to_ops_per_aggregator();
         let mut op_index = 0;
@@ -1018,17 +1233,23 @@ where
             // For non-aggregated ops, re-simulate each op individually
             if agg_group.aggregator.is_zero() {
                 for op in agg_group.user_ops {
-                    futures.push(Box::pin(
-                        self.check_for_post_op_revert_single_op(op, gas, op_index),
-                    ));
+                    futures.push(Box::pin(self.check_for_post_op_revert_single_op(
+                        op,
+                        op_index,
+                        gas_limit,
+                        bundle_fees,
+                    )));
                     op_index += 1;
                 }
             } else {
                 // For aggregated ops, re-simulate the group
                 let len = agg_group.user_ops.len();
-                futures.push(Box::pin(
-                    self.check_for_post_op_revert_agg_ops(agg_group, gas, op_index),
-                ));
+                futures.push(Box::pin(self.check_for_post_op_revert_agg_ops(
+                    agg_group,
+                    op_index,
+                    gas_limit,
+                    bundle_fees,
+                )));
                 op_index += len;
             }
         }
@@ -1046,13 +1267,13 @@ where
         // iterate in reverse so that we can remove ops without affecting the index of the next op to remove
         for index in to_remove.into_iter().rev() {
             self.emit(BuilderEvent::rejected_op(
-                self.builder_index,
-                self.op_hash(&context.get_op_at(index)?.op),
+                self.builder_tag.clone(),
+                context.get_op_at(index)?.op.hash(),
                 OpRejectionReason::FailedInBundle {
                     message: Arc::new("post op reverted leading to entry point revert".to_owned()),
                 },
             ));
-            self.reject_index(context, index).await;
+            self.reject_index(context, index, true).await;
         }
 
         Ok(())
@@ -1060,19 +1281,27 @@ where
 
     async fn check_for_post_op_revert_single_op(
         &self,
-        op: UO,
-        gas: U256,
+        op: <Self as BundleProposer>::UO,
         op_index: usize,
+        gas_limit: u64,
+        bundle_fees: GasFees,
     ) -> Vec<usize> {
-        let op_hash = self.op_hash(&op);
+        let op_hash = op.hash();
         let bundle = vec![UserOpsPerAggregator {
-            aggregator: Address::zero(),
+            aggregator: Address::ZERO,
             signature: Bytes::new(),
             user_ops: vec![op],
         }];
         let ret = self
-            .entry_point
-            .call_handle_ops(bundle, self.settings.beneficiary, gas)
+            .ep_providers
+            .entry_point()
+            .call_handle_ops(
+                bundle,
+                self.settings.sender_eoa,
+                gas_limit,
+                bundle_fees,
+                self.settings.submission_proxy.as_ref().map(|p| p.address()),
+            )
             .await;
         match ret {
             Ok(out) => {
@@ -1096,16 +1325,24 @@ where
 
     async fn check_for_post_op_revert_agg_ops(
         &self,
-        group: UserOpsPerAggregator<UO>,
-        gas: U256,
+        group: UserOpsPerAggregator<<Self as BundleProposer>::UO>,
         start_index: usize,
+        gas_limit: u64,
+        bundle_fees: GasFees,
     ) -> Vec<usize> {
         let len = group.user_ops.len();
         let agg = group.aggregator;
         let bundle = vec![group];
         let ret = self
-            .entry_point
-            .call_handle_ops(bundle, self.settings.beneficiary, gas)
+            .ep_providers
+            .entry_point()
+            .call_handle_ops(
+                bundle,
+                self.settings.sender_eoa,
+                gas_limit,
+                bundle_fees,
+                self.settings.submission_proxy.as_ref().map(|p| p.address()),
+            )
             .await;
         match ret {
             Ok(out) => {
@@ -1130,19 +1367,35 @@ where
     fn limit_user_operations_for_simulation(
         &self,
         ops: Vec<PoolOperation>,
-    ) -> (Vec<PoolOperation>, u64) {
+    ) -> (Vec<PoolOperation>, u128) {
         // Make the bundle gas limit 10% higher here so that we simulate more UOs than we need in case that we end up dropping some UOs later so we can still pack a full bundle
-        let mut gas_left = math::increase_by_percent(U256::from(self.settings.max_bundle_gas), 10);
+        let mut gas_left = math::increase_by_percent(self.settings.max_bundle_gas, 10);
         let mut ops_in_bundle = Vec::new();
         for op in ops {
+            // if the op has an aggregator, check if the aggregator is supported, if not skip
+            if let Some(agg) = op.uo.aggregator() {
+                if self
+                    .settings
+                    .chain_spec
+                    .get_signature_aggregator(&agg)
+                    .is_none()
+                {
+                    self.emit(BuilderEvent::skipped_op(
+                        self.builder_tag.clone(),
+                        op.uo.hash(),
+                        SkipReason::UnsupportedAggregator(agg),
+                    ));
+                    continue;
+                }
+            }
+
             // Here we use optimistic gas limits for the UOs by assuming none of the paymaster UOs use postOp calls.
             // This way after simulation once we have determined if each UO actually uses a postOp call or not we can still pack a full bundle
-            let gas =
-                gas::user_operation_execution_gas_limit(&self.settings.chain_spec, &op.uo, false);
+            let gas = op.uo.computation_gas_limit(&self.settings.chain_spec, None);
             if gas_left < gas {
                 self.emit(BuilderEvent::skipped_op(
-                    self.builder_index,
-                    self.op_hash(&op.uo),
+                    self.builder_tag.clone(),
+                    op.uo.hash(),
                     SkipReason::GasLimit,
                 ));
                 continue;
@@ -1152,24 +1405,71 @@ where
         }
         (
             ops_in_bundle,
-            self.settings
-                .max_bundle_gas
-                .saturating_sub(gas_left.as_u64()),
+            self.settings.max_bundle_gas.saturating_sub(gas_left),
         )
     }
 
     fn emit(&self, event: BuilderEvent) {
         let _ = self.event_sender.send(WithEntryPoint {
-            entry_point: self.entry_point.address(),
+            entry_point: *self.ep_providers.entry_point().address(),
             event,
         });
     }
+}
 
-    fn op_hash<T>(&self, op: &T) -> H256
-    where
-        T: UserOperation,
-    {
-        op.hash(self.entry_point.address(), self.settings.chain_spec.id)
+// Type erasure for the bundle proposer providers
+pub(crate) trait BundleProposerProvidersT: Send + Sync {
+    type UO: UserOperation + From<UserOperationVariant>;
+    type Pool: Pool;
+    type Simulator: Simulator<UO = Self::UO>;
+    type FeeEstimator: FeeEstimator;
+
+    fn pool(&self) -> &Self::Pool;
+
+    fn simulator(&self) -> &Self::Simulator;
+
+    fn fee_estimator(&self) -> &Self::FeeEstimator;
+}
+
+pub(crate) struct BundleProposerProviders<P, S, F> {
+    pool: P,
+    simulator: S,
+    fee_estimator: F,
+}
+
+impl<P, S, F> BundleProposerProviders<P, S, F> {
+    pub(crate) fn new(pool: P, simulator: S, fee_estimator: F) -> Self {
+        Self {
+            pool,
+            simulator,
+            fee_estimator,
+        }
+    }
+}
+
+impl<P, S, F> BundleProposerProvidersT for BundleProposerProviders<P, S, F>
+where
+    P: Pool,
+    S: Simulator,
+    S::UO: UserOperation + From<UserOperationVariant>,
+    P: Pool,
+    F: FeeEstimator,
+{
+    type UO = S::UO;
+    type Pool = P;
+    type Simulator = S;
+    type FeeEstimator = F;
+
+    fn pool(&self) -> &Self::Pool {
+        &self.pool
+    }
+
+    fn simulator(&self) -> &Self::Simulator {
+        &self.simulator
+    }
+
+    fn fee_estimator(&self) -> &Self::FeeEstimator {
+        &self.fee_estimator
     }
 }
 
@@ -1177,17 +1477,6 @@ where
 struct OpWithSimulation<UO> {
     op: UO,
     simulation: SimulationResult,
-}
-
-impl<UO: UserOperation> OpWithSimulation<UO> {
-    fn op_with_replaced_sig(&self) -> UO {
-        let mut op = self.op.clone();
-        if self.simulation.aggregator.is_some() {
-            // if using an aggregator, clear out the user op signature
-            op.clear_signature();
-        }
-        op
-    }
 }
 
 /// A struct used internally to represent the current state of a proposed bundle
@@ -1200,6 +1489,7 @@ struct ProposalContext<UO> {
     rejected_ops: Vec<(UO, EntityInfos)>,
     // This is a BTreeMap so that the conversion to a Vec<EntityUpdate> is deterministic, mainly for tests
     entity_updates: BTreeMap<Address, EntityUpdate>,
+    bundle_expected_storage: BundleExpectedStorage,
 }
 
 #[derive(Debug)]
@@ -1223,6 +1513,7 @@ impl<UO: UserOperation> ProposalContext<UO> {
             groups_by_aggregator: LinkedHashMap::<Option<Address>, AggregatorGroup<UO>>::new(),
             rejected_ops: Vec::<(UO, EntityInfos)>::new(),
             entity_updates: BTreeMap::new(),
+            bundle_expected_storage: BundleExpectedStorage::default(),
         }
     }
 
@@ -1233,14 +1524,13 @@ impl<UO: UserOperation> ProposalContext<UO> {
     fn apply_aggregation_signature_result(
         &mut self,
         aggregator: Address,
-        result: anyhow::Result<Option<Bytes>>,
+        result: SignatureAggregatorResult<Bytes>,
     ) {
         match result {
-            Ok(Some(sig)) => self.groups_by_aggregator[&Some(aggregator)].signature = sig,
-            Ok(None) => self.reject_aggregator(aggregator),
+            Ok(sig) => self.groups_by_aggregator[&Some(aggregator)].signature = sig,
             Err(error) => {
-                error!("Failed to compute aggregator signature: {error}");
-                self.groups_by_aggregator.remove(&Some(aggregator));
+                error!("Failed to compute aggregator signature, rejecting aggregator {aggregator:?}: {error}");
+                self.reject_aggregator(aggregator);
             }
         }
     }
@@ -1256,22 +1546,35 @@ impl<UO: UserOperation> ProposalContext<UO> {
         anyhow::bail!("op at {index} out of bounds")
     }
 
+    fn get_op_index(&self, hash: B256) -> Option<usize> {
+        self.iter_ops_with_simulations()
+            .position(|op| op.op.hash() == *hash)
+    }
+
+    fn reject_all(&mut self) {
+        for _ in 0..self.iter_ops_with_simulations().count() {
+            let _ = self.reject_index(0, true);
+        }
+    }
+
     /// Returns the address of the op's aggregator if the aggregator's signature
     /// may need to be recomputed.
     #[must_use = "rejected op but did not update aggregator signatures"]
-    fn reject_index(&mut self, i: usize) -> Option<Address> {
+    fn reject_index(&mut self, i: usize, paymaster_amendment: bool) -> Option<Address> {
         let mut remaining_i = i;
         let mut found_aggregator: Option<Option<Address>> = None;
         for (&aggregator, group) in &mut self.groups_by_aggregator {
             if remaining_i < group.ops_with_simulations.len() {
                 let rejected = group.ops_with_simulations.remove(remaining_i);
+
                 println!(
                     "HC reject_index at {:?} of {:?} - {:?}",
                     i,
                     group.ops_with_simulations.len(),
                     rejected.op
                 );
-                if rejected.op.max_fee_per_gas() == U256::from(0) {
+
+                if rejected.op.max_fee_per_gas() == 0 {
                     // Assume an Offchain op
                     if i == group.ops_with_simulations.len() {
                         println!("HC ERR rejecting Cleanup op {:?}", rejected.op);
@@ -1290,8 +1593,7 @@ impl<UO: UserOperation> ProposalContext<UO> {
                     }
                 }
 
-                self.rejected_ops
-                    .push((rejected.op, rejected.simulation.entity_infos));
+                self.reject_op(rejected, paymaster_amendment);
                 found_aggregator = Some(aggregator);
                 break;
             }
@@ -1319,13 +1621,10 @@ impl<UO: UserOperation> ProposalContext<UO> {
     fn reject_entity(&mut self, entity: Entity, is_staked: bool) -> Vec<Address> {
         println!("HC reject_entity for {:?}", entity);
         let ret = match entity.kind {
-            EntityType::Aggregator => {
-                self.reject_aggregator(entity.address);
-                vec![]
-            }
             EntityType::Paymaster => self.reject_paymaster(entity.address),
             EntityType::Factory => self.reject_factory(entity.address),
-            _ => vec![],
+            EntityType::Account => self.reject_sender(entity.address),
+            EntityType::Aggregator => self.reject_aggregator(entity.address),
         };
         self.entity_updates.insert(
             entity.address,
@@ -1336,49 +1635,88 @@ impl<UO: UserOperation> ProposalContext<UO> {
                 } else {
                     EntityUpdateType::UnstakedInvalidation
                 },
+                ..Default::default()
             },
         );
         ret
     }
 
-    fn reject_aggregator(&mut self, address: Address) {
-        self.groups_by_aggregator.remove(&Some(address));
-    }
-
     fn reject_paymaster(&mut self, address: Address) -> Vec<Address> {
-        self.filter_reject(|op| op.paymaster() == Some(address))
+        self.filter_reject(false, |op| op.paymaster() == Some(address))
     }
 
+    // In accordance with [EREP-015]/[EREP-020]/[EREP-030], responsibility for failures lies with the factory or account.
+    // Paymasters should not be held accountable, so the paymaster's `opsSeen` count should be decremented accordingly.
+    // Paymaster amendment is required for all other entities rejections.
     fn reject_factory(&mut self, address: Address) -> Vec<Address> {
-        self.filter_reject(|op| op.factory() == Some(address))
+        self.filter_reject(true, |op| op.factory() == Some(address))
+    }
+
+    fn reject_sender(&mut self, address: Address) -> Vec<Address> {
+        self.filter_reject(true, |op| op.sender() == address)
+    }
+
+    fn reject_aggregator(&mut self, address: Address) -> Vec<Address> {
+        self.filter_reject(true, |op| op.aggregator() == Some(address))
     }
 
     /// Reject all ops that match the filter, and return the addresses of any aggregators
     /// whose signature may need to be recomputed.
-    fn filter_reject(&mut self, filter: impl Fn(&UO) -> bool) -> Vec<Address> {
+    fn filter_reject(
+        &mut self,
+        paymaster_amendment: bool,
+        filter: impl Fn(&UO) -> bool,
+    ) -> Vec<Address> {
         let mut changed_aggregators: Vec<Address> = vec![];
         let mut aggregators_to_remove: Vec<Option<Address>> = vec![];
-        for (&aggregator, group) in &mut self.groups_by_aggregator {
-            // I sure wish `Vec::drain_filter` were stable.
+        let mut new_groups = LinkedHashMap::new();
+        let old_groups = mem::take(&mut self.groups_by_aggregator);
+
+        for (aggregator, group) in old_groups {
             let group_uses_rejected_entity =
                 group.ops_with_simulations.iter().any(|op| filter(&op.op));
+
             if group_uses_rejected_entity {
-                for op in mem::take(&mut group.ops_with_simulations) {
+                let mut new_group = AggregatorGroup::default();
+                for op in group.ops_with_simulations {
                     if !filter(&op.op) {
-                        group.ops_with_simulations.push(op);
+                        new_group.ops_with_simulations.push(op);
+                    } else {
+                        self.reject_op(op, paymaster_amendment);
                     }
                 }
-                if group.ops_with_simulations.is_empty() {
+                if new_group.ops_with_simulations.is_empty() {
                     aggregators_to_remove.push(aggregator);
-                } else if let Some(aggregator) = aggregator {
-                    changed_aggregators.push(aggregator);
+                } else {
+                    new_groups.insert(aggregator, new_group);
+
+                    if let Some(aggregator) = aggregator {
+                        changed_aggregators.push(aggregator);
+                    }
                 }
+            } else {
+                new_groups.insert(aggregator, group);
             }
         }
         for aggregator in aggregators_to_remove {
             self.groups_by_aggregator.remove(&aggregator);
         }
+        self.groups_by_aggregator = new_groups;
         changed_aggregators
+    }
+
+    fn reject_op(&mut self, rejected: OpWithSimulation<UO>, paymaster_amendment: bool) {
+        if paymaster_amendment {
+            if let Some(paymaster) = rejected.op.paymaster() {
+                self.add_erep_015_paymaster_amendment(paymaster, 1);
+            }
+        }
+        self.rejected_ops
+            .push((rejected.op, rejected.simulation.entity_infos));
+
+        // remove associated storage slots
+        self.bundle_expected_storage
+            .remove(&rejected.simulation.expected_storage);
     }
 
     fn to_ops_per_aggregator(&self) -> Vec<UserOpsPerAggregator<UO>> {
@@ -1388,7 +1726,7 @@ impl<UO: UserOperation> ProposalContext<UO> {
                 user_ops: group
                     .ops_with_simulations
                     .iter()
-                    .map(|op| op.op_with_replaced_sig())
+                    .map(|op| op.op.clone())
                     .collect(),
                 aggregator: aggregator.unwrap_or_default(),
                 signature: group.signature.clone(),
@@ -1396,19 +1734,34 @@ impl<UO: UserOperation> ProposalContext<UO> {
             .collect()
     }
 
-    fn get_bundle_gas_limit(&self, chain_spec: &ChainSpec) -> U256 {
-        // TODO(danc): in the 0.7 entrypoint we could optimize this by removing the need for
-        // the 10K gas and 63/64 gas overheads for each op in the bundle and instead calculate exactly
-        // the limit needed to include that overhead for each op.
-        //
-        // In the 0.6 entrypoint we're assuming that we need 1 verification gas buffer for each op in the bundle
-        // regardless of if it uses a post op or not. We can optimize to calculate the exact gas overhead
-        // needed to have the buffer for each op.
+    fn get_bundle_gas_limit(&self, chain_spec: &ChainSpec) -> u128 {
+        // Bundle overhead
+        let mut gas_limit = rundler_types::bundle_shared_gas(chain_spec);
 
-        self.iter_ops_with_simulations()
-            .map(|sim_op| gas::user_operation_gas_limit(chain_spec, &sim_op.op, false))
-            .fold(U256::zero(), |acc, i| acc + i)
-            + chain_spec.transaction_intrinsic_gas
+        // Per aggregator fixed gas
+        for agg in self.groups_by_aggregator.keys().flatten() {
+            if agg.is_zero() {
+                continue;
+            }
+
+            let Some(agg) = chain_spec.get_signature_aggregator(agg) else {
+                // this should be checked prior to calling this function
+                panic!("BUG: aggregator {agg:?} not found in chain spec");
+            };
+
+            gas_limit += agg.costs().execution_fixed_gas;
+
+            // NOTE: this assumes that the DA cost for the aggregated signature is covered by the gas limits
+            // from the UOs (on chains that have DA gas in gas limit). This is enforced during fee check phase.
+        }
+
+        // per UO gas, bundle_size == None to signal to exclude shared gas
+        gas_limit += self
+            .iter_ops_with_simulations()
+            .map(|sim_op| sim_op.op.gas_limit(chain_spec, None))
+            .sum::<u128>();
+
+        gas_limit
     }
 
     fn iter_ops_with_simulations(&self) -> impl Iterator<Item = &OpWithSimulation<UO>> + '_ {
@@ -1424,29 +1777,46 @@ impl<UO: UserOperation> ProposalContext<UO> {
     // Go through the simulation violations for a given op and add all entity updates to pass to the mempool in entity_updates
     fn process_simulation_violations(
         &mut self,
+        op: UO,
         violations: Vec<SimulationViolation>,
         entity_infos: EntityInfos,
     ) {
+        self.rejected_ops.push((op, entity_infos));
+
+        // If a staked factory or sender is present, we attribute errors to them directly.
+
+        // In accordance with [EREP-015]/[EREP-020]/[EREP-030], responsibility for failures lies with the staked factory or account.
+        // Paymasters should not be held accountable, so the paymaster's `opsSeen` count should be decremented accordingly.
+        let is_staked_factory = entity_infos.factory.is_some_and(|f| f.is_staked);
+        let is_staked_sender = entity_infos.sender.is_staked;
+        if is_staked_factory || is_staked_sender {
+            if let Some(paymaster) = entity_infos.paymaster {
+                self.add_erep_015_paymaster_amendment(paymaster.address(), 1)
+            }
+        }
+
         // [EREP-020] When there is a staked factory any error in validation is attributed to it.
-        if entity_infos.factory.map_or(false, |f| f.is_staked) {
+        if is_staked_factory {
             let factory = entity_infos.factory.unwrap();
             self.entity_updates.insert(
                 factory.address(),
                 EntityUpdate {
                     entity: factory.entity,
                     update_type: EntityUpdateType::StakedInvalidation,
+                    value: None,
                 },
             );
             return;
         }
 
         // [EREP-030] When there is a staked sender (without a staked factory) any error in validation is attributed to it.
-        if entity_infos.sender.is_staked {
+        if is_staked_sender {
             self.entity_updates.insert(
                 entity_infos.sender.address(),
                 EntityUpdate {
                     entity: entity_infos.sender.entity,
                     update_type: EntityUpdateType::StakedInvalidation,
+                    value: None,
                 },
             );
             return;
@@ -1454,6 +1824,7 @@ impl<UO: UserOperation> ProposalContext<UO> {
 
         // If not a staked factory or sender, attribute errors to each entity directly.
         // For a given op, there can only be a single update per entity so we don't double count the [UREP-030] throttle penalty.
+        let mut paymaster_amendment_required = false;
         for violation in violations {
             match violation {
                 SimulationViolation::UsedForbiddenOpcode(entity, _, _) => {
@@ -1506,11 +1877,25 @@ impl<UO: UserOperation> ProposalContext<UO> {
                         );
                     }
                 }
+                SimulationViolation::ValidationRevert(ValidationRevert::Operation {
+                    entry_point_reason,
+                    ..
+                }) => {
+                    // [EREP-015] If user operations error derived from factory or account, paymaster opsSeen amendment is required.
+                    paymaster_amendment_required |=
+                        matches!(&entry_point_reason[..3], "AA1" | "AA2");
+                }
                 SimulationViolation::OutOfGas(entity) => {
                     self.add_entity_update(entity, entity_infos)
                 }
                 _ => continue,
             }
+        }
+
+        if paymaster_amendment_required {
+            if let Some(paymaster) = entity_infos.paymaster {
+                self.add_erep_015_paymaster_amendment(paymaster.address(), 1)
+            };
         }
     }
 
@@ -1519,6 +1904,7 @@ impl<UO: UserOperation> ProposalContext<UO> {
         let entity_update = EntityUpdate {
             entity,
             update_type: ProposalContext::<UO>::get_entity_update_type(entity.kind, entity_infos),
+            value: None,
         };
         self.entity_updates.insert(entity.address, entity_update);
     }
@@ -1573,35 +1959,59 @@ impl<UO: UserOperation> ProposalContext<UO> {
             }
         }
     }
+
+    fn add_erep_015_paymaster_amendment(&mut self, address: Address, to_add: u64) {
+        // Insert to entity_updates if entry is vacant, otherwise increment the value (precisely EntityUpdate.value)
+        self.entity_updates
+            .entry(address)
+            .and_modify(|e| {
+                if let Some(value) = &mut e.value {
+                    *value += to_add;
+                }
+            })
+            .or_insert_with(|| EntityUpdate {
+                entity: Entity {
+                    kind: EntityType::Paymaster,
+                    address,
+                },
+                update_type: EntityUpdateType::PaymasterOpsSeenDecrement,
+                value: Some(1),
+            });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use alloy_primitives::{utils::parse_units, Address, B256};
     use anyhow::anyhow;
-    use ethers::{
-        types::{H160, U64},
-        utils::parse_units,
+    use rundler_provider::{
+        MockDAGasOracleSync, MockEntryPointV0_6, MockEvmProvider, ProvidersWithEntryPoint,
     };
-    use rundler_provider::{AggregatorSimOut, MockEntryPointV0_6, MockProvider};
-    use rundler_sim::MockSimulator;
+    use rundler_sim::{MockFeeEstimator, MockSimulator};
     use rundler_types::{
+        aggregator::{
+            AggregatorCosts, MockSignatureAggregator, SignatureAggregator, SignatureAggregatorError,
+        },
+        chain::ContractRegistry,
+        da::BedrockDAGasBlockData,
         pool::{MockPool, SimulationViolation},
-        v0_6::{UserOperation, ENTRY_POINT_INNER_GAS_OVERHEAD},
-        UserOperation as UserOperationTrait, ValidTimeRange,
+        proxy::MockSubmissionProxy,
+        v0_6::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
+        UserOperation as _, ValidTimeRange,
     };
 
     use super::*;
 
     #[tokio::test]
     async fn test_singleton_valid_bundle() {
-        let op = UserOperation {
-            pre_verification_gas: DEFAULT_PVG.into(),
-            verification_gas_limit: 10000.into(),
-            call_gas_limit: 100000.into(),
+        let op = op_from_required(UserOperationRequiredFields {
+            pre_verification_gas: DEFAULT_PVG,
+            verification_gas_limit: 10000,
+            call_gas_limit: 100000,
             ..Default::default()
-        };
+        });
 
         let bundle = simple_make_bundle(vec![MockOp {
             op: op.clone(),
@@ -1611,14 +2021,12 @@ mod tests {
 
         let cs = ChainSpec::default();
 
-        let expected_gas = math::increase_by_percent(
-            op.pre_verification_gas
-                + op.verification_gas_limit * 2
-                + op.call_gas_limit
-                + cs.transaction_intrinsic_gas
-                + ENTRY_POINT_INNER_GAS_OVERHEAD,
+        let expected_gas: u64 = math::increase_by_percent(
+            op.gas_limit(&cs, Some(1)),
             BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT,
-        );
+        )
+        .try_into()
+        .unwrap();
 
         assert_eq!(
             bundle.ops_per_aggregator,
@@ -1708,7 +2116,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drops_but_not_rejects_op_accessing_another_sender() {
+    async fn test_skips_but_not_rejects_op_accessing_another_sender() {
         let op1 = op_with_sender(address(1));
         let op2 = op_with_sender(address(2));
         let bundle = simple_make_bundle(vec![
@@ -1743,13 +2151,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drops_but_not_rejects_op_with_too_low_max_priority_fee() {
+    async fn test_skips_but_not_rejects_op_with_too_low_max_priority_fee() {
         // With 10% required overhead on priority fee, op1 should be excluded
         // but op2 accepted.
-        let base_fee = U256::from(1000);
-        let max_priority_fee_per_gas = U256::from(50);
-        let op1 = op_with_sender_and_fees(address(1), 2054.into(), 54.into());
-        let op2 = op_with_sender_and_fees(address(2), 2055.into(), 55.into());
+        let base_fee = 1000;
+        let max_priority_fee_per_gas = 50;
+        let op1 = op_with_sender_and_fees(address(1), 2049, 49, DEFAULT_PVG);
+        let op2 = op_with_sender_and_fees(address(2), 2050, 50, DEFAULT_PVG);
         let bundle = mock_make_bundle(
             vec![
                 MockOp {
@@ -1768,6 +2176,9 @@ mod tests {
             max_priority_fee_per_gas,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
         )
         .await;
         assert_eq!(
@@ -1781,11 +2192,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drops_but_not_rejects_op_with_too_low_max_fee_per_gas() {
-        let base_fee = U256::from(1000);
-        let max_priority_fee_per_gas = U256::from(50);
-        let op1 = op_with_sender_and_fees(address(1), 1054.into(), 55.into());
-        let op2 = op_with_sender_and_fees(address(2), 1055.into(), 55.into());
+    async fn test_skips_but_not_rejects_op_with_too_low_max_fee_per_gas() {
+        let base_fee = 1000;
+        let max_priority_fee_per_gas = 50;
+        let op1 = op_with_sender_and_fees(address(1), 1049, 49, DEFAULT_PVG);
+        let op2 = op_with_sender_and_fees(address(2), 1050, 50, DEFAULT_PVG);
         let bundle = mock_make_bundle(
             vec![
                 MockOp {
@@ -1804,13 +2215,16 @@ mod tests {
             max_priority_fee_per_gas,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
         )
         .await;
         assert_eq!(
             bundle.gas_fees,
             GasFees {
-                max_fee_per_gas: 1050.into(),
-                max_priority_fee_per_gas: 50.into(),
+                max_fee_per_gas: 1050,
+                max_priority_fee_per_gas: 50,
             }
         );
         assert_eq!(
@@ -1824,12 +2238,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drops_but_not_rejects_op_with_too_low_pvg() {
-        let base_fee = U256::from(1000);
-        let max_priority_fee_per_gas = U256::from(50);
-        let mut op1 = op_with_sender_and_fees(address(1), 1054.into(), 55.into());
-        op1.pre_verification_gas = 0.into(); // Should be dropped but not rejected
-        let op2 = op_with_sender_and_fees(address(2), 1055.into(), 55.into());
+    async fn test_skips_but_not_rejects_op_with_too_low_pvg() {
+        let base_fee = 1000;
+        let max_priority_fee_per_gas = 50;
+        // Should be skipped but not rejected
+        let op1 = op_with_sender_and_fees(address(1), 1054, 55, 0);
+        // Should be included
+        let op2 = op_with_sender_and_fees(address(2), 1055, 55, DEFAULT_PVG);
+
         let bundle = mock_make_bundle(
             vec![
                 MockOp {
@@ -1848,13 +2264,16 @@ mod tests {
             max_priority_fee_per_gas,
             false,
             ExpectedStorage::default(),
+            true,
+            vec![],
+            None,
         )
         .await;
         assert_eq!(
             bundle.gas_fees,
             GasFees {
-                max_fee_per_gas: 1050.into(),
-                max_priority_fee_per_gas: 50.into(),
+                max_fee_per_gas: 1050,
+                max_priority_fee_per_gas: 50,
             }
         );
         assert_eq!(
@@ -1871,17 +2290,21 @@ mod tests {
     async fn test_aggregators() {
         // One op with no aggregator, two from aggregator A, and one from
         // aggregator B.
-        let unaggregated_op = op_with_sender(address(1));
-        let aggregated_op_a1 = op_with_sender(address(2));
-        let aggregated_op_a2 = op_with_sender(address(3));
-        let aggregated_op_b = op_with_sender(address(4));
         let aggregator_a_address = address(10);
         let aggregator_b_address = address(11);
-        let op_a1_aggregated_sig = 11;
-        let op_a2_aggregated_sig = 12;
-        let op_b_aggregated_sig = 21;
+        let unaggregated_op = op_with_sender(address(1));
+        let aggregated_op_a1 =
+            op_with_sender_aggregator(address(2), aggregator_a_address, Bytes::new());
+        let aggregated_op_a2 =
+            op_with_sender_aggregator(address(3), aggregator_a_address, Bytes::new());
+        let aggregated_op_b =
+            op_with_sender_aggregator(address(4), aggregator_b_address, Bytes::new());
         let aggregator_a_signature = 101;
         let aggregator_b_signature = 102;
+
+        let agg_a = mock_signature_aggregator(aggregator_a_address, bytes(aggregator_a_signature));
+        let agg_b = mock_signature_aggregator(aggregator_b_address, bytes(aggregator_b_signature));
+
         let mut bundle = mock_make_bundle(
             vec![
                 MockOp {
@@ -1890,39 +2313,15 @@ mod tests {
                 },
                 MockOp {
                     op: aggregated_op_a1.clone(),
-                    simulation_result: Box::new(move || {
-                        Ok(SimulationResult {
-                            aggregator: Some(AggregatorSimOut {
-                                address: aggregator_a_address,
-                                signature: bytes(op_a1_aggregated_sig),
-                            }),
-                            ..Default::default()
-                        })
-                    }),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
                 },
                 MockOp {
                     op: aggregated_op_a2.clone(),
-                    simulation_result: Box::new(move || {
-                        Ok(SimulationResult {
-                            aggregator: Some(AggregatorSimOut {
-                                address: aggregator_a_address,
-                                signature: bytes(op_a2_aggregated_sig),
-                            }),
-                            ..Default::default()
-                        })
-                    }),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
                 },
                 MockOp {
                     op: aggregated_op_b.clone(),
-                    simulation_result: Box::new(move || {
-                        Ok(SimulationResult {
-                            aggregator: Some(AggregatorSimOut {
-                                address: aggregator_b_address,
-                                signature: bytes(op_b_aggregated_sig),
-                            }),
-                            ..Default::default()
-                        })
-                    }),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
                 },
             ],
             vec![
@@ -1937,10 +2336,13 @@ mod tests {
             ],
             vec![HandleOpsOut::Success],
             vec![],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![agg_a, agg_b],
+            None,
         )
         .await;
         // Ops should be grouped by aggregator. Further, the `signature` field
@@ -1958,29 +2360,109 @@ mod tests {
                     ..Default::default()
                 },
                 UserOpsPerAggregator {
-                    user_ops: vec![
-                        UserOperation {
-                            signature: Bytes::new(),
-                            ..aggregated_op_a1
-                        },
-                        UserOperation {
-                            signature: Bytes::new(),
-                            ..aggregated_op_a2
-                        }
-                    ],
+                    user_ops: vec![aggregated_op_a1, aggregated_op_a2,],
                     aggregator: aggregator_a_address,
                     signature: bytes(aggregator_a_signature)
                 },
                 UserOpsPerAggregator {
-                    user_ops: vec![UserOperation {
-                        signature: Bytes::new(),
-                        ..aggregated_op_b
-                    }],
+                    user_ops: vec![aggregated_op_b],
                     aggregator: aggregator_b_address,
                     signature: bytes(aggregator_b_signature)
                 },
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn test_reject_aggregator() {
+        // One op with no aggregator, two from aggregator A, and one from
+        // aggregator B.
+        let aggregator_a_address = address(10);
+        let aggregator_b_address = address(11);
+        let unaggregated_op = op_with_sender(address(1));
+        let aggregated_op_a1 =
+            op_with_sender_aggregator(address(2), aggregator_a_address, Bytes::new());
+        let aggregated_op_a2 =
+            op_with_sender_aggregator(address(3), aggregator_a_address, Bytes::new());
+        let aggregated_op_b =
+            op_with_sender_aggregator(address(4), aggregator_b_address, Bytes::new());
+
+        let aggregator_a_signature = 101;
+        let aggregator_b_signature = 102;
+
+        let agg_a = mock_signature_aggregator(aggregator_a_address, bytes(aggregator_a_signature));
+
+        // Aggregator B fails validation and should be rejected with its ops
+        let mut agg_b = MockSignatureAggregator::default();
+        agg_b.expect_address().return_const(aggregator_b_address);
+        agg_b
+            .expect_costs()
+            .return_const(AggregatorCosts::default());
+        agg_b
+            .expect_aggregate_signatures()
+            .returning(move |_| Err(SignatureAggregatorError::ValidationReverted(Bytes::new())));
+
+        let mut bundle = mock_make_bundle(
+            vec![
+                MockOp {
+                    op: unaggregated_op.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                },
+                MockOp {
+                    op: aggregated_op_a1.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                },
+                MockOp {
+                    op: aggregated_op_a2.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                },
+                MockOp {
+                    op: aggregated_op_b.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                },
+            ],
+            vec![
+                MockAggregator {
+                    address: aggregator_a_address,
+                    signature: Box::new(move || Ok(Some(bytes(aggregator_a_signature)))),
+                },
+                MockAggregator {
+                    address: aggregator_b_address,
+                    signature: Box::new(move || Ok(Some(bytes(aggregator_b_signature)))),
+                },
+            ],
+            vec![HandleOpsOut::Success],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![agg_a, agg_b],
+            None,
+        )
+        .await;
+
+        bundle
+            .ops_per_aggregator
+            .sort_by(|a, b| a.aggregator.cmp(&b.aggregator));
+
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![
+                UserOpsPerAggregator {
+                    user_ops: vec![unaggregated_op],
+                    ..Default::default()
+                },
+                UserOpsPerAggregator {
+                    user_ops: vec![aggregated_op_a1, aggregated_op_a2,],
+                    aggregator: aggregator_a_address,
+                    signature: bytes(aggregator_a_signature)
+                },
+            ],
+        );
+
+        assert_eq!(bundle.rejected_ops, vec![aggregated_op_b]);
     }
 
     #[tokio::test]
@@ -2027,10 +2509,13 @@ mod tests {
                 HandleOpsOut::Success,
             ],
             vec![deposit, deposit, deposit],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
         )
         .await;
 
@@ -2040,14 +2525,16 @@ mod tests {
                 EntityUpdate {
                     entity: Entity::paymaster(address(1)),
                     update_type: EntityUpdateType::UnstakedInvalidation,
+                    ..Default::default()
                 },
                 EntityUpdate {
                     entity: Entity::factory(address(3)),
                     update_type: EntityUpdateType::UnstakedInvalidation,
+                    ..Default::default()
                 },
             ]
         );
-        assert_eq!(bundle.rejected_ops, vec![]);
+        assert_eq!(bundle.rejected_ops, vec![op1, op2, op4, op5]);
         assert_eq!(
             bundle.ops_per_aggregator,
             vec![UserOpsPerAggregator {
@@ -2058,14 +2545,226 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_paymaster_amended_by_staked_factory_revert() {
+        let sender = address(1);
+        let staked_factory = address(2);
+        let paymaster = address(3);
+
+        let deposit = parse_units("1", "ether").unwrap().into();
+
+        let entity_infos = EntityInfos {
+            sender: EntityInfo::new(Entity::account(sender), false),
+            factory: Some(EntityInfo::new(Entity::factory(staked_factory), true)),
+            paymaster: Some(EntityInfo::new(Entity::paymaster(paymaster), false)),
+            aggregator: None,
+        };
+
+        // EREP-015: If a staked factory or sender is present, we attribute errors to them directly.
+        // Expect EntityUpdateType::PaymasterOpsSeenDecrement to be recorded.
+        let op = op_with_sender_factory_paymaster(sender, staked_factory, paymaster);
+        let bundle = mock_make_bundle(
+            vec![MockOp {
+                op: op.clone(),
+                simulation_result: Box::new(move || {
+                    Err(SimulationError {
+                        violation_error: ViolationError::Violations(vec![]),
+                        entity_infos: Some(entity_infos),
+                    })
+                }),
+            }],
+            vec![],
+            vec![],
+            vec![deposit],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        let mut actual_entity_updates = bundle.entity_updates;
+        let mut expected_entity_updates = vec![
+            EntityUpdate {
+                entity: Entity::factory(staked_factory),
+                update_type: EntityUpdateType::StakedInvalidation,
+                ..Default::default()
+            },
+            EntityUpdate {
+                entity: Entity::paymaster(paymaster),
+                update_type: EntityUpdateType::PaymasterOpsSeenDecrement,
+                value: Some(1),
+            },
+        ];
+
+        // we want to check that the entity updates are the same regardless of order
+        actual_entity_updates.sort_by(|a, b| a.entity.address.cmp(&b.entity.address));
+        expected_entity_updates.sort_by(|a, b| a.entity.address.cmp(&b.entity.address));
+
+        assert_eq!(actual_entity_updates, expected_entity_updates);
+    }
+
+    #[tokio::test]
+    async fn test_paymaster_amended_by_staked_sender_revert() {
+        let sender = address(1);
+        let paymaster = address(2);
+
+        let deposit = parse_units("1", "ether").unwrap().into();
+
+        let entity_infos = EntityInfos {
+            sender: EntityInfo::new(Entity::account(sender), true),
+            factory: None,
+            paymaster: Some(EntityInfo::new(Entity::paymaster(paymaster), false)),
+            aggregator: None,
+        };
+
+        // EREP-015: If not a staked factory or sender, attribute errors to each entity directly.
+        // Expect EntityUpdateType::PaymasterOpsSeenDecrement to be recorded.
+        let op = op_with_sender_paymaster(sender, paymaster);
+        let bundle = mock_make_bundle(
+            vec![MockOp {
+                op: op.clone(),
+                simulation_result: Box::new(move || {
+                    Err(SimulationError {
+                        violation_error: ViolationError::Violations(vec![]),
+                        entity_infos: Some(entity_infos),
+                    })
+                }),
+            }],
+            vec![],
+            vec![],
+            vec![deposit],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        let mut actual_entity_updates = bundle.entity_updates;
+        let mut expected_entity_updates = vec![
+            EntityUpdate {
+                entity: Entity::account(sender),
+                update_type: EntityUpdateType::StakedInvalidation,
+                ..Default::default()
+            },
+            EntityUpdate {
+                entity: Entity::paymaster(paymaster),
+                update_type: EntityUpdateType::PaymasterOpsSeenDecrement,
+                value: Some(1),
+            },
+        ];
+
+        // we want to check that the entity updates are the same regardless of order
+        actual_entity_updates.sort_by(|a, b| a.entity.address.cmp(&b.entity.address));
+        expected_entity_updates.sort_by(|a, b| a.entity.address.cmp(&b.entity.address));
+
+        assert_eq!(actual_entity_updates, expected_entity_updates);
+    }
+
+    #[tokio::test]
+    async fn test_paymaster_amended_by_factory_or_sender_revert() {
+        let sender_1 = address(1);
+        let sender_2 = address(2);
+        let factory = address(3);
+        let paymaster = address(4);
+
+        let deposit = parse_units("1", "ether").unwrap().into();
+
+        let entity_infos_1 = EntityInfos {
+            sender: EntityInfo::new(Entity::account(sender_1), false),
+            factory: Some(EntityInfo::new(Entity::factory(factory), false)),
+            paymaster: Some(EntityInfo::new(Entity::paymaster(paymaster), false)),
+            aggregator: None,
+        };
+
+        let entity_infos_2 = EntityInfos {
+            sender: EntityInfo::new(Entity::account(sender_2), false),
+            factory: Some(EntityInfo::new(Entity::factory(factory), false)),
+            paymaster: Some(EntityInfo::new(Entity::paymaster(paymaster), false)),
+            aggregator: None,
+        };
+
+        // EREP-015: If a staked factory or sender is present, we attribute errors to them directly.
+        // Expect EntityUpdateType::PaymasterOpsSeenDecrement to be recorded.
+        let op_1 = op_with_sender_factory_paymaster(sender_1, factory, paymaster);
+        let op_2 = op_with_sender_factory_paymaster(sender_2, factory, paymaster);
+        let bundle = mock_make_bundle(
+            vec![
+                MockOp {
+                    op: op_1.clone(),
+                    simulation_result: Box::new(move || {
+                        Err(SimulationError {
+                            violation_error: ViolationError::Violations(vec![
+                                SimulationViolation::ValidationRevert(
+                                    ValidationRevert::Operation {
+                                        entry_point_reason: "AA1x: factory related errors"
+                                            .to_string(),
+                                        inner_revert_reason: None,
+                                        inner_revert_data: Bytes::new(),
+                                    },
+                                ),
+                            ]),
+                            entity_infos: Some(entity_infos_1),
+                        })
+                    }),
+                },
+                MockOp {
+                    op: op_2.clone(),
+                    simulation_result: Box::new(move || {
+                        Err(SimulationError {
+                            violation_error: ViolationError::Violations(vec![
+                                SimulationViolation::ValidationRevert(
+                                    ValidationRevert::Operation {
+                                        entry_point_reason: "AA2x: sender related errors"
+                                            .to_string(),
+                                        inner_revert_reason: None,
+                                        inner_revert_data: Bytes::new(),
+                                    },
+                                ),
+                            ]),
+                            entity_infos: Some(entity_infos_2),
+                        })
+                    }),
+                },
+            ],
+            vec![],
+            vec![],
+            vec![deposit, deposit],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        let actual_entity_updates = bundle.entity_updates;
+        let expected_entity_updates = vec![EntityUpdate {
+            entity: Entity::paymaster(paymaster),
+            update_type: EntityUpdateType::PaymasterOpsSeenDecrement,
+            value: Some(2),
+        }];
+
+        assert_eq!(actual_entity_updates, expected_entity_updates);
+    }
+
+    #[tokio::test]
     async fn test_bundle_gas_limit_simple() {
         // Limit is 10M
         // Each OP has 1M pre_verification_gas, 0 verification_gas_limit, call_gas_limit is passed in
-        let op1 = op_with_sender_call_gas_limit(address(1), U256::from(4_000_000));
-        let op2 = op_with_sender_call_gas_limit(address(2), U256::from(3_000_000));
+        let op1 = op_with_sender_call_gas_limit(address(1), 4_000_000);
+        let op2 = op_with_sender_call_gas_limit(address(2), 3_000_000);
         // these two shouldn't be included in the bundle
-        let op3 = op_with_sender_call_gas_limit(address(3), U256::from(10_000_000));
-        let op4 = op_with_sender_call_gas_limit(address(4), U256::from(10_000_000));
+        let op3 = op_with_sender_call_gas_limit(address(3), 10_000_000);
+        let op4 = op_with_sender_call_gas_limit(address(4), 10_000_000);
         let deposit = parse_units("1", "ether").unwrap().into();
 
         let bundle = mock_make_bundle(
@@ -2090,12 +2789,22 @@ mod tests {
             vec![],
             vec![HandleOpsOut::Success],
             vec![deposit, deposit, deposit],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
         )
         .await;
+
+        let cs = ChainSpec::default();
+        let expected_gas_limit: u64 = (op1.gas_limit(&cs, None)
+            + op2.gas_limit(&cs, None)
+            + rundler_types::bundle_shared_gas(&cs))
+        .try_into()
+        .unwrap();
 
         assert_eq!(bundle.entity_updates, vec![]);
         assert_eq!(bundle.rejected_ops, vec![]);
@@ -2108,18 +2817,15 @@ mod tests {
         );
         assert_eq!(
             bundle.gas_estimate,
-            U256::from(math::increase_by_percent(
-                9_000_000 + 2 * 5_000 + 21_000,
-                BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT
-            ))
+            math::increase_by_percent(expected_gas_limit, BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT)
         );
     }
 
     #[tokio::test]
     async fn test_bundle_gas_limit() {
         let cs = ChainSpec::default();
-        let op1 = op_with_gas(100_000.into(), 100_000.into(), 1_000_000.into(), false);
-        let op2 = op_with_gas(100_000.into(), 100_000.into(), 200_000.into(), false);
+        let op1 = op_with_gas(100_000, 100_000, 1_000_000, false);
+        let op2 = op_with_gas(100_000, 100_000, 200_000, false);
         let mut groups_by_aggregator = LinkedHashMap::new();
         groups_by_aggregator.insert(
             None,
@@ -2147,17 +2853,12 @@ mod tests {
             groups_by_aggregator,
             rejected_ops: vec![],
             entity_updates: BTreeMap::new(),
+            bundle_expected_storage: BundleExpectedStorage::default(),
         };
 
-        let expected_gas_limit = op1.pre_verification_gas
-            + op1.verification_gas_limit * 2
-            + op1.call_gas_limit
-            + 5_000
-            + op2.pre_verification_gas
-            + op2.verification_gas_limit * 2
-            + op2.call_gas_limit
-            + 5_000
-            + 21_000;
+        let expected_gas_limit = op1.gas_limit(&cs, None)
+            + op2.gas_limit(&cs, None)
+            + rundler_types::bundle_shared_gas(&cs);
 
         assert_eq!(context.get_bundle_gas_limit(&cs), expected_gas_limit);
     }
@@ -2165,8 +2866,8 @@ mod tests {
     #[tokio::test]
     async fn test_bundle_gas_limit_with_paymaster_op() {
         let cs = ChainSpec::default();
-        let op1 = op_with_gas(100_000.into(), 100_000.into(), 1_000_000.into(), true); // has paymaster
-        let op2 = op_with_gas(100_000.into(), 100_000.into(), 200_000.into(), false);
+        let op1 = op_with_gas(100_000, 100_000, 1_000_000, true); // has paymaster
+        let op2 = op_with_gas(100_000, 100_000, 200_000, false);
         let mut groups_by_aggregator = LinkedHashMap::new();
         groups_by_aggregator.insert(
             None,
@@ -2194,18 +2895,13 @@ mod tests {
             groups_by_aggregator,
             rejected_ops: vec![],
             entity_updates: BTreeMap::new(),
+            bundle_expected_storage: BundleExpectedStorage::default(),
         };
         let gas_limit = context.get_bundle_gas_limit(&cs);
 
-        let expected_gas_limit = op1.pre_verification_gas
-            + op1.verification_gas_limit * 3
-            + op1.call_gas_limit
-            + 5_000
-            + op2.pre_verification_gas
-            + op2.verification_gas_limit * 2
-            + op2.call_gas_limit
-            + 5_000
-            + 21_000;
+        let expected_gas_limit = op1.gas_limit(&cs, None)
+            + op2.gas_limit(&cs, None)
+            + rundler_types::bundle_shared_gas(&cs);
 
         assert_eq!(gas_limit, expected_gas_limit);
     }
@@ -2221,10 +2917,13 @@ mod tests {
             vec![],
             vec![HandleOpsOut::PostOpRevert, HandleOpsOut::PostOpRevert],
             vec![],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
         )
         .await;
 
@@ -2255,10 +2954,13 @@ mod tests {
                 HandleOpsOut::Success,
             ],
             vec![],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
         )
         .await;
 
@@ -2274,13 +2976,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_op_revert_agg() {
-        let unaggregated_op = op_with_sender(address(1));
-        let aggregated_op_a1 = op_with_sender(address(2));
-        let aggregated_op_a2 = op_with_sender(address(3));
         let aggregator_a_address = address(10);
-        let op_a1_aggregated_sig = 11;
-        let op_a2_aggregated_sig = 12;
+        let unaggregated_op = op_with_sender(address(1));
+        let aggregated_op_a1 =
+            op_with_sender_aggregator(address(2), aggregator_a_address, Bytes::new());
+        let aggregated_op_a2 =
+            op_with_sender_aggregator(address(3), aggregator_a_address, Bytes::new());
+
         let aggregator_a_signature = 101;
+
+        let agg_a = mock_signature_aggregator(aggregator_a_address, bytes(aggregator_a_signature));
+
         let bundle = mock_make_bundle(
             vec![
                 MockOp {
@@ -2289,27 +2995,11 @@ mod tests {
                 },
                 MockOp {
                     op: aggregated_op_a1.clone(),
-                    simulation_result: Box::new(move || {
-                        Ok(SimulationResult {
-                            aggregator: Some(AggregatorSimOut {
-                                address: aggregator_a_address,
-                                signature: bytes(op_a1_aggregated_sig),
-                            }),
-                            ..Default::default()
-                        })
-                    }),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
                 },
                 MockOp {
                     op: aggregated_op_a2.clone(),
-                    simulation_result: Box::new(move || {
-                        Ok(SimulationResult {
-                            aggregator: Some(AggregatorSimOut {
-                                address: aggregator_a_address,
-                                signature: bytes(op_a2_aggregated_sig),
-                            }),
-                            ..Default::default()
-                        })
-                    }),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
                 },
             ],
             vec![MockAggregator {
@@ -2323,10 +3013,13 @@ mod tests {
                 HandleOpsOut::Success,      // after remove
             ],
             vec![],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![agg_a],
+            None,
         )
         .await;
 
@@ -2348,7 +3041,7 @@ mod tests {
         let op = default_op();
 
         let mut expected_storage = ExpectedStorage::default();
-        expected_storage.insert(address(1), U256::zero(), U256::zero());
+        expected_storage.insert(address(1), U256::ZERO, U256::ZERO);
         let actual_storage = expected_storage.clone();
 
         let bundle = mock_make_bundle(
@@ -2364,10 +3057,13 @@ mod tests {
             vec![],
             vec![HandleOpsOut::Success],
             vec![],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             true,
             actual_storage,
+            false,
+            vec![],
+            None,
         )
         .await;
 
@@ -2385,9 +3081,9 @@ mod tests {
         let op = default_op();
 
         let mut expected_storage = ExpectedStorage::default();
-        expected_storage.insert(address(1), U256::zero(), U256::zero());
+        expected_storage.insert(address(1), U256::ZERO, U256::ZERO);
         let mut actual_storage = ExpectedStorage::default();
-        actual_storage.insert(address(1), U256::zero(), U256::from(1));
+        actual_storage.insert(address(1), U256::ZERO, U256::from(1));
 
         let bundle = mock_make_bundle(
             vec![MockOp {
@@ -2402,15 +3098,240 @@ mod tests {
             vec![],
             vec![HandleOpsOut::Success],
             vec![],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             true,
             actual_storage,
+            false,
+            vec![],
+            None,
         )
         .await;
 
         assert!(bundle.ops_per_aggregator.is_empty());
         assert_eq!(bundle.rejected_ops, vec![op]);
+    }
+
+    #[tokio::test]
+    async fn test_single_uo_max_expected_storage_slots() {
+        let op = default_op();
+        let mut expected_storage = ExpectedStorage::default();
+        for _ in 0..=MAX_EXPECTED_STORAGE_SLOTS {
+            expected_storage.insert(Address::random(), U256::ZERO, U256::ZERO);
+        }
+
+        let bundle = mock_make_bundle(
+            vec![MockOp {
+                op,
+                simulation_result: Box::new(move || {
+                    Ok(SimulationResult {
+                        expected_storage: expected_storage.clone(),
+                        ..Default::default()
+                    })
+                }),
+            }],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        assert!(bundle.is_empty())
+    }
+
+    #[tokio::test]
+    async fn test_skip_max_expected_storage_slots() {
+        let op0 = op_with_sender(address(1));
+        let op1 = op_with_sender(address(2));
+        let mut expected_storage0 = ExpectedStorage::default();
+        for _ in 0..MAX_EXPECTED_STORAGE_SLOTS {
+            expected_storage0.insert(Address::random(), U256::ZERO, U256::ZERO);
+        }
+        let mut expected_storage1 = ExpectedStorage::default();
+        expected_storage1.insert(Address::random(), U256::ZERO, U256::ZERO);
+
+        let bundle = mock_make_bundle(
+            vec![
+                MockOp {
+                    op: op0.clone(),
+                    simulation_result: Box::new(move || {
+                        Ok(SimulationResult {
+                            expected_storage: expected_storage0.clone(),
+                            ..Default::default()
+                        })
+                    }),
+                },
+                MockOp {
+                    op: op1.clone(),
+                    simulation_result: Box::new(move || {
+                        Ok(SimulationResult {
+                            expected_storage: expected_storage1.clone(),
+                            ..Default::default()
+                        })
+                    }),
+                },
+            ],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![op0],
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submitter_proxy() {
+        let op = default_op();
+        let proxy_address = address(1);
+
+        let mut proxy = MockSubmissionProxy::new();
+        proxy.expect_address().returning(move || proxy_address);
+
+        // will throw if proxy doesn't match
+        let bundle = mock_make_bundle(
+            vec![MockOp {
+                op: op.clone(),
+                simulation_result: Box::new(|| Ok(SimulationResult::default())),
+            }],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            Some(proxy),
+        )
+        .await;
+
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![op],
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submitter_proxy_revert() {
+        let op = default_op();
+        let op_hash = op.hash();
+        let proxy_address = address(1);
+        let bytes = bytes(1);
+        let cloned_bytes = bytes.clone();
+
+        let mut proxy = MockSubmissionProxy::new();
+        proxy.expect_address().returning(move || proxy_address);
+        proxy
+            .expect_process_revert()
+            .withf(move |b, _| *b == cloned_bytes)
+            .returning(move |_, _| vec![op_hash]);
+
+        let bundle = mock_make_bundle(
+            vec![MockOp {
+                op: op.clone(),
+                simulation_result: Box::new(|| Ok(SimulationResult::default())),
+            }],
+            vec![],
+            vec![HandleOpsOut::Revert(bytes)],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            Some(proxy),
+        )
+        .await;
+
+        assert_eq!(bundle.ops_per_aggregator, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_bundle_expected_storage_remove() {
+        let op0 = op_with_sender(address(1));
+        let op1 = op_with_sender(address(2));
+
+        let address0 = Address::random();
+        let mut expected_storage0 = ExpectedStorage::default();
+        expected_storage0.insert(address0, U256::ZERO, U256::ZERO);
+        expected_storage0.insert(address0, U256::from(1), U256::ZERO);
+        let mut expected_storage1 = ExpectedStorage::default();
+        expected_storage1.insert(address0, U256::ZERO, U256::ZERO);
+        expected_storage1.insert(address0, U256::from(2), U256::ZERO);
+        let expected_storage1_clone = expected_storage1.clone();
+
+        let bundle = mock_make_bundle(
+            vec![
+                MockOp {
+                    op: op0.clone(),
+                    simulation_result: Box::new(move || {
+                        Ok(SimulationResult {
+                            expected_storage: expected_storage0.clone(),
+                            ..Default::default()
+                        })
+                    }),
+                },
+                MockOp {
+                    op: op1.clone(),
+                    simulation_result: Box::new(move || {
+                        Ok(SimulationResult {
+                            expected_storage: expected_storage1.clone(),
+                            ..Default::default()
+                        })
+                    }),
+                },
+            ],
+            vec![],
+            vec![
+                HandleOpsOut::FailedOp(0, "AA25: invalid nonce".to_string()),
+                HandleOpsOut::Success,
+            ],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        assert_eq!(bundle.rejected_ops, vec![op0]);
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![op1],
+                ..Default::default()
+            }]
+        );
+        assert_eq!(bundle.expected_storage.0, expected_storage1_clone.0);
     }
 
     struct MockOp {
@@ -2429,13 +3350,18 @@ mod tests {
             vec![],
             vec![HandleOpsOut::Success],
             vec![],
-            U256::zero(),
-            U256::zero(),
+            0,
+            0,
             false,
             ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
         )
         .await
     }
+
+    const MAX_EXPECTED_STORAGE_SLOTS: usize = 100;
 
     #[allow(clippy::too_many_arguments)]
     async fn mock_make_bundle(
@@ -2443,57 +3369,66 @@ mod tests {
         mock_aggregators: Vec<MockAggregator>,
         mock_handle_ops_call_results: Vec<HandleOpsOut>,
         mock_paymaster_deposits: Vec<U256>,
-        base_fee: U256,
-        max_priority_fee_per_gas: U256,
+        base_fee: u128,
+        max_priority_fee_per_gas: u128,
         notify_condition_not_met: bool,
         actual_storage: ExpectedStorage,
+        da_gas_tracking_enabled: bool,
+        aggregators: Vec<MockSignatureAggregator>,
+        proxy: Option<MockSubmissionProxy>,
     ) -> Bundle<UserOperation> {
-        let entry_point_address = address(123);
-        let beneficiary = address(124);
+        let mut chain_spec = ChainSpec {
+            da_pre_verification_gas: da_gas_tracking_enabled,
+            ..Default::default()
+        };
+        let sender_eoa = address(124);
         let current_block_hash = hash(125);
         let expected_code_hash = hash(126);
         let max_bundle_size = mock_ops.len() as u64;
+        let proxy_address = proxy.as_ref().map(|p| p.address());
         let ops: Vec<_> = mock_ops
             .iter()
             .map(|MockOp { op, .. }| PoolOperation {
                 uo: op.clone().into(),
                 expected_code_hash,
-                entry_point: entry_point_address,
+                entry_point: chain_spec.entry_point_address_v0_6,
                 sim_block_hash: current_block_hash,
                 sim_block_number: 0,
                 account_is_staked: false,
                 valid_time_range: ValidTimeRange::default(),
                 entity_infos: EntityInfos::default(),
                 aggregator: None,
+                da_gas_data: Default::default(),
+                filter_id: None,
             })
             .collect();
 
         let mut pool_client = MockPool::new();
         pool_client
             .expect_get_ops()
-            .returning(move |_, _, _| Ok(ops.clone()));
+            .returning(move |_, _, _, _| Ok(ops.clone()));
 
         let simulations_by_op: HashMap<_, _> = mock_ops
             .into_iter()
-            .map(|op| (op.op.hash(entry_point_address, 0), op.simulation_result))
+            .map(|op| (op.op.hash(), op.simulation_result))
             .collect();
         let mut simulator = MockSimulator::new();
         simulator
             .expect_simulate_validation()
             .withf(move |_, &block_hash, &code_hash| {
-                block_hash == Some(current_block_hash) && code_hash == Some(expected_code_hash)
+                block_hash == current_block_hash && code_hash == Some(expected_code_hash)
             })
-            .returning(move |op, _, _| simulations_by_op[&op.hash(entry_point_address, 0)]());
+            .returning(move |op, _, _| simulations_by_op[&op.hash()]());
         let mut entry_point = MockEntryPointV0_6::new();
         entry_point
             .expect_address()
-            .return_const(entry_point_address);
+            .return_const(chain_spec.entry_point_address_v0_6);
         for call_res in mock_handle_ops_call_results {
             entry_point
                 .expect_call_handle_ops()
                 .times(..=1)
-                .withf(move |_, &b, _| b == beneficiary)
-                .return_once(|_, _, _| Ok(call_res));
+                .withf(move |_, &b, _, _, &p| b == sender_eoa && p == proxy_address)
+                .return_once(|_, _, _, _, _| Ok(call_res));
         }
         for deposit in mock_paymaster_deposits {
             entry_point
@@ -2507,16 +3442,30 @@ mod tests {
             .map(|agg| (agg.address, agg.signature))
             .collect();
 
-        let mut provider = MockProvider::new();
+        let mut provider = MockEvmProvider::new();
         provider
             .expect_get_latest_block_hash_and_number()
-            .returning(move || Ok((current_block_hash, U64::zero())));
-        provider
-            .expect_get_base_fee()
-            .returning(move || Ok(base_fee));
-        provider
-            .expect_get_max_priority_fee()
-            .returning(move || Ok(max_priority_fee_per_gas));
+            .returning(move || Ok((current_block_hash, 0)));
+
+        let mut fee_estimator = MockFeeEstimator::new();
+        fee_estimator
+            .expect_required_bundle_fees()
+            .returning(move |_| {
+                Ok((
+                    GasFees {
+                        max_fee_per_gas: base_fee + max_priority_fee_per_gas,
+                        max_priority_fee_per_gas,
+                    },
+                    base_fee,
+                ))
+            });
+        fee_estimator
+            .expect_required_op_fees()
+            .returning(move |_| GasFees {
+                max_fee_per_gas: base_fee + max_priority_fee_per_gas,
+                max_priority_fee_per_gas,
+            });
+
         if notify_condition_not_met {
             for (addr, slots) in actual_storage.0.into_iter() {
                 let values = slots.values().cloned().collect::<Vec<_>>();
@@ -2530,22 +3479,57 @@ mod tests {
         entry_point
             .expect_aggregate_signatures()
             .returning(move |address, _| Ok(signatures_by_aggregator[&address]().unwrap()));
+
         let (event_sender, _) = broadcast::channel(16);
+
+        let mut da_oracle = MockDAGasOracleSync::new();
+        let block_data = DAGasBlockData::Bedrock(BedrockDAGasBlockData {
+            base_fee_scalar: 1,
+            l1_base_fee: 1,
+            blob_base_fee: 1,
+            blob_base_fee_scalar: 1,
+        });
+        let bd_cloned = block_data.clone();
+        da_oracle
+            .expect_block_data()
+            .returning(move |_| Ok(bd_cloned.clone()));
+        da_oracle
+            .expect_calc_da_gas_sync()
+            .returning(move |_, bd, _, _| {
+                assert_eq!(*bd, block_data);
+                100_000
+            });
+
+        let mut registry = ContractRegistry::<Arc<dyn SignatureAggregator>>::default();
+        for agg in aggregators {
+            registry.register(agg.address(), Arc::new(agg));
+        }
+        chain_spec.set_signature_aggregators(Arc::new(registry));
+
+        let submission_proxy: Option<Arc<dyn SubmissionProxy>> =
+            proxy.map(|p| Arc::new(p) as Arc<dyn SubmissionProxy>);
+
         let mut proposer = BundleProposerImpl::new(
             0,
-            pool_client,
-            simulator,
-            entry_point,
-            Arc::new(provider),
+            "test".to_string(),
+            ProvidersWithEntryPoint::new(
+                Arc::new(provider),
+                Arc::new(entry_point),
+                Some(Arc::new(da_oracle)),
+            ),
+            BundleProposerProviders::new(pool_client, simulator, fee_estimator),
             Settings {
-                chain_spec: ChainSpec::default(),
+                chain_spec,
                 max_bundle_size,
                 max_bundle_gas: 10_000_000,
-                beneficiary,
-                priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(10),
-                bundle_priority_fee_overhead_percent: 0,
+                sender_eoa,
+                priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
+                da_gas_tracking_enabled,
+                max_expected_storage_slots: MAX_EXPECTED_STORAGE_SLOTS,
+                submission_proxy,
             },
             event_sender,
+            None,
         );
 
         if notify_condition_not_met {
@@ -2561,13 +3545,13 @@ mod tests {
     fn address(n: u8) -> Address {
         let mut bytes = [0_u8; 20];
         bytes[0] = n;
-        H160(bytes)
+        Address::from_slice(&bytes)
     }
 
-    fn hash(n: u8) -> H256 {
+    fn hash(n: u8) -> B256 {
         let mut bytes = [0_u8; 32];
         bytes[0] = n;
-        H256(bytes)
+        B256::from_slice(&bytes)
     }
 
     fn bytes(n: u8) -> Bytes {
@@ -2575,71 +3559,105 @@ mod tests {
     }
 
     // UOs require PVG to pass the PVG check even when fees are 0
-    const DEFAULT_PVG: u64 = 1_000_000;
+    const DEFAULT_PVG: u128 = 1_000_000;
 
     fn op_with_sender(sender: Address) -> UserOperation {
-        UserOperation {
+        op_from_required(UserOperationRequiredFields {
             sender,
-            pre_verification_gas: U256::from(DEFAULT_PVG),
+            pre_verification_gas: DEFAULT_PVG,
             ..Default::default()
-        }
+        })
     }
 
     fn op_with_sender_paymaster(sender: Address, paymaster: Address) -> UserOperation {
-        UserOperation {
+        op_from_required(UserOperationRequiredFields {
             sender,
-            paymaster_and_data: paymaster.as_bytes().to_vec().into(),
-            pre_verification_gas: U256::from(DEFAULT_PVG),
+            paymaster_and_data: paymaster.to_vec().into(),
+            pre_verification_gas: DEFAULT_PVG,
             ..Default::default()
-        }
+        })
     }
 
     fn op_with_sender_factory(sender: Address, factory: Address) -> UserOperation {
-        UserOperation {
+        op_from_required(UserOperationRequiredFields {
             sender,
-            init_code: factory.as_bytes().to_vec().into(),
-            pre_verification_gas: U256::from(DEFAULT_PVG),
+            init_code: factory.to_vec().into(),
+            pre_verification_gas: DEFAULT_PVG,
             ..Default::default()
-        }
+        })
+    }
+
+    fn op_with_sender_aggregator(
+        sender: Address,
+        aggregator: Address,
+        new_signature: Bytes,
+    ) -> UserOperation {
+        let mut op = op_from_required(UserOperationRequiredFields {
+            sender,
+            pre_verification_gas: DEFAULT_PVG,
+            ..Default::default()
+        });
+        op = op.transform_for_aggregator(
+            &ChainSpec::default(),
+            aggregator,
+            AggregatorCosts::default(),
+            new_signature,
+        );
+        op
+    }
+
+    fn op_with_sender_factory_paymaster(
+        sender: Address,
+        factory: Address,
+        paymaster: Address,
+    ) -> UserOperation {
+        op_from_required(UserOperationRequiredFields {
+            sender,
+            init_code: factory.to_vec().into(),
+            paymaster_and_data: paymaster.to_vec().into(),
+            pre_verification_gas: DEFAULT_PVG,
+            ..Default::default()
+        })
     }
 
     fn op_with_sender_and_fees(
         sender: Address,
-        max_fee_per_gas: U256,
-        max_priority_fee_per_gas: U256,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        pre_verification_gas: u128,
     ) -> UserOperation {
-        UserOperation {
+        op_from_required(UserOperationRequiredFields {
             sender,
             max_fee_per_gas,
             max_priority_fee_per_gas,
-            pre_verification_gas: U256::from(DEFAULT_PVG),
+            pre_verification_gas,
             ..Default::default()
-        }
+        })
     }
 
     fn default_op() -> UserOperation {
-        UserOperation {
-            pre_verification_gas: U256::from(DEFAULT_PVG),
+        op_from_required(UserOperationRequiredFields {
+            pre_verification_gas: DEFAULT_PVG,
             ..Default::default()
-        }
+        })
     }
 
-    fn op_with_sender_call_gas_limit(sender: Address, call_gas_limit: U256) -> UserOperation {
-        UserOperation {
+    fn op_with_sender_call_gas_limit(sender: Address, call_gas_limit: u128) -> UserOperation {
+        op_from_required(UserOperationRequiredFields {
             sender,
             call_gas_limit,
-            pre_verification_gas: U256::from(DEFAULT_PVG),
+            pre_verification_gas: DEFAULT_PVG,
             ..Default::default()
-        }
+        })
     }
 
     fn op_with_gas(
-        pre_verification_gas: U256,
-        call_gas_limit: U256,
-        verification_gas_limit: U256,
+        pre_verification_gas: u128,
+        call_gas_limit: u128,
+        verification_gas_limit: u128,
         with_paymaster: bool,
     ) -> UserOperation {
-        UserOperation {
+        op_from_required(UserOperationRequiredFields {
             pre_verification_gas,
             call_gas_limit,
             verification_gas_limit,
@@ -2649,6 +3667,19 @@ mod tests {
                 Default::default()
             },
             ..Default::default()
-        }
+        })
+    }
+
+    fn op_from_required(required: UserOperationRequiredFields) -> UserOperation {
+        UserOperationBuilder::new(&ChainSpec::default(), required).build()
+    }
+
+    fn mock_signature_aggregator(address: Address, signature: Bytes) -> MockSignatureAggregator {
+        let mut agg = MockSignatureAggregator::default();
+        agg.expect_address().return_const(address);
+        agg.expect_costs().return_const(AggregatorCosts::default());
+        agg.expect_aggregate_signatures()
+            .returning(move |_| Ok(signature.clone()));
+        agg
     }
 }

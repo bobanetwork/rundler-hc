@@ -122,6 +122,7 @@ define_hardcoded_chain_specs!(
     polygon,
     polygon_amoy,
     avax,
+    bera_bartio,
     avax_fuji,
     boba_sepolia,
     optimism_devnet

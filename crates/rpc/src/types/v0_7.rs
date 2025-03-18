@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use ethers::types::{Address, Bytes, H256, U128, U256};
+use alloy_primitives::{Address, Bytes, B256, U128, U256};
 use rundler_types::{
     chain::ChainSpec,
     v0_7::{
@@ -21,7 +21,7 @@ use rundler_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{FromRpc, RpcAddress};
+use super::{rpc_authorization::RpcEip7702Auth, FromRpc, RpcAddress};
 
 /// User operation definition for RPC inputs
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -48,10 +48,16 @@ pub(crate) struct RpcUserOperation {
     #[serde(skip_serializing_if = "Option::is_none")]
     paymaster_data: Option<Bytes>,
     signature: Bytes,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eip7702_auth: Option<RpcEip7702Auth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aggregator: Option<Address>,
 }
 
 impl From<UserOperation> for RpcUserOperation {
     fn from(op: UserOperation) -> Self {
+        let op = op.into_unstructured();
+
         let factory_data = if op.factory.is_some() {
             Some(op.factory_data)
         } else {
@@ -72,18 +78,21 @@ impl From<UserOperation> for RpcUserOperation {
             sender: op.sender,
             nonce: op.nonce,
             call_data: op.call_data,
-            call_gas_limit: op.call_gas_limit,
-            verification_gas_limit: op.verification_gas_limit,
-            pre_verification_gas: op.pre_verification_gas,
-            max_priority_fee_per_gas: op.max_priority_fee_per_gas,
-            max_fee_per_gas: op.max_fee_per_gas,
+            call_gas_limit: U128::from(op.call_gas_limit),
+            verification_gas_limit: U128::from(op.verification_gas_limit),
+            pre_verification_gas: U256::from(op.pre_verification_gas),
+            max_priority_fee_per_gas: U128::from(op.max_priority_fee_per_gas),
+            max_fee_per_gas: U128::from(op.max_fee_per_gas),
             factory: op.factory,
             factory_data,
             paymaster: op.paymaster,
-            paymaster_verification_gas_limit,
-            paymaster_post_op_gas_limit,
+            paymaster_verification_gas_limit: paymaster_verification_gas_limit
+                .map(|x| U128::from(x)),
+            paymaster_post_op_gas_limit: paymaster_post_op_gas_limit.map(|x| U128::from(x)),
             paymaster_data,
             signature: op.signature,
+            eip7702_auth: op.authorization_tuple.map(|a| a.into()),
+            aggregator: op.aggregator,
         }
     }
 }
@@ -96,24 +105,34 @@ impl FromRpc<RpcUserOperation> for UserOperation {
                 sender: def.sender,
                 nonce: def.nonce,
                 call_data: def.call_data,
-                call_gas_limit: def.call_gas_limit,
-                verification_gas_limit: def.verification_gas_limit,
-                pre_verification_gas: def.pre_verification_gas,
-                max_priority_fee_per_gas: def.max_priority_fee_per_gas,
-                max_fee_per_gas: def.max_fee_per_gas,
+                call_gas_limit: def.call_gas_limit.to(),
+                verification_gas_limit: def.verification_gas_limit.to(),
+                pre_verification_gas: def.pre_verification_gas.to(),
+                max_priority_fee_per_gas: def.max_priority_fee_per_gas.to(),
+                max_fee_per_gas: def.max_fee_per_gas.to(),
                 signature: def.signature,
             },
         );
-        if def.paymaster.is_some() {
+        if let Some(paymaster) = def.paymaster {
             builder = builder.paymaster(
-                def.paymaster.unwrap(),
-                def.paymaster_verification_gas_limit.unwrap_or_default(),
-                def.paymaster_post_op_gas_limit.unwrap_or_default(),
+                paymaster,
+                def.paymaster_verification_gas_limit
+                    .map(|x| x.to())
+                    .unwrap_or_default(),
+                def.paymaster_post_op_gas_limit
+                    .map(|x| x.to())
+                    .unwrap_or_default(),
                 def.paymaster_data.unwrap_or_default(),
             );
         }
-        if def.factory.is_some() {
-            builder = builder.factory(def.factory.unwrap(), def.factory_data.unwrap_or_default());
+        if let Some(factory) = def.factory {
+            builder = builder.factory(factory, def.factory_data.unwrap_or_default());
+        }
+        if let Some(auth) = def.eip7702_auth {
+            builder = builder.authorization_tuple(auth.into());
+        }
+        if let Some(aggregator) = def.aggregator {
+            builder = builder.aggregator(aggregator);
         }
 
         builder.build()
@@ -127,8 +146,8 @@ pub(crate) struct RpcUserOperationByHash {
     user_operation: RpcUserOperation,
     entry_point: RpcAddress,
     block_number: Option<U256>,
-    block_hash: Option<H256>,
-    transaction_hash: Option<H256>,
+    block_hash: Option<B256>,
+    transaction_hash: Option<B256>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -149,6 +168,8 @@ pub(crate) struct RpcUserOperationOptionalGas {
     paymaster_post_op_gas_limit: Option<U128>,
     paymaster_data: Option<Bytes>,
     signature: Bytes,
+    eip7702_auth: Option<RpcEip7702Auth>,
+    aggregator: Option<Address>,
 }
 
 impl From<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
@@ -157,18 +178,20 @@ impl From<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
             sender: def.sender,
             nonce: def.nonce,
             call_data: def.call_data,
-            call_gas_limit: def.call_gas_limit,
-            verification_gas_limit: def.verification_gas_limit,
-            pre_verification_gas: def.pre_verification_gas,
-            max_priority_fee_per_gas: def.max_priority_fee_per_gas,
-            max_fee_per_gas: def.max_fee_per_gas,
+            call_gas_limit: def.call_gas_limit.map(|x| x.to()),
+            verification_gas_limit: def.verification_gas_limit.map(|x| x.to()),
+            pre_verification_gas: def.pre_verification_gas.map(|x| x.to()),
+            max_priority_fee_per_gas: def.max_priority_fee_per_gas.map(|x| x.to()),
+            max_fee_per_gas: def.max_fee_per_gas.map(|x| x.to()),
             factory: def.factory,
             factory_data: def.factory_data.unwrap_or_default(),
             paymaster: def.paymaster,
-            paymaster_verification_gas_limit: def.paymaster_verification_gas_limit,
-            paymaster_post_op_gas_limit: def.paymaster_post_op_gas_limit,
+            paymaster_verification_gas_limit: def.paymaster_verification_gas_limit.map(|x| x.to()),
+            paymaster_post_op_gas_limit: def.paymaster_post_op_gas_limit.map(|x| x.to()),
             paymaster_data: def.paymaster_data.unwrap_or_default(),
             signature: def.signature,
+            eip7702_auth_address: def.eip7702_auth.map(|a| a.address),
+            aggregator: def.aggregator,
         }
     }
 }
@@ -176,19 +199,21 @@ impl From<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RpcGasEstimate {
-    pub(crate) pre_verification_gas: U256,
-    pub(crate) call_gas_limit: U256,
-    pub(crate) verification_gas_limit: U256,
-    pub(crate) paymaster_verification_gas_limit: Option<U256>,
+    pub(crate) pre_verification_gas: U128,
+    pub(crate) call_gas_limit: U128,
+    pub(crate) verification_gas_limit: U128,
+    pub(crate) paymaster_verification_gas_limit: Option<U128>,
 }
 
 impl From<GasEstimate> for RpcGasEstimate {
     fn from(estimate: GasEstimate) -> Self {
         RpcGasEstimate {
-            pre_verification_gas: estimate.pre_verification_gas,
-            call_gas_limit: estimate.call_gas_limit,
-            verification_gas_limit: estimate.verification_gas_limit,
-            paymaster_verification_gas_limit: estimate.paymaster_verification_gas_limit,
+            pre_verification_gas: U128::from(estimate.pre_verification_gas),
+            call_gas_limit: U128::from(estimate.call_gas_limit),
+            verification_gas_limit: U128::from(estimate.verification_gas_limit),
+            paymaster_verification_gas_limit: estimate
+                .paymaster_verification_gas_limit
+                .map(|x| U128::from(x)),
         }
     }
 }

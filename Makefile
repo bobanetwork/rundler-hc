@@ -2,7 +2,7 @@
 
 ##@ Test
 
-UNIT_TEST_ARGS := --locked --workspace --all-features
+UNIT_TEST_ARGS := --locked --workspace --all-features --no-fail-fast
 PROFILE ?= release
 DOCKER_IMAGE_NAME ?= alchemyplatform/rundler
 BIN_DIR = "dist/bin"
@@ -62,6 +62,10 @@ build-%:
 .PHONY: fmt
 fmt: ## format code with nightly rust
 	cargo +nightly fmt
+
+.PHONY: lint
+lint: ## lint and improve code quality 
+	cargo clippy  --all --all-features --tests -- -D warnings
 
 # Note: This requires a buildx builder with emulation support. For example:
 #

@@ -15,14 +15,13 @@
 
 use std::{
     error::Error,
-    fmt,
-    fmt::{Debug, Display, Formatter},
+    fmt::{self, Debug, Display, Formatter},
     ops::{Add, AddAssign, Sub, SubAssign},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use alloy_primitives::U64;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
-use ethers::types::U64;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// An on-chain timestamp expressed as seconds since the epoch, as might be
@@ -67,6 +66,12 @@ impl Timestamp {
 impl From<u64> for Timestamp {
     fn from(value: u64) -> Self {
         Self(value)
+    }
+}
+
+impl From<Duration> for Timestamp {
+    fn from(duration: Duration) -> Self {
+        Self(duration.as_secs())
     }
 }
 
@@ -120,7 +125,7 @@ impl<'de> Deserialize<'de> for Timestamp {
         D: Deserializer<'de>,
     {
         let n = <U64>::deserialize(deserializer)?;
-        Ok(Self(n.as_u64()))
+        Ok(Self(n.to()))
     }
 }
 
