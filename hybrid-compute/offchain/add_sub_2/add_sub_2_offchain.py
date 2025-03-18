@@ -13,8 +13,6 @@ rand_key_hex = os.environ['OC_RANDOM_SECRET']
 oc_node_http = os.environ['OC_NODE_HTTP']
 
 assert len(rand_key_hex) == 66
-w3 = Web3(Web3.HTTPProvider(oc_node_http, request_kwargs={'timeout': 900}))
-assert w3.is_connected
 
 G = curve.secp256k1.G
 FIELD_SIZE = Web3.to_int(hexstr="0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F")
@@ -250,6 +248,9 @@ def offchain_random(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     assert ver == "0.3"
 
     try:
+        w3 = Web3(Web3.HTTPProvider(oc_node_http, request_kwargs={'timeout': 900}))
+        assert w3.is_connected
+
         req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
         dec = ethabi.decode(['uint256', 'bytes32'], req['reqBytes'])
 
@@ -297,6 +298,8 @@ def offchain_random(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
         err_code = 0
 
     except Exception as e:
-        print("DECODE FAILED", e)
+        print("METHOD FAILED", e)
+        if "HTTPConnection" in str(e):
+            resp = Web3.to_bytes(text="HC01: OC_NODE_HTTP connection failure")
 
     return gen_response_v7(req, err_code, resp)
