@@ -211,12 +211,12 @@ impl<P: EvmProvider, O: FeeOracle> FeeEstimatorImpl<P, O> {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     async fn get_pending_base_fee(&self) -> anyhow::Result<u128> {
         Ok(self.provider.get_pending_base_fee().await?)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     async fn get_priority_fee(&self) -> anyhow::Result<u128> {
         self.fee_oracle
             .estimate_priority_fee()
@@ -227,7 +227,7 @@ impl<P: EvmProvider, O: FeeOracle> FeeEstimatorImpl<P, O> {
 
 #[async_trait::async_trait]
 impl<P: EvmProvider, O: FeeOracle> FeeEstimator for FeeEstimatorImpl<P, O> {
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     async fn required_bundle_fees(
         &self,
         min_fees: Option<GasFees>,

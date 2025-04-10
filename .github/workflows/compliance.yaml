@@ -36,8 +36,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: bundler-test-executors
-          repository: bobanetwork/bundler-test-executor
-          ref: hc-dev
+          repository: alchemyplatform/bundler-test-executor
+          ref: releases/v0.7-rundler-v0.6
           submodules: recursive
 
       - name: Build rundler image locally
