@@ -50,10 +50,11 @@ WORKDIR /app
 # install curl for healthcheck
 RUN apt-get -y update; apt-get -y install curl ca-certificates
 RUN update-ca-certificates
+RUN apt-get install -y redis-server # for KMS
 
 # Copy rundler over from the build stage
 COPY --from=builder /app/target/release/rundler /usr/local/bin
+COPY docker-wrapper.sh /docker-wrapper.sh
 
 EXPOSE 3000 8080
-ENTRYPOINT ["/usr/local/bin/rundler"]
-CMD ["node"]
+ENTRYPOINT ["/docker-wrapper.sh"]
