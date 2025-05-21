@@ -29,11 +29,36 @@ if cli_args.ep_version == "0.7":
 elif cli_args.ep_version != "0.6":
     assert "Invalid EntryPoint version (0.6 or 0.7 are supported)" == False
 
-with open(cli_args.boba_path + "/.devnet/addresses.json", "r", encoding="ascii") as f:
+# local.env contains fixed configuration for the local devnet. Additional env variables are
+# generated dynamically when contracts are deployed. Do not use any of the local addr/privkey
+# accounts on public networks.
+print("Reading local.env")
+with open("local.env", "r", encoding="ascii") as f:
+    for line in f.readlines():
+        k,v = line.strip().split('=')
+        env_vars[k] = v
+
+#For old devnet
+#with open(cli_args.boba_path + "/.devnet/addresses.json", "r", encoding="ascii") as f:
+#    jj = json.load(f)
+#    boba_l1_addr = Web3.to_checksum_address(jj['BOBA'])
+#    bridge_addr  = Web3.to_checksum_address(jj['L1StandardBridgeProxy'])
+#    portal_addr  = Web3.to_checksum_address(jj['OptimismPortalProxy'])
+with open(cli_args.boba_path + "/kurtosis-devnet/tests/boba-local-devnet.json", "r", encoding="ascii") as f:
     jj = json.load(f)
-    boba_l1_addr = Web3.to_checksum_address(jj['BOBA'])
-    bridge_addr  = Web3.to_checksum_address(jj['L1StandardBridgeProxy'])
-    portal_addr  = Web3.to_checksum_address(jj['OptimismPortalProxy'])
+    l1 = jj['l1']['addresses']
+    l1a = jj['l2'][0]['l1_addresses']
+
+#    boba_l1_addr = Web3.to_checksum_address(l1['bobaL1'])
+    boba_l1_addr = env_vars['BOBA_L1']
+    bridge_addr  = Web3.to_checksum_address(l1a['l1StandardBridgeProxy'])
+    portal_addr  = Web3.to_checksum_address(l1a['optimismPortalProxy'])
+
+    l1_rpc_port = jj['l1']['nodes'][0]['services']['el']['endpoints']['rpc']['port']
+    l2_rpc_port = jj['l2'][0]['nodes'][0]['services']['el']['endpoints']['rpc']['port']
+    chain_id = jj['l2'][0]['id']
+    print("l1_rpc_port", l1_rpc_port)
+    print("l2_rpc_port", l2_rpc_port)
 
 with open(cli_args.boba_path + "/op-service/predeploys/addresses.go", "r", encoding="ascii") as f:
     for line in f.readlines():
@@ -65,11 +90,11 @@ s.connect(("192.0.2.0", 1))
 local_ip = s.getsockname()[0]
 s.close()
 
-l1 = Web3(Web3.HTTPProvider("http://127.0.0.1:8545"))
+l1 = Web3(Web3.HTTPProvider("http://127.0.0.1:" + str(l1_rpc_port)))
 assert l1.is_connected
 l1.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-w3 = Web3(Web3.HTTPProvider(env_vars['NODE_HTTP']))
+w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:" + str(l2_rpc_port)))
 assert w3.is_connected
 
 l1_util = eth_utils(l1)
@@ -250,7 +275,7 @@ def deploy_account(factory, owner):
 
 def deploy_forge(script, cmd_env):
     args = ["forge", "script", "--json", "--broadcast", "--via-ir"]
-    args.append("--rpc-url=http://127.0.0.1:9545")
+    args.append("--rpc-url=http://127.0.0.1:" + str(l2_rpc_port))
     args.append("--contracts")
     if ep7:
         args.append("src/hc0_7")
@@ -344,7 +369,9 @@ if ep7:
 else:
     EP = load_contract(w3, "EntryPoint", "../crates/contracts/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
 
-assert l1.eth.get_balance(deploy_addr) > Web3.to_wei(1000, 'ether')
+l1_eth_bal = l1.eth.get_balance(deploy_addr)
+print("l1_eth_bal", l1_eth_bal)
+assert l1_eth_bal >= Web3.to_wei(1000, 'ether')
 
 print("Deployer balance:", w3.eth.get_balance(deploy_addr))
 
@@ -486,7 +513,9 @@ env_vars['TEST_RANDOM'] = TEST_RANDOM.address
 # Other
 env_vars['BOBA_TOKEN'] = boba_token
 env_vars['SIMPLE_PM'] = pm_addr
+env_vars['NODE_HTTP'] = "http://127.0.0.1:" + str(l2_rpc_port)
 env_vars['OC_NODE_HTTP'] = env_vars['NODE_HTTP']
+env_vars['CHAIN_ID'] = chain_id
 
 with open(".env", "w", encoding="ascii") as f:
     for k in env_vars.items():
