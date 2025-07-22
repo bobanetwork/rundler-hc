@@ -145,14 +145,8 @@ impl<C: JsonRpcClient + 'static> Provider for EthersProvider<C> {
         //    "HC debug_trace_call overrides {:?}",
         //    trace_options.state_overrides
         //);
-        println!("HC will use BlockNumber::Latest instead of {:?}", block_id);
-        let ret = Middleware::debug_trace_call(
-            self,
-            tx,
-            Some(ethers::types::BlockId::Number(BlockNumber::Latest)),
-            trace_options,
-        )
-        .await;
+        //println!("HC will use BlockNumber::Latest instead of {:?}", block_id);
+        let ret = Middleware::debug_trace_call(self, tx, block_id, trace_options).await;
         //println!("HC debug_trace_call ret {:?}", ret);
         Ok(ret?)
     }
