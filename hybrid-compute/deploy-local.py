@@ -53,8 +53,8 @@ with open(cli_args.boba_path + "/kurtosis-devnet/tests/boba-local-devnet.json", 
 
 #    boba_l1_addr = Web3.to_checksum_address(l1['bobaL1'])
     boba_l1_addr = env_vars['BOBA_L1']
-    bridge_addr  = Web3.to_checksum_address(l1a['l1StandardBridgeProxy'])
-    portal_addr  = Web3.to_checksum_address(l1a['optimismPortalProxy'])
+    bridge_addr  = Web3.to_checksum_address(l1a['L1StandardBridgeProxy'])
+    portal_addr  = Web3.to_checksum_address(l1a['OptimismPortalProxy'])
 
     l1_rpc_port = jj['l1']['nodes'][0]['services']['el']['endpoints']['rpc']['port']
     l2_rpc_port = jj['l2'][0]['nodes'][0]['services']['el']['endpoints']['rpc']['port']
@@ -371,19 +371,20 @@ if ep7:
 else:
     EP = load_contract(w3, "EntryPoint", "../crates/contracts/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
 
+ETH_MIN = 50
+BOBA_MIN = 500
+
 l1_eth_bal = l1.eth.get_balance(deploy_addr)
 print("l1_eth_bal", l1_eth_bal)
-assert l1_eth_bal >= Web3.to_wei(1000, 'ether')
+assert l1_eth_bal >= Web3.to_wei(2 * ETH_MIN, 'ether')
 
 print("Deployer balance:", w3.eth.get_balance(deploy_addr))
 
-FUND_MIN = 50
-
-if w3.eth.get_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
+if w3.eth.get_balance(deploy_addr) < Web3.to_wei(ETH_MIN, 'ether'):
     tx = {
         'from': deploy_addr,
         'to': Web3.to_checksum_address(portal_addr),
-        'value': Web3.to_wei(2 * FUND_MIN, 'ether')
+        'value': Web3.to_wei(2 * ETH_MIN, 'ether')
     }
     print("Funding L2 deploy_addr (ETH)")
     l1_util.sign_and_submit(tx, deploy_key)
@@ -394,14 +395,14 @@ if w3.eth.get_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
     print("Continuing")
 
 
-if boba_balance(deploy_addr) < Web3.to_wei(FUND_MIN, 'ether'):
+if boba_balance(deploy_addr) < Web3.to_wei(BOBA_MIN, 'ether'):
     l1_util.approve_token(boba_l1_addr, bridge_addr, deploy_addr, deploy_key)
 
     depositCD = selector("depositERC20(address,address,uint256,uint32,bytes)") + ethabi.encode(
         ['address','address','uint256','uint32','bytes'], [
           boba_l1_addr,
           boba_token,
-          Web3.to_wei(200 * FUND_MIN,'ether'),
+          Web3.to_wei(2 * BOBA_MIN,'ether'),
           4000000,
           Web3.to_bytes(hexstr="0x")
         ])
