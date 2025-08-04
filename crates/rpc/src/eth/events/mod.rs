@@ -30,7 +30,19 @@ pub(crate) trait UserOperationEventProvider: Send + Sync {
     async fn get_mined_by_hash(&self, hash: B256)
         -> anyhow::Result<Option<RpcUserOperationByHash>>;
 
+    async fn get_mined_from_tx_receipt(
+        &self,
+        uo_hash: B256,
+        tx_receipt: TransactionReceipt,
+    ) -> anyhow::Result<Option<RpcUserOperationByHash>>;
+
     async fn get_receipt(&self, hash: B256) -> anyhow::Result<Option<RpcUserOperationReceipt>>;
+
+    async fn get_receipt_from_tx_receipt(
+        &self,
+        uo_hash: B256,
+        tx_receipt: TransactionReceipt,
+    ) -> anyhow::Result<Option<RpcUserOperationReceipt>>;
 }
 
 // This method takes a user operation event and a transaction receipt and filters out all the logs
@@ -55,10 +67,9 @@ fn filter_receipt_logs_matching_user_op(
     let mut start_idx = 0;
     let mut end_idx = logs.len() - 1;
 
-    // TODO protect against topic of zero size
-
     let is_ref_user_op = |log: &Log| {
-        log.topics()[0] == reference_log.topics()[0]
+        log.topics().len() >= 2
+            && log.topics()[0] == reference_log.topics()[0]
             && log.topics()[1] == reference_log.topics()[1]
             && log.address() == reference_log.address()
     };
@@ -88,7 +99,7 @@ fn filter_receipt_logs_matching_user_op(
 mod tests {
 
     use alloy_primitives::{address, utils::keccak256, Address, Log as PrimitiveLog, LogData};
-    use rundler_provider::{TransactionReceiptEnvelope, TransactionReceiptWithBloom};
+    use rundler_provider::{AnyReceiptEnvelope, ReceiptWithBloom, TransactionReceipt};
 
     use super::*;
 
@@ -232,11 +243,15 @@ mod tests {
             logs,
             ..Default::default()
         };
+
         TransactionReceipt {
-            inner: TransactionReceiptEnvelope::Legacy(TransactionReceiptWithBloom {
-                receipt,
-                ..Default::default()
-            }),
+            inner: AnyReceiptEnvelope {
+                inner: ReceiptWithBloom {
+                    receipt,
+                    ..Default::default()
+                },
+                r#type: 0,
+            },
             transaction_hash: B256::ZERO,
             transaction_index: None,
             block_hash: None,

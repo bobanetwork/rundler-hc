@@ -38,7 +38,8 @@ use rundler_types::{
     pool::{
         MempoolError, PaymasterMetadata, PoolOperation, Reputation, ReputationStatus, StakeStatus,
     },
-    EntityUpdate, EntryPointVersion, UserOperationId, UserOperationVariant,
+    EntityUpdate, EntryPointVersion, UserOperationId, UserOperationPermissions,
+    UserOperationVariant,
 };
 use tonic::async_trait;
 pub(crate) use uo_pool::{UoPool, UoPoolProviders};
@@ -50,12 +51,9 @@ pub(crate) type MempoolResult<T> = std::result::Result<T, MempoolError>;
 #[cfg_attr(test, automock)]
 #[async_trait]
 /// In-memory operation pool
-pub trait Mempool: Send + Sync {
+pub(crate) trait Mempool: Send + Sync {
     /// Call to update the mempool with a new chain update
     async fn on_chain_update(&self, update: &ChainUpdate);
-
-    /// Returns the entry point address this pool targets.
-    fn entry_point(&self) -> Address;
 
     /// Returns the entry point version this pool targets.
     fn entry_point_version(&self) -> EntryPointVersion;
@@ -65,6 +63,7 @@ pub trait Mempool: Send + Sync {
         &self,
         origin: OperationOrigin,
         op: UserOperationVariant,
+        perms: UserOperationPermissions,
     ) -> MempoolResult<B256>;
 
     /// Removes a set of operations from the pool.
@@ -251,6 +250,7 @@ mod tests {
             },
             da_gas_data: Default::default(),
             filter_id: None,
+            perms: UserOperationPermissions::default(),
         };
 
         let entities = po.entities().collect::<Vec<_>>();

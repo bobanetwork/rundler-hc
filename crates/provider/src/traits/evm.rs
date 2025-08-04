@@ -16,6 +16,7 @@
 use std::fmt::Display;
 
 use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
+use rundler_types::ExpectedStorage;
 
 use crate::{
     Block, BlockId, BlockNumberOrTag, FeeHistory, Filter, GasUsedResult,
@@ -73,11 +74,24 @@ pub trait EvmProvider: Send + Sync {
         state_overrides: &StateOverride,
     ) -> ProviderResult<Bytes>;
 
+    /// Send a raw transaction
+    async fn send_raw_transaction(&self, tx: Bytes) -> ProviderResult<TxHash>;
+
+    /// Send a raw transaction with conditional execution
+    async fn send_raw_transaction_conditional(
+        &self,
+        tx: Bytes,
+        expected_storage: &ExpectedStorage,
+    ) -> ProviderResult<TxHash>;
+
     /// Get the current block number
     async fn get_block_number(&self) -> ProviderResult<u64>;
 
-    /// Get a block by its hash or number
+    /// Get a block by its hash or number. Only includes transaction hashes.
     async fn get_block(&self, block_id: BlockId) -> ProviderResult<Option<Block>>;
+
+    /// Get a full block by its hash or number. Includes full transactions.
+    async fn get_full_block(&self, block_id: BlockId) -> ProviderResult<Option<Block>>;
 
     /// Get the balance of an address
     async fn get_balance(&self, address: Address, block: Option<BlockId>) -> ProviderResult<U256>;
@@ -141,4 +155,7 @@ pub trait EvmProvider: Send + Sync {
         addresses: Vec<Address>,
         block: Option<BlockId>,
     ) -> ProviderResult<B256>;
+
+    /// Get the balances of multiple addresses
+    async fn get_balances(&self, addresses: Vec<Address>) -> ProviderResult<Vec<(Address, U256)>>;
 }

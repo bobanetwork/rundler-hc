@@ -11,6 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
+pub mod multicall3;
 pub mod utils;
 pub mod v0_6;
 pub mod v0_7;

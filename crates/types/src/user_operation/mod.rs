@@ -16,6 +16,10 @@ use std::{fmt::Debug, time::Duration};
 use alloy_primitives::{Address, Bytes, B256, /*U128,*/ U256};
 use alloy_sol_types::SolValue;
 
+/// User operation permissions
+mod permissions;
+pub use permissions::{BundlerSponsorship, UserOperationPermissions};
+
 /// User Operation types for Entry Point v0.6
 pub mod v0_6;
 /// User Operation types for Entry Point v0.7
@@ -430,6 +434,7 @@ fn dummy_transform_for_aggregator<UO: UserOperation>(
 
 /// User operation enum
 #[derive(Debug, Clone, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum UserOperationVariant {
     /// User operation version 0.6
     V0_6(v0_6::UserOperation),

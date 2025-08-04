@@ -25,7 +25,7 @@ use jsonrpsee::{
 use rundler_contracts::v0_7::{IHCHelper, ISimpleAccount};
 use rundler_types::{
     chain::ChainSpec, hybrid_compute, pool::Pool, UserOperation, UserOperationOptionalGas,
-    UserOperationVariant,
+    UserOperationPermissions, UserOperationVariant,
 };
 use rundler_utils::log::LogOnError;
 use tracing::{instrument, Level};
@@ -38,6 +38,8 @@ use crate::types::{
     RpcGasEstimate, RpcGasEstimateV0_6, RpcGasEstimateV0_7, RpcUserOperationByHash,
     RpcUserOperationReceipt,
 };
+
+/*
 
 /// Settings for the `eth_` API
 #[derive(Copy, Clone, Debug)]
@@ -54,6 +56,7 @@ impl Settings {
         }
     }
 }
+*/
 
 // Can't track down what's causing the gas differences between
 // simulateHandleOps and SimulateValidation, so pad it and
@@ -67,6 +70,8 @@ pub(crate) struct EthApi<P> {
     pub(crate) chain_spec: ChainSpec,
     pool: P,
     router: EntryPointRouter,
+
+    pub(crate) permissions_enabled: bool,
     hc: hybrid_compute::HcCfg,
 }
 
@@ -74,12 +79,18 @@ impl<P> EthApi<P>
 where
     P: Pool,
 {
-    pub(crate) fn new(chain_spec: ChainSpec, router: EntryPointRouter, pool: P) -> Self {
+    pub(crate) fn new(
+        chain_spec: ChainSpec,
+        router: EntryPointRouter,
+        pool: P,
+        permissions_enabled: bool,
+    ) -> Self {
         let hc = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
         Self {
             router,
             pool,
             chain_spec,
+            permissions_enabled,
             hc,
         }
     }
@@ -89,6 +100,7 @@ where
         &self,
         op: UserOperationVariant,
         entry_point: Address,
+        permissions: UserOperationPermissions,
     ) -> EthResult<B256> {
         println!("HC send_user_operation {:?}", op);
         let bundle_size = op.single_uo_bundle_size_bytes();
@@ -99,10 +111,21 @@ where
             )));
         }
 
+        if permissions.bundler_sponsorship.is_some()
+            && (op.max_fee_per_gas() != 0
+                || op.max_priority_fee_per_gas() != 0
+                || op.pre_verification_gas() != 0
+                || op.paymaster().is_some())
+        {
+            return Err(EthRpcError::InvalidParams(
+                    "Bundler sponsorship requires max fee per gas, max priority fee per gas, pre-verification gas, and paymaster to be 0/empty".to_string(),
+                ));
+        }
+
         self.router.check_and_get_route(&entry_point, &op)?;
 
         self.pool
-            .add_op(entry_point, op)
+            .add_op(op, permissions)
             .await
             .map_err(EthRpcError::from)
             .log_on_error_level(Level::DEBUG, "failed to add op to the mempool")
@@ -193,7 +216,6 @@ where
             n_key
         );
         let p2 = rundler_provider::new_alloy_provider(&self.hc.node_http, 120)?;
-        //let p2 = ProviderBuilder::new().on_builtin(&self.hc.node_http).await.unwrap();  //FIXME error handling
 
         let hx = IHCHelper::new(self.hc.helper_addr, p2.clone());
 
@@ -693,7 +715,7 @@ mod tests {
     use alloy_sol_types::SolInterface;
     use mockall::predicate::eq;
     use rundler_contracts::v0_6::IEntryPoint::{handleOpsCall, IEntryPointCalls};
-    use rundler_provider::{Log, MockEntryPointV0_6, MockEvmProvider, Transaction};
+    use rundler_provider::{AnyTxEnvelope, Log, MockEntryPointV0_6, MockEvmProvider, Transaction};
     use rundler_sim::MockGasEstimator;
     use rundler_types::{
         pool::{MockPool, PoolOperation},
@@ -726,8 +748,9 @@ mod tests {
             sim_block_number: 1000,
             account_is_staked: false,
             entity_infos: EntityInfos::default(),
-            da_gas_data: rundler_types::da::DAGasUOData::Empty,
+            da_gas_data: rundler_types::da::DAGasData::Empty,
             filter_id: None,
+            perms: UserOperationPermissions::default(),
         };
 
         let mut pool = MockPool::default();
@@ -743,7 +766,13 @@ mod tests {
         let mut entry_point = MockEntryPointV0_6::default();
         entry_point.expect_address().return_const(ep);
 
-        let api = create_api(provider, entry_point, pool, MockGasEstimator::default());
+        let api = create_api(
+            provider,
+            entry_point,
+            pool,
+            MockGasEstimator::default(),
+            false,
+        );
         let res = api.get_user_operation_by_hash(hash).await.unwrap();
         let ro = RpcUserOperationByHash {
             user_operation: UserOperationVariant::from(uo).into(),
@@ -792,6 +821,9 @@ mod tests {
             PrimitiveSignature::test_signature(),
             hash,
         ));
+        let tx_hash = *inner.tx_hash();
+        let inner = AnyTxEnvelope::Ethereum(inner);
+
         let tx = Transaction {
             inner,
             block_hash: Some(block_hash),
@@ -801,7 +833,6 @@ mod tests {
             from: Address::default(),
         };
 
-        let tx_hash = *tx.inner.tx_hash();
         let log = Log {
             inner: PrimitiveLog {
                 address: ep,
@@ -822,7 +853,13 @@ mod tests {
         let mut entry_point = MockEntryPointV0_6::default();
         entry_point.expect_address().return_const(ep);
 
-        let api = create_api(provider, entry_point, pool, MockGasEstimator::default());
+        let api = create_api(
+            provider,
+            entry_point,
+            pool,
+            MockGasEstimator::default(),
+            false,
+        );
         let res = api.get_user_operation_by_hash(hash).await.unwrap();
         let ro = RpcUserOperationByHash {
             user_operation: UserOperationVariant::from(uo).into(),
@@ -857,7 +894,13 @@ mod tests {
         let mut entry_point = MockEntryPointV0_6::default();
         entry_point.expect_address().return_const(ep);
 
-        let api = create_api(provider, entry_point, pool, MockGasEstimator::default());
+        let api = create_api(
+            provider,
+            entry_point,
+            pool,
+            MockGasEstimator::default(),
+            false,
+        );
         let res = api.get_user_operation_by_hash(hash).await.unwrap();
         assert_eq!(res, None);
     }
@@ -867,6 +910,7 @@ mod tests {
         ep: MockEntryPointV0_6,
         pool: MockPool,
         gas_estimator: MockGasEstimator,
+        permissions_enabled: bool,
     ) -> EthApi<MockPool> {
         let ep = Arc::new(ep);
         let provider = Arc::new(provider);
@@ -879,7 +923,12 @@ mod tests {
             .v0_6(EntryPointRouteImpl::new(
                 ep.clone(),
                 gas_estimator,
-                UserOperationEventProviderV0_6::new(chain_spec.clone(), provider.clone(), None),
+                UserOperationEventProviderV0_6::new(
+                    chain_spec.clone(),
+                    provider.clone(),
+                    None,
+                    None,
+                ),
             ))
             .build();
 
@@ -887,6 +936,7 @@ mod tests {
             router,
             chain_spec,
             pool,
+            permissions_enabled,
             hc: hybrid_compute::HC_CONFIG.lock().unwrap().clone(),
         }
     }

@@ -8,13 +8,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-rundler-contracts.workspace = true
-rundler-provider.workspace = true
-rundler-sim.workspace = true
-rundler-task.workspace = true
-rundler-types.workspace = true
-rundler-utils.workspace = true
 
+alloy-network-primitives.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 
@@ -26,8 +21,14 @@ futures-util.workspace = true
 itertools.workspace = true
 metrics.workspace = true
 metrics-derive.workspace = true
-parking_lot = "0.12.3"
+parking_lot.workspace = true
 prost.workspace = true
+rundler-contracts.workspace = true
+rundler-provider.workspace = true
+rundler-sim.workspace = true
+rundler-task.workspace = true
+rundler-types.workspace = true
+rundler-utils.workspace = true
 tokio.workspace = true
 tokio-stream = { version = "0.1.12", features = ["sync"] }
 tonic.workspace = true
@@ -38,6 +39,8 @@ tracing.workspace = true
 [dev-dependencies]
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
+alloy-network-primitives.workspace = true
+alloy-serde.workspace = true
 alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 mockall.workspace = true

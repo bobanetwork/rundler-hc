@@ -15,12 +15,12 @@ use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 use alloy_primitives::{Address, B256};
 use anyhow::Context;
-use metrics::{Gauge, Histogram};
+use metrics::{Counter, Gauge, Histogram};
 use metrics_derive::Metrics;
 use parking_lot::RwLock;
 use rundler_provider::DAGasOracleSync;
@@ -98,7 +98,7 @@ pub(crate) struct PoolInner<D> {
     /// keeps track of the size of the removed cache in bytes
     cache_size: SizeTracker,
     /// The time of the previous block
-    prev_sys_block_time: Duration,
+    prev_sys_block_time: SystemTime,
     /// The number of the previous block
     prev_block_number: u64,
     /// The metrics of pool.
@@ -130,7 +130,7 @@ where
             submission_id: 0,
             pool_size: SizeTracker::default(),
             cache_size: SizeTracker::default(),
-            prev_sys_block_time: Duration::default(),
+            prev_sys_block_time: SystemTime::now(),
             prev_block_number: 0,
             metrics: PoolMetrics::new_with_labels(&[("entry_point", entry_point)]),
             event_sender,
@@ -197,6 +197,7 @@ where
             true
         };
 
+        let is_7702_uo = op.uo.authorization_tuple().is_some();
         // only eligibility requirement is if the op has required pvg
         let pool_op = Arc::new(OrderedPoolOperation::new(
             Arc::new(op),
@@ -206,6 +207,10 @@ where
         ));
 
         let hash = self.add_operation_internal(pool_op)?;
+        self.metrics.num_ops_added.increment(1);
+        if is_7702_uo {
+            self.metrics.num_7702_ops_added.increment(1);
+        }
         Ok(hash)
     }
 
@@ -231,11 +236,11 @@ where
         block_da_data: Option<&DAGasBlockData>,
         gas_fees: FeeUpdate,
     ) {
-        let sys_block_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be after epoch");
+        let sys_block_time = SystemTime::now();
 
-        let block_delta_time = sys_block_time.saturating_sub(self.prev_sys_block_time);
+        let block_delta_time = sys_block_time
+            .duration_since(self.prev_sys_block_time)
+            .unwrap_or_default();
         let block_delta_height = block_number.saturating_sub(self.prev_block_number);
         let mut expired = Vec::new();
         let mut num_candidates = 0;
@@ -265,14 +270,44 @@ where
                 events.push(PoolEvent::RemovedOp {
                     op_hash: *hash,
                     reason: OpRemovalReason::Expired {
-                        valid_until: sys_block_time.into(),
+                        valid_until: sys_block_time
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .into(),
                     },
                 });
                 expired.push(*hash);
+                continue;
+            } else if op
+                .po
+                .perms
+                .bundler_sponsorship
+                .as_ref()
+                .is_some_and(|s| Timestamp::from(s.valid_until) < block_timestamp)
+            {
+                events.push(PoolEvent::RemovedOp {
+                    op_hash: *hash,
+                    reason: OpRemovalReason::Expired {
+                        valid_until: op
+                            .po
+                            .perms
+                            .bundler_sponsorship
+                            .as_ref()
+                            .unwrap()
+                            .valid_until
+                            .into(),
+                    },
+                });
+                expired.push(*hash);
+                continue;
             }
 
             // check for eligibility
-            if self.da_gas_oracle.is_some() && block_da_data.is_some() {
+            if self.da_gas_oracle.is_some()
+                && block_da_data.is_some()
+                && op.po.perms.bundler_sponsorship.is_none()
+            // skip if bundler sponsored
+            {
                 // TODO(bundle): assuming a bundle size of 1
                 let bundle_size = 1;
 
@@ -286,11 +321,15 @@ where
                     op.uo().extra_data_len(bundle_size),
                 );
 
-                let required_pvg = op.uo().required_pre_verification_gas(
+                let mut required_pvg = op.uo().required_pre_verification_gas(
                     &self.config.chain_spec,
                     bundle_size,
                     required_da_gas,
                 );
+                if let Some(pct) = op.po.perms.underpriced_bundle_pct {
+                    required_pvg = math::percent_ceil(required_pvg, pct);
+                }
+
                 let actual_pvg = op.uo().pre_verification_gas();
 
                 if actual_pvg < required_pvg {
@@ -318,8 +357,10 @@ where
             self.best.insert(op.clone());
 
             // Check candidate status
-            if op.uo().max_fee_per_gas() < gas_fees.uo_fees.max_fee_per_gas
-                || op.uo().max_priority_fee_per_gas() < gas_fees.uo_fees.max_priority_fee_per_gas
+            if (op.uo().max_fee_per_gas() < gas_fees.uo_fees.max_fee_per_gas
+                || op.uo().max_priority_fee_per_gas() < gas_fees.uo_fees.max_priority_fee_per_gas)
+                && op.po.perms.bundler_sponsorship.is_none()
+            // skip if bundler sponsored
             {
                 // don't mark as ineligible, but also not a candidate
                 continue;
@@ -444,7 +485,14 @@ where
         // stay in the pool forever as `remove_operation_internal` is hash based.
         // Time to mine will also fail because UO1's hash was removed from the pool.
 
-        if let Some(time_to_mine) = self.time_to_mine.get(&mined_op.hash) {
+        if let Some(time_to_mine) = self.time_to_mine.get_mut(&mined_op.hash) {
+            time_to_mine.increase(
+                SystemTime::now()
+                    .duration_since(self.prev_sys_block_time)
+                    .unwrap_or_default(),
+                block_number.saturating_sub(self.prev_block_number),
+            );
+
             self.metrics
                 .time_to_mine
                 .record(time_to_mine.candidate_for_time.as_secs_f64());
@@ -794,6 +842,10 @@ struct PoolMetrics {
     time_to_mine: Histogram,
     #[metric(describe = "the duration distribution of a blocked mined.")]
     blocks_to_mine: Histogram,
+    #[metric(describe = "the number of ops with 7702 auth added")]
+    num_7702_ops_added: Counter,
+    #[metric(describe = "the number of ops added")]
+    num_ops_added: Counter,
 }
 
 #[cfg(test)]
@@ -802,7 +854,8 @@ mod tests {
     use rundler_provider::MockDAGasOracleSync;
     use rundler_types::{
         v0_6::{UserOperationBuilder, UserOperationRequiredFields},
-        EntityInfo, EntityInfos, GasFees, UserOperation as UserOperationTrait, ValidTimeRange,
+        BundlerSponsorship, EntityInfo, EntityInfos, GasFees, UserOperation as UserOperationTrait,
+        UserOperationPermissions, ValidTimeRange,
     };
 
     use super::*;
@@ -1535,6 +1588,43 @@ mod tests {
         assert_eq!(pool.best_operations().collect::<Vec<_>>(), vec![po2, po1]);
     }
 
+    #[test]
+    fn test_bundler_sponsorship_expired() {
+        let conf = conf();
+        let mut pool = pool_with_conf(conf.clone());
+        let sender = Address::random();
+        let mut po1 = create_op(sender, 0, 10);
+        po1.perms.bundler_sponsorship = Some(BundlerSponsorship {
+            max_cost: U256::from(100),
+            valid_until: 1,
+        });
+        let hash = pool.add_operation(po1.clone(), 0, 0).unwrap();
+
+        pool.do_maintenance(0, Timestamp::from(2), None, FeeUpdate::default());
+        assert_eq!(None, pool.get_operation_by_hash(hash));
+    }
+
+    #[test]
+    fn test_bundler_sponsorship_always_eligible() {
+        let mut conf = conf();
+        conf.chain_spec.da_pre_verification_gas = true;
+        conf.chain_spec.include_da_gas_in_gas_limit = true;
+        conf.da_gas_tracking_enabled = true;
+
+        let mut pool = pool_with_conf(conf.clone());
+        let sender = Address::random();
+        let mut po1 = create_op_zero_fees(sender, 0);
+        po1.perms.bundler_sponsorship = Some(BundlerSponsorship {
+            max_cost: U256::from(100),
+            valid_until: u64::MAX,
+        });
+        let hash = pool.add_operation(po1.clone(), 0, 0).unwrap();
+
+        pool.do_maintenance(0, Timestamp::from(2), None, FeeUpdate::default());
+        assert!(pool.get_operation_by_hash(hash).is_some());
+        assert_eq!(pool.best_operations().collect::<Vec<_>>().len(), 1);
+    }
+
     const MAX_POOL_SIZE_OPS: usize = 20;
 
     fn conf() -> PoolInnerConfig {
@@ -1589,6 +1679,18 @@ mod tests {
         create_op_from_required(required)
     }
 
+    fn create_op_zero_fees(sender: Address, nonce: usize) -> PoolOperation {
+        let required = UserOperationRequiredFields {
+            sender,
+            nonce: U256::from(nonce),
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            pre_verification_gas: 0,
+            ..base_required_fields()
+        };
+        create_op_from_required(required)
+    }
+
     fn create_op_from_required(required: UserOperationRequiredFields) -> PoolOperation {
         let sender = required.sender;
         PoolOperation {
@@ -1613,6 +1715,7 @@ mod tests {
             account_is_staked: false,
             da_gas_data: Default::default(),
             filter_id: None,
+            perms: UserOperationPermissions::default(),
         }
     }
 

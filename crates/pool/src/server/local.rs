@@ -27,13 +27,14 @@ use rundler_types::{
         MempoolError, NewHead, PaymasterMetadata, Pool, PoolError, PoolOperation, PoolResult,
         Reputation, ReputationStatus, StakeStatus,
     },
-    EntityUpdate, EntryPointVersion, UserOperationId, UserOperationVariant,
+    EntityUpdate, EntryPointVersion, UserOperation, UserOperationId, UserOperationPermissions,
+    UserOperationVariant,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{error, info};
 
 use crate::{
-    chain::ChainUpdate,
+    chain::ChainSubscriber,
     mempool::{Mempool, OperationOrigin},
 };
 
@@ -65,18 +66,18 @@ impl LocalPoolBuilder {
     }
 
     /// Run the local pool server, consumes the builder
-    pub fn run(
+    pub(crate) fn run(
         self,
         task_spawner: Box<dyn TaskSpawner>,
         mempools: HashMap<Address, Arc<dyn Mempool>>,
-        chain_updates: broadcast::Receiver<Arc<ChainUpdate>>,
+        chain_subscriber: ChainSubscriber,
         shutdown: GracefulShutdown,
     ) -> BoxFuture<'static, ()> {
         let runner = LocalPoolServerRunner::new(
             self.req_receiver,
             self.block_sender,
             mempools,
-            chain_updates,
+            chain_subscriber,
             task_spawner,
         );
         Box::pin(runner.run(shutdown))
@@ -95,7 +96,7 @@ struct LocalPoolServerRunner {
     req_receiver: mpsc::Receiver<ServerRequest>,
     block_sender: broadcast::Sender<NewHead>,
     mempools: HashMap<Address, Arc<dyn Mempool>>,
-    chain_updates: broadcast::Receiver<Arc<ChainUpdate>>,
+    chain_subscriber: ChainSubscriber,
     task_spawner: Box<dyn TaskSpawner>,
 }
 
@@ -130,10 +131,15 @@ impl Pool for LocalPoolHandle {
         }
     }
 
-    async fn add_op(&self, entry_point: Address, op: UserOperationVariant) -> PoolResult<B256> {
+    async fn add_op(
+        &self,
+        op: UserOperationVariant,
+        perms: UserOperationPermissions,
+    ) -> PoolResult<B256> {
         let req = ServerRequestKind::AddOp {
-            entry_point,
+            entry_point: op.entry_point(),
             op,
+            perms,
             origin: OperationOrigin::Local,
         };
         let resp = self.send(req).await?;
@@ -324,8 +330,11 @@ impl Pool for LocalPoolHandle {
         }
     }
 
-    async fn subscribe_new_heads(&self) -> PoolResult<Pin<Box<dyn Stream<Item = NewHead> + Send>>> {
-        let req = ServerRequestKind::SubscribeNewHeads;
+    async fn subscribe_new_heads(
+        &self,
+        to_track: Vec<Address>,
+    ) -> PoolResult<Pin<Box<dyn Stream<Item = NewHead> + Send>>> {
+        let req = ServerRequestKind::SubscribeNewHeads { to_track };
         let resp = self.send(req).await?;
         match resp {
             ServerResponse::SubscribeNewHeads { mut new_heads } => Ok(Box::pin(stream! {
@@ -367,14 +376,14 @@ impl LocalPoolServerRunner {
         req_receiver: mpsc::Receiver<ServerRequest>,
         block_sender: broadcast::Sender<NewHead>,
         mempools: HashMap<Address, Arc<dyn Mempool>>,
-        chain_updates: broadcast::Receiver<Arc<ChainUpdate>>,
+        chain_subscriber: ChainSubscriber,
         task_spawner: Box<dyn TaskSpawner>,
     ) -> Self {
         Self {
             req_receiver,
             block_sender,
             mempools,
-            chain_updates,
+            chain_subscriber,
             task_spawner,
         }
     }
@@ -525,12 +534,14 @@ impl LocalPoolServerRunner {
     }
 
     async fn run(mut self, shutdown: GracefulShutdown) {
+        let mut chain_updates = self.chain_subscriber.subscribe();
+
         loop {
             tokio::select! {
                 _ = shutdown.clone() => {
                     break;
                 }
-                chain_update = self.chain_updates.recv() => {
+                chain_update = chain_updates.recv() => {
                     if let Ok(chain_update) = chain_update {
                         // Update each mempool before notifying listeners of the chain update
                         // This allows the mempools to update their state before the listeners
@@ -549,6 +560,7 @@ impl LocalPoolServerRunner {
                             let _ = block_sender.send(NewHead {
                                 block_hash: chain_update.latest_block_hash,
                                 block_number: chain_update.latest_block_number,
+                                address_updates: chain_update.address_updates.clone(),
                             });
                         }));
                     }
@@ -557,7 +569,7 @@ impl LocalPoolServerRunner {
                     let resp = match req.request {
                         // Async methods
                         // Responses are sent in the spawned task
-                        ServerRequestKind::AddOp { entry_point, op, origin } => {
+                        ServerRequestKind::AddOp { entry_point, op, perms, origin } => {
                             let fut = |mempool: Arc<dyn Mempool>, response: oneshot::Sender<Result<ServerResponse, PoolError>>| async move {
                                 let resp = 'resp: {
                                     match mempool.entry_point_version() {
@@ -576,7 +588,7 @@ impl LocalPoolServerRunner {
                                         }
                                     }
 
-                                    match mempool.add_operation(origin, op).await {
+                                    match mempool.add_operation(origin, op, perms).await {
                                         Ok(hash) => Ok(ServerResponse::AddOp { hash }),
                                         Err(e) => Err(e.into()),
                                     }
@@ -683,7 +695,8 @@ impl LocalPoolServerRunner {
                                 Err(e) => Err(e),
                             }
                         },
-                        ServerRequestKind::SubscribeNewHeads => {
+                        ServerRequestKind::SubscribeNewHeads { to_track } => {
+                            self.chain_subscriber.track_addresses(to_track);
                             Ok(ServerResponse::SubscribeNewHeads { new_heads: self.block_sender.subscribe() } )
                         }
                     };
@@ -703,11 +716,13 @@ struct ServerRequest {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum ServerRequestKind {
     GetSupportedEntryPoints,
     AddOp {
         entry_point: Address,
         op: UserOperationVariant,
+        perms: UserOperationPermissions,
         origin: OperationOrigin,
     },
     GetOps {
@@ -762,10 +777,13 @@ enum ServerRequestKind {
         entry_point: Address,
         address: Address,
     },
-    SubscribeNewHeads,
+    SubscribeNewHeads {
+        to_track: Vec<Address>,
+    },
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum ServerResponse {
     GetSupportedEntryPoints {
         entry_points: Vec<Address>,
@@ -809,11 +827,15 @@ enum ServerResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::{iter::zip, sync::Arc};
+    use std::{collections::HashSet, iter::zip, sync::Arc};
 
     use futures_util::StreamExt;
+    use parking_lot::RwLock;
     use reth_tasks::TaskManager;
-    use rundler_types::v0_6::UserOperation;
+    use rundler_types::{
+        chain::ChainSpec, v0_6::UserOperation as UserOperationV0_6,
+        v0_7::UserOperation as UserOperationV0_7,
+    };
 
     use super::*;
     use crate::{chain::ChainUpdate, mempool::MockMempool};
@@ -827,13 +849,17 @@ mod tests {
             .returning(|| EntryPointVersion::V0_6);
         mock_pool
             .expect_add_operation()
-            .returning(move |_, _| Ok(hash0));
+            .returning(move |_, _, _| Ok(hash0));
 
-        let ep = Address::random();
+        let ep = ChainSpec::default().entry_point_address_v0_6;
         let pool: Arc<dyn Mempool> = Arc::new(mock_pool);
         let state = setup(HashMap::from([(ep, pool)]));
 
-        let hash1 = state.handle.add_op(ep, mock_op()).await.unwrap();
+        let hash1 = state
+            .handle
+            .add_op(mock_op(), UserOperationPermissions::default())
+            .await
+            .unwrap();
         assert_eq!(hash0, hash1);
     }
 
@@ -846,7 +872,7 @@ mod tests {
         let pool: Arc<dyn Mempool> = Arc::new(mock_pool);
         let state = setup(HashMap::from([(ep, pool)]));
 
-        let mut sub = state.handle.subscribe_new_heads().await.unwrap();
+        let mut sub = state.handle.subscribe_new_heads(vec![]).await.unwrap();
 
         let hash = B256::random();
         let number = 1234;
@@ -886,30 +912,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_entry_points() {
-        let eps = [Address::random(), Address::random(), Address::random()];
-        let mut pools = [MockMempool::new(), MockMempool::new(), MockMempool::new()];
+        let cs = ChainSpec::default();
+        let eps = [cs.entry_point_address_v0_6, cs.entry_point_address_v0_7];
+        let mut pools = [MockMempool::new(), MockMempool::new()];
         let h0 = B256::random();
         let h1 = B256::random();
-        let h2 = B256::random();
-        let hashes = [h0, h1, h2];
         pools[0]
             .expect_entry_point_version()
             .returning(|| EntryPointVersion::V0_6);
         pools[0]
             .expect_add_operation()
-            .returning(move |_, _| Ok(h0));
+            .returning(move |_, _, _| Ok(h0));
         pools[1]
             .expect_entry_point_version()
-            .returning(|| EntryPointVersion::V0_6);
+            .returning(|| EntryPointVersion::V0_7);
         pools[1]
             .expect_add_operation()
-            .returning(move |_, _| Ok(h1));
-        pools[2]
-            .expect_entry_point_version()
-            .returning(|| EntryPointVersion::V0_6);
-        pools[2]
-            .expect_add_operation()
-            .returning(move |_, _| Ok(h2));
+            .returning(move |_, _, _| Ok(h1));
 
         let state = setup(
             zip(eps.iter(), pools.into_iter())
@@ -920,27 +939,45 @@ mod tests {
                 .collect(),
         );
 
-        for (ep, hash) in zip(eps.iter(), hashes.iter()) {
-            assert_eq!(*hash, state.handle.add_op(*ep, mock_op()).await.unwrap());
-        }
+        assert_eq!(
+            h0,
+            state
+                .handle
+                .add_op(mock_op(), UserOperationPermissions::default())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            h1,
+            state
+                .handle
+                .add_op(mock_op_v0_7(), UserOperationPermissions::default())
+                .await
+                .unwrap()
+        );
     }
 
     struct State {
         handle: LocalPoolHandle,
-        chain_update_tx: broadcast::Sender<Arc<ChainUpdate>>,
+        chain_update_tx: Arc<broadcast::Sender<Arc<ChainUpdate>>>,
         _task_manager: TaskManager,
     }
 
     fn setup(pools: HashMap<Address, Arc<dyn Mempool>>) -> State {
         let builder = LocalPoolBuilder::new(10, 10);
         let handle = builder.get_handle();
-        let (tx, rx) = broadcast::channel(10);
+        let (tx, _) = broadcast::channel(10);
+        let tx = Arc::new(tx);
         let tm = TaskManager::current();
         let ts = tm.executor();
         let ts_box = Box::new(ts.clone());
+        let chain_subscriber = ChainSubscriber {
+            sender: tx.clone(),
+            to_track: Arc::new(RwLock::new(HashSet::new())),
+        };
 
         ts.spawn_critical_with_graceful_shutdown_signal("test pool", |shutdown| {
-            builder.run(ts_box, pools, rx, shutdown)
+            builder.run(ts_box, pools, chain_subscriber, shutdown)
         });
 
         State {
@@ -951,6 +988,10 @@ mod tests {
     }
 
     fn mock_op() -> UserOperationVariant {
-        UserOperationVariant::V0_6(UserOperation::default())
+        UserOperationVariant::V0_6(UserOperationV0_6::default())
+    }
+
+    fn mock_op_v0_7() -> UserOperationVariant {
+        UserOperationVariant::V0_7(UserOperationV0_7::default())
     }
 }

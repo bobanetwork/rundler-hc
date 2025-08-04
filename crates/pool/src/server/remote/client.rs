@@ -27,7 +27,7 @@ use rundler_types::{
         NewHead, PaymasterMetadata, Pool, PoolError, PoolOperation, PoolResult, Reputation,
         ReputationStatus, StakeStatus,
     },
-    EntityUpdate, UserOperationId, UserOperationVariant,
+    EntityUpdate, UserOperationId, UserOperationPermissions, UserOperationVariant,
 };
 use rundler_utils::retry::{self, UnlimitedRetryOpts};
 use tokio::sync::mpsc;
@@ -88,6 +88,7 @@ impl RemotePoolClient {
     async fn new_heads_subscription_handler(
         client: OpPoolClient<Channel>,
         tx: mpsc::UnboundedSender<NewHead>,
+        to_track: Vec<Address>,
     ) {
         let mut stream = None;
 
@@ -98,7 +99,13 @@ impl RemotePoolClient {
                         "subscribe new heads",
                         || {
                             let mut c = client.clone();
-                            async move { c.subscribe_new_heads(SubscribeNewHeadsRequest {}).await }
+                            let to_track = to_track.clone();
+                            async move {
+                                c.subscribe_new_heads(SubscribeNewHeadsRequest {
+                                    to_track: to_track.iter().map(|a| a.to_proto_bytes()).collect(),
+                                })
+                                .await
+                            }
                         },
                         UnlimitedRetryOpts::default(),
                     )
@@ -152,13 +159,17 @@ impl Pool for RemotePoolClient {
             .map_err(anyhow::Error::from)?)
     }
 
-    async fn add_op(&self, entry_point: Address, op: UserOperationVariant) -> PoolResult<B256> {
+    async fn add_op(
+        &self,
+        op: UserOperationVariant,
+        perms: UserOperationPermissions,
+    ) -> PoolResult<B256> {
         let res = self
             .op_pool_client
             .clone()
             .add_op(AddOpRequest {
-                entry_point: entry_point.to_vec(),
                 op: Some(protos::UserOperation::from(&op)),
+                permissions: Some(protos::UserOperationPermissions::from(perms)),
             })
             .await
             .map_err(anyhow::Error::from)?
@@ -556,12 +567,17 @@ impl Pool for RemotePoolClient {
         }
     }
 
-    async fn subscribe_new_heads(&self) -> PoolResult<Pin<Box<dyn Stream<Item = NewHead> + Send>>> {
+    async fn subscribe_new_heads(
+        &self,
+        to_track: Vec<Address>,
+    ) -> PoolResult<Pin<Box<dyn Stream<Item = NewHead> + Send>>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let client = self.op_pool_client.clone();
 
         self.task_spawner
-            .spawn(Box::pin(Self::new_heads_subscription_handler(client, tx)));
+            .spawn(Box::pin(Self::new_heads_subscription_handler(
+                client, tx, to_track,
+            )));
         Ok(Box::pin(UnboundedReceiverStream::new(rx)))
     }
 }

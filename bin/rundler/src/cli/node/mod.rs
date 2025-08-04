@@ -11,6 +11,8 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
+use std::sync::Arc;
+
 use clap::Args;
 use rundler_builder::{BuilderEvent, BuilderTask, LocalBuilderBuilder};
 use rundler_pool::{LocalPoolBuilder, PoolEvent, PoolTask};
@@ -81,14 +83,7 @@ pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
             entry_point_builders,
         )
         .await?;
-    let rpc_task_args = rpc_args.to_args(
-        chain_spec.clone(),
-        &common_args,
-        (&common_args).try_into()?,
-        (&common_args).into(),
-        (&common_args).try_into()?,
-        (&common_args).try_into()?,
-    )?;
+    let rpc_task_args = rpc_args.to_args(chain_spec.clone(), &common_args)?;
 
     let (event_sender, event_rx) =
         broadcast::channel::<WithEntryPoint<Event>>(EVENT_CHANNEL_CAPACITY);
@@ -125,7 +120,21 @@ pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
     let pool_builder = LocalPoolBuilder::new(REQUEST_CHANNEL_CAPACITY, BLOCK_CHANNEL_CAPACITY);
     let pool_handle = pool_builder.get_handle();
 
-    let builder_builder = LocalBuilderBuilder::new(REQUEST_CHANNEL_CAPACITY);
+    let signer_manager = rundler_signer::new_signer_manager(
+        &builder_task_args.signing_scheme,
+        builder_task_args.auto_fund,
+        &chain_spec,
+        providers.evm().clone(),
+        providers.da_gas_oracle().clone(),
+        &task_spawner,
+    )
+    .await?;
+
+    let builder_builder = LocalBuilderBuilder::new(
+        REQUEST_CHANNEL_CAPACITY,
+        signer_manager.clone(),
+        Arc::new(pool_handle.clone()),
+    );
     let builder_handle = builder_builder.get_handle();
 
     PoolTask::new(
@@ -143,6 +152,7 @@ pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
         builder_builder,
         pool_handle.clone(),
         providers.clone(),
+        signer_manager,
     )
     .spawn(task_spawner.clone())
     .await?;

@@ -14,8 +14,7 @@
 use alloy_json_rpc::{RpcParam, RpcReturn};
 use alloy_primitives::{aliases::U192, Address, Bytes, TxHash, B256, U256};
 use alloy_rpc_types_eth::{
-    state::StateOverride, Block, BlockId, BlockNumberOrTag, FeeHistory, Filter, Log, Transaction,
-    TransactionReceipt, TransactionRequest,
+    state::StateOverride, BlockId, BlockNumberOrTag, FeeHistory, Filter, Log,
 };
 use alloy_rpc_types_trace::geth::{
     GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace,
@@ -23,15 +22,16 @@ use alloy_rpc_types_trace::geth::{
 use rundler_contracts::utils::GetGasUsed::GasUsedResult;
 use rundler_types::{
     chain::ChainSpec,
-    da::{DAGasBlockData, DAGasUOData},
-    v0_6, v0_7, GasFees, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
+    da::{DAGasBlockData, DAGasData},
+    v0_6, v0_7, ExpectedStorage, GasFees, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
 };
 
 use super::error::ProviderResult;
 use crate::{
-    AggregatorOut, BlockHashOrNumber, BundleHandler, DAGasOracle, DAGasOracleSync, DAGasProvider,
-    DepositInfo, EntryPoint, EntryPointProvider, EvmCall, EvmProvider as EvmProviderTrait,
-    ExecutionResult, HandleOpsOut, SignatureAggregator, SimulationProvider,
+    AggregatorOut, Block, BlockHashOrNumber, BundleHandler, DAGasOracle, DAGasOracleSync,
+    DAGasProvider, DepositInfo, EntryPoint, EntryPointProvider, EvmCall,
+    EvmProvider as EvmProviderTrait, ExecutionResult, HandleOpsOut, SignatureAggregator,
+    SimulationProvider, Transaction, TransactionReceipt, TransactionRequest,
 };
 
 mockall::mock! {
@@ -58,9 +58,19 @@ mockall::mock! {
             state_overrides: &StateOverride,
         ) -> ProviderResult<Bytes>;
 
+        async fn send_raw_transaction(&self, tx: Bytes) -> ProviderResult<TxHash>;
+
+        async fn send_raw_transaction_conditional(
+            &self,
+            tx: Bytes,
+            expected_storage: &ExpectedStorage,
+        ) -> ProviderResult<TxHash>;
+
         async fn get_block_number(&self) -> ProviderResult<u64>;
 
         async fn get_block(&self, block_id: BlockId) -> ProviderResult<Option<Block>>;
+
+        async fn get_full_block(&self, block_id: BlockId) -> ProviderResult<Option<Block>>;
 
         async fn get_balance(&self, address: Address, block: Option<BlockId>) -> ProviderResult<U256>;
 
@@ -109,6 +119,11 @@ mockall::mock! {
             addresses: Vec<Address>,
             block: Option<BlockId>,
         ) -> ProviderResult<B256>;
+
+        async fn get_balances(
+            &self,
+            addresses: Vec<Address>,
+        ) -> ProviderResult<Vec<(Address, U256)>>;
     }
 }
 
@@ -182,7 +197,7 @@ mockall::mock! {
             block: BlockHashOrNumber,
             gas_price: u128,
             bundle_size: usize,
-        ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
+        ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)>;
     }
 
     #[async_trait::async_trait]
@@ -283,7 +298,7 @@ mockall::mock! {
             block: BlockHashOrNumber,
             gas_price: u128,
             bundle_size: usize,
-        ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
+        ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)>;
     }
 
     #[async_trait::async_trait]
@@ -320,16 +335,16 @@ mockall::mock! {
 
     #[async_trait::async_trait]
     impl DAGasOracleSync for DAGasOracleSync {
-        async fn block_data(&self, block: BlockHashOrNumber) -> ProviderResult<DAGasBlockData>;
-        async fn uo_data(
+        async fn da_block_data(&self, block: BlockHashOrNumber) -> ProviderResult<DAGasBlockData>;
+        async fn da_gas_data(
             &self,
             uo_data: Bytes,
             to: Address,
             block: BlockHashOrNumber,
-        ) -> ProviderResult<DAGasUOData>;
+        ) -> ProviderResult<DAGasData>;
         fn calc_da_gas_sync(
             &self,
-            uo_data: &DAGasUOData,
+            data: &DAGasData,
             block_data: &DAGasBlockData,
             gas_price: u128,
             extra_bytes_len: usize,
@@ -340,11 +355,11 @@ mockall::mock! {
     impl DAGasOracle for DAGasOracleSync {
         async fn estimate_da_gas(
             &self,
-            uo_bytes: Bytes,
+            bytes: Bytes,
             to: Address,
             block: BlockHashOrNumber,
             gas_price: u128,
             extra_data_len: usize,
-        ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
+        ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)>;
     }
 }

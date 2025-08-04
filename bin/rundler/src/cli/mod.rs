@@ -13,6 +13,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use admin::AdminCliArgs;
 use aggregator::AggregatorType;
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{bail, Context};
@@ -22,6 +23,7 @@ use clap::{
 };
 use rundler_contracts::v0_7::IHCHelper;
 
+mod admin;
 mod aggregator;
 mod builder;
 mod chain_spec;
@@ -31,6 +33,7 @@ mod node;
 mod pool;
 mod proxy;
 mod rpc;
+mod signer;
 mod tracing;
 
 use builder::{BuilderCliArgs, EntryPointBuilderConfigs};
@@ -40,17 +43,19 @@ use pool::PoolCliArgs;
 use reth_tasks::TaskManager;
 use rpc::RpcCliArgs;
 use rundler_provider::{
-    AlloyEntryPointV0_6, AlloyEntryPointV0_7, AlloyEvmProvider, DAGasOracleSync,
+    AlloyEntryPointV0_6, AlloyEntryPointV0_7, AlloyEvmProvider, DAGasOracle, DAGasOracleSync,
     EntryPointProvider, EvmProvider, Providers,
 };
-use rundler_rpc::{EthApiSettings, RundlerApiSettings};
 use rundler_sim::{
     EstimationSettings, MempoolConfigs, PrecheckSettings, PriorityFeeMode, SimulationSettings,
     MIN_CALL_GAS_LIMIT,
 };
 use rundler_types::{
-    chain::ChainSpec, da::DAGasOracleType, hybrid_compute,
-    v0_6::UserOperation as UserOperationV0_6, v0_7::UserOperation as UserOperationV0_7,
+    chain::{ChainSpec, TryFromWithSpec},
+    da::DAGasOracleType,
+    hybrid_compute,
+    v0_6::UserOperation as UserOperationV0_6,
+    v0_7::UserOperation as UserOperationV0_7,
 };
 
 /// Main entry point for the CLI
@@ -141,6 +146,11 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Builder(args) => {
             builder::spawn_tasks(task_spawner.clone(), cs, args, opt.common, providers).await?
         }
+        Command::Admin(args) => {
+            admin::run(args, cs, providers, task_spawner).await?;
+            // admin CLI should not wait for ctrl-c
+            return Ok(());
+        }
     }
 
     // wait for ctrl-c or the task manager to panic
@@ -186,6 +196,12 @@ enum Command {
     /// Runs the Builder server
     #[command(name = "builder")]
     Builder(BuilderCliArgs),
+
+    /// Admin command
+    ///
+    /// Runs the admin commands
+    #[command(name = "admin")]
+    Admin(AdminCliArgs),
 }
 
 /// CLI common options
@@ -234,13 +250,24 @@ pub struct CommonArgs {
     max_verification_gas: u64,
 
     #[arg(
-        long = "max_bundle_gas",
-        name = "max_bundle_gas",
-        default_value = "25000000",
-        env = "MAX_BUNDLE_GAS",
+        long = "target_bundle_block_gas_limit_ratio",
+        name = "target_bundle_block_gas_limit_ratio",
+        default_value = "0.5",
+        env = "TARGET_BUNDLE_BLOCK_GAS_LIMIT_RATIO",
+        value_parser = verify_f64_less_than_one,
         global = true
     )]
-    max_bundle_gas: u128,
+    target_bundle_block_gas_limit_ratio: f64,
+
+    #[arg(
+        long = "max_bundle_block_gas_limit_ratio",
+        name = "max_bundle_block_gas_limit_ratio",
+        default_value = "0.9",
+        env = "MAX_BUNDLE_BLOCK_GAS_LIMIT_RATIO",
+        value_parser = verify_f64_less_than_one,
+        global = true
+    )]
+    max_bundle_block_gas_limit_ratio: f64,
 
     #[arg(
         long = "min_stake_value",
@@ -271,6 +298,14 @@ pub struct CommonArgs {
     )]
     tracer_timeout: String,
 
+    /// If set, allows the simulator to fallback to unsafe mode if the simulation tracer fails
+    #[arg(
+        long = "enable_unsafe_fallback",
+        name = "enable_unsafe_fallback",
+        env = "ENABLE_UNSAFE_FALLBACK"
+    )]
+    enable_unsafe_fallback: bool,
+
     /// Amount of blocks to search when calling eth_getUserOperationByHash.
     /// Defaults from 0 to latest block
     #[arg(
@@ -280,6 +315,17 @@ pub struct CommonArgs {
         global = true
     )]
     user_operation_event_block_distance: Option<u64>,
+
+    /// Amount of blocks to search when calling eth_getUserOperationByHash during a fallback.
+    ///
+    /// Defaults to unset. If set, will be used in the case that a first query for events fails.
+    #[arg(
+        long = "user_operation_event_block_distance_fallback",
+        name = "user_operation_event_block_distance_fallback",
+        env = "USER_OPERATION_EVENT_BLOCK_DISTANCE_FALLBACK",
+        global = true
+    )]
+    user_operation_event_block_distance_fallback: Option<u64>,
 
     #[arg(
         long = "max_simulate_handle_ops_gas",
@@ -509,12 +555,23 @@ fn parse_key_val(s: &str) -> Result<(String, String), anyhow::Error> {
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
+fn verify_f64_less_than_one(v: &str) -> Result<f64, String> {
+    let Ok(v) = v.parse() else {
+        return Err("invalid float".to_string());
+    };
+    if v < 1.0 {
+        Ok(v)
+    } else {
+        Err(format!("value {v} is not less than 1.0"))
+    }
+}
+
 const SIMULATION_GAS_OVERHEAD: u64 = 100_000;
 
-impl TryFrom<&CommonArgs> for EstimationSettings {
+impl TryFromWithSpec<&CommonArgs> for EstimationSettings {
     type Error = anyhow::Error;
 
-    fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
+    fn try_from_with_spec(value: &CommonArgs, chain_spec: &ChainSpec) -> Result<Self, Self::Error> {
         if value.max_verification_gas
             > (value.max_simulate_handle_ops_gas - SIMULATION_GAS_OVERHEAD)
         {
@@ -539,20 +596,22 @@ impl TryFrom<&CommonArgs> for EstimationSettings {
             max_call_gas,
             max_paymaster_verification_gas: value.max_verification_gas as u128,
             max_paymaster_post_op_gas: max_call_gas,
-            max_total_execution_gas: value.max_bundle_gas,
+            max_total_execution_gas: chain_spec
+                .block_gas_limit_mult(value.max_bundle_block_gas_limit_ratio),
             max_simulate_handle_ops_gas: value.max_simulate_handle_ops_gas,
             verification_estimation_gas_fee: value.verification_estimation_gas_fee,
         })
     }
 }
 
-impl TryFrom<&CommonArgs> for PrecheckSettings {
+impl TryFromWithSpec<&CommonArgs> for PrecheckSettings {
     type Error = anyhow::Error;
 
-    fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
+    fn try_from_with_spec(value: &CommonArgs, chain_spec: &ChainSpec) -> Result<Self, Self::Error> {
         Ok(Self {
             max_verification_gas: value.max_verification_gas as u128,
-            max_total_execution_gas: value.max_bundle_gas,
+            max_total_execution_gas: chain_spec
+                .block_gas_limit_mult(value.max_bundle_block_gas_limit_ratio),
             bundle_base_fee_overhead_percent: value.bundle_base_fee_overhead_percent,
             bundle_priority_fee_overhead_percent: value.bundle_priority_fee_overhead_percent,
             priority_fee_mode: PriorityFeeMode::try_from(
@@ -573,30 +632,11 @@ impl TryFrom<&CommonArgs> for SimulationSettings {
             bail!("Invalid value for tracer_timeout, must be parsable by the ParseDuration function. See docs https://pkg.go.dev/time#ParseDuration")
         }
 
-        Ok(Self::new(
-            value.min_unstake_delay,
-            U256::from(value.min_stake_value),
-            value.tracer_timeout.clone(),
-        ))
-    }
-}
-
-impl From<&CommonArgs> for EthApiSettings {
-    fn from(value: &CommonArgs) -> Self {
-        Self::new(value.user_operation_event_block_distance)
-    }
-}
-
-impl TryFrom<&CommonArgs> for RundlerApiSettings {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
         Ok(Self {
-            priority_fee_mode: PriorityFeeMode::try_from(
-                value.priority_fee_mode_kind.as_str(),
-                value.priority_fee_mode_value,
-            )?,
-            bundle_priority_fee_overhead_percent: value.bundle_priority_fee_overhead_percent,
+            min_unstake_delay: value.min_unstake_delay,
+            min_stake_value: U256::from(value.min_stake_value),
+            tracer_timeout: value.tracer_timeout.clone(),
+            enable_unsafe_fallback: value.enable_unsafe_fallback,
         })
     }
 }
@@ -725,24 +765,27 @@ pub struct Cli {
 }
 
 #[derive(Clone)]
-pub struct RundlerProviders<P, EP06, EP07, D> {
+pub struct RundlerProviders<P, EP06, EP07, D, DS> {
     provider: P,
     ep_v0_6: Option<EP06>,
     ep_v0_7: Option<EP07>,
-    da_gas_oracle_sync: Option<D>,
+    da_gas_oracle: D,
+    da_gas_oracle_sync: Option<DS>,
 }
 
-impl<P, EP06, EP07, D> Providers for RundlerProviders<P, EP06, EP07, D>
+impl<P, EP06, EP07, D, DS> Providers for RundlerProviders<P, EP06, EP07, D, DS>
 where
     P: EvmProvider + Clone,
     EP06: EntryPointProvider<UserOperationV0_6> + Clone,
     EP07: EntryPointProvider<UserOperationV0_7> + Clone,
-    D: DAGasOracleSync + Clone,
+    D: DAGasOracle + Clone,
+    DS: DAGasOracleSync + Clone,
 {
     type Evm = P;
     type EntryPointV0_6 = EP06;
     type EntryPointV0_7 = EP07;
-    type DAGasOracleSync = D;
+    type DAGasOracle = D;
+    type DAGasOracleSync = DS;
 
     fn evm(&self) -> &Self::Evm {
         &self.provider
@@ -754,6 +797,10 @@ where
 
     fn ep_v0_7(&self) -> &Option<Self::EntryPointV0_7> {
         &self.ep_v0_7
+    }
+
+    fn da_gas_oracle(&self) -> &Self::DAGasOracle {
+        &self.da_gas_oracle
     }
 
     fn da_gas_oracle_sync(&self) -> &Option<Self::DAGasOracleSync> {
@@ -802,6 +849,7 @@ pub fn construct_providers(
         provider: AlloyEvmProvider::new(provider),
         ep_v0_6,
         ep_v0_7,
+        da_gas_oracle,
         da_gas_oracle_sync,
     })
 }

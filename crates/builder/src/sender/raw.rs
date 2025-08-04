@@ -11,41 +11,39 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{Address, B256};
+use alloy_eips::eip2718::Encodable2718;
+use alloy_primitives::B256;
 use anyhow::Context;
 use async_trait::async_trait;
 use rundler_provider::{EvmProvider, TransactionRequest};
-use rundler_sim::ExpectedStorage;
-use rundler_types::GasFees;
+use rundler_signer::SignerLease;
+use rundler_types::{ExpectedStorage, GasFees};
 use serde_json::json;
 
 use super::{CancelTxInfo, Result};
-use crate::{
-    sender::{create_hard_cancel_tx, SentTxInfo, TransactionSender, TxStatus},
-    signer::Signer,
-};
+use crate::sender::{create_hard_cancel_tx, TransactionSender};
 
 #[derive(Debug)]
-pub(crate) struct RawTransactionSender<P, S> {
+pub(crate) struct RawTransactionSender<P> {
     submit_provider: P,
-    status_provider: P,
-    signer: S,
-    dropped_status_supported: bool,
     use_conditional_rpc: bool,
 }
 
 #[async_trait]
-impl<P, S> TransactionSender for RawTransactionSender<P, S>
+impl<P> TransactionSender for RawTransactionSender<P>
 where
     P: EvmProvider,
-    S: Signer,
 {
     async fn send_transaction(
         &self,
         tx: TransactionRequest,
         expected_storage: &ExpectedStorage,
-    ) -> Result<SentTxInfo> {
-        let (raw_tx, nonce) = self.signer.fill_and_sign(tx).await?;
+        signer: &SignerLease,
+    ) -> Result<B256> {
+        let raw_tx = signer
+            .sign_tx_raw(tx)
+            .await
+            .context("failed to sign transaction")?;
 
         let tx_hash = if self.use_conditional_rpc {
             self.submit_provider
@@ -55,12 +53,10 @@ where
                 )
                 .await?
         } else {
-            self.submit_provider
-                .request("eth_sendRawTransaction", (raw_tx,))
-                .await?
+            self.submit_provider.send_raw_transaction(raw_tx).await?
         };
 
-        Ok(SentTxInfo { nonce, tx_hash })
+        Ok(tx_hash)
     }
 
     async fn cancel_transaction(
@@ -68,14 +64,20 @@ where
         _tx_hash: B256,
         nonce: u64,
         gas_fees: GasFees,
+        signer: &SignerLease,
     ) -> Result<CancelTxInfo> {
-        let tx = create_hard_cancel_tx(self.signer.address(), nonce, gas_fees);
+        let tx = create_hard_cancel_tx(signer.address(), nonce, gas_fees);
 
-        let (raw_tx, _) = self.signer.fill_and_sign(tx).await?;
+        let tx_envelope = signer
+            .sign_tx(tx)
+            .await
+            .context("failed to sign transaction")?;
+        let mut raw_tx = vec![];
+        tx_envelope.encode_2718(&mut raw_tx);
 
         let tx_hash = self
             .submit_provider
-            .request("eth_sendRawTransaction", (raw_tx,))
+            .send_raw_transaction(raw_tx.into())
             .await?;
 
         Ok(CancelTxInfo {
@@ -83,46 +85,12 @@ where
             soft_cancelled: false,
         })
     }
-
-    async fn get_transaction_status(&self, tx_hash: B256) -> Result<TxStatus> {
-        let tx = self
-            .status_provider
-            .get_transaction_by_hash(tx_hash)
-            .await
-            .context("provider should return transaction status")?;
-        Ok(match tx {
-            None => {
-                if self.dropped_status_supported {
-                    TxStatus::Dropped
-                } else {
-                    TxStatus::Pending
-                }
-            }
-            Some(tx) => match tx.block_number {
-                None => TxStatus::Pending,
-                Some(block_number) => TxStatus::Mined { block_number },
-            },
-        })
-    }
-
-    fn address(&self) -> Address {
-        self.signer.address()
-    }
 }
 
-impl<P, S> RawTransactionSender<P, S> {
-    pub(crate) fn new(
-        submit_provider: P,
-        status_provider: P,
-        signer: S,
-        dropped_status_supported: bool,
-        use_conditional_rpc: bool,
-    ) -> Self {
+impl<P> RawTransactionSender<P> {
+    pub(crate) fn new(submit_provider: P, use_conditional_rpc: bool) -> Self {
         Self {
             submit_provider,
-            status_provider,
-            signer,
-            dropped_status_supported,
             use_conditional_rpc,
         }
     }

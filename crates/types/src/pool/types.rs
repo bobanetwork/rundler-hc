@@ -15,8 +15,8 @@ use alloy_primitives::{Address, B256, U256};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    da::DAGasUOData, entity::EntityInfos, Entity, EntityType, StakeInfo, UserOperation,
-    UserOperationVariant, ValidTimeRange,
+    da::DAGasData, entity::EntityInfos, Entity, EntityType, StakeInfo, UserOperation,
+    UserOperationPermissions, UserOperationVariant, ValidTimeRange,
 };
 
 /// The new head of the chain, as viewed by the pool
@@ -26,6 +26,21 @@ pub struct NewHead {
     pub block_hash: B256,
     /// The number of the new head
     pub block_number: u64,
+    /// The updates to the state of the addresses
+    pub address_updates: Vec<AddressUpdate>,
+}
+
+/// An update to the state of an address
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AddressUpdate {
+    /// The address that was updated
+    pub address: Address,
+    /// The new nonce for the address
+    pub nonce: u64,
+    /// The new balance for the address
+    pub balance: U256,
+    /// Mined transaction hashes
+    pub mined_tx_hashes: Vec<B256>,
 }
 
 /// The reputation of an entity
@@ -121,9 +136,11 @@ pub struct PoolOperation {
     /// Staking information about all the entities.
     pub entity_infos: EntityInfos,
     /// The DA gas data for this operation
-    pub da_gas_data: DAGasUOData,
+    pub da_gas_data: DAGasData,
     /// The matched filter ID for this operation
     pub filter_id: Option<String>,
+    /// Permissions for this operation
+    pub perms: UserOperationPermissions,
 }
 
 impl PoolOperation {

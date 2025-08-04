@@ -29,7 +29,7 @@ use rundler_types::{
         MempoolError, PaymasterMetadata, PoolOperation, Reputation, ReputationStatus, StakeStatus,
     },
     Entity, EntityUpdate, EntityUpdateType, EntryPointVersion, UserOperation, UserOperationId,
-    UserOperationVariant,
+    UserOperationPermissions, UserOperationVariant,
 };
 use rundler_utils::emit::WithEntryPoint;
 use tokio::sync::broadcast;
@@ -400,7 +400,7 @@ where
         {
             let da_gas_oracle = self.ep_providers.da_gas_oracle_sync().as_ref().unwrap();
             match da_gas_oracle
-                .block_data(update.latest_block_hash.into())
+                .da_block_data(update.latest_block_hash.into())
                 .await
             {
                 Ok(da_block_data) => Some(da_block_data),
@@ -466,10 +466,6 @@ where
             .record(maintenance_time.as_micros() as f64);
     }
 
-    fn entry_point(&self) -> Address {
-        self.config.entry_point
-    }
-
     fn entry_point_version(&self) -> EntryPointVersion {
         self.config.entry_point_version
     }
@@ -479,6 +475,7 @@ where
         &self,
         origin: OperationOrigin,
         mut op: UserOperationVariant,
+        perms: UserOperationPermissions,
     ) -> MempoolResult<B256> {
         // Initial state checks
         let to_replace = {
@@ -583,7 +580,7 @@ where
         let precheck_ret = self
             .pool_providers
             .prechecker()
-            .check(&versioned_op, block_hash.into())
+            .check(&versioned_op, &perms, block_hash.into())
             .await?;
 
         // Only let ops with successful simulations through
@@ -591,7 +588,7 @@ where
         let sim_fut = self
             .pool_providers
             .simulator()
-            .simulate_validation(versioned_op, block_hash, None)
+            .simulate_validation(versioned_op, perms.trusted, block_hash, None)
             .map_err(Into::into);
         let execution_gas_check_future =
             self.check_execution_gas_limit_efficiency(op.clone(), block_hash);
@@ -635,18 +632,23 @@ where
             entity_infos: sim_result.entity_infos,
             da_gas_data: precheck_ret.da_gas_data,
             filter_id,
+            perms,
         };
 
         // Check sender count in mempool. If sender has too many operations, must be staked
         {
+            let sender_allowed_count = pool_op
+                .perms
+                .max_allowed_in_pool_for_sender
+                .unwrap_or(self.config.same_sender_mempool_count);
+
             let state = self.state.read();
             if !pool_op.account_is_staked
                 && to_replace.is_none()
-                && state.pool.address_count(&pool_op.uo.sender())
-                    >= self.config.same_sender_mempool_count
+                && state.pool.address_count(&pool_op.uo.sender()) >= sender_allowed_count
             {
                 return Err(MempoolError::MaxOperationsReached(
-                    self.config.same_sender_mempool_count,
+                    sender_allowed_count,
                     Entity::account(pool_op.uo.sender()),
                 ));
             }
@@ -998,7 +1000,7 @@ mod tests {
         },
         authorization::Eip7702Auth,
         chain::{ChainSpec, ContractRegistry},
-        da::DAGasUOData,
+        da::DAGasData,
         pool::{PrecheckViolation, SimulationViolation},
         v0_6::{UserOperationBuilder, UserOperationRequiredFields},
         EntityInfo, EntityInfos, EntityType, EntryPointVersion,
@@ -1021,7 +1023,7 @@ mod tests {
         let pool = create_pool(ops);
 
         let hash = pool
-            .add_operation(OperationOrigin::Local, op.op)
+            .add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .unwrap();
         check_ops(pool.best_operations(1, 0, None).unwrap(), uos);
@@ -1042,7 +1044,7 @@ mod tests {
         let mut hashes = vec![];
         for op in &uos {
             let hash = pool
-                .add_operation(OperationOrigin::Local, op.clone())
+                .add_operation(OperationOrigin::Local, op.clone(), default_perms())
                 .await
                 .unwrap();
             hashes.push(hash);
@@ -1064,7 +1066,7 @@ mod tests {
 
         for op in &uos {
             let _ = pool
-                .add_operation(OperationOrigin::Local, op.clone())
+                .add_operation(OperationOrigin::Local, op.clone(), default_perms())
                 .await
                 .unwrap();
         }
@@ -1085,7 +1087,7 @@ mod tests {
 
         for op in &uos {
             let _ = pool
-                .add_operation(OperationOrigin::Local, op.clone())
+                .add_operation(OperationOrigin::Local, op.clone(), default_perms())
                 .await
                 .unwrap();
         }
@@ -1144,6 +1146,7 @@ mod tests {
                 entrypoint: pool.config.entry_point,
                 is_addition: false,
             }],
+            address_updates: vec![],
             reorg_larger_than_history: false,
         })
         .await;
@@ -1242,6 +1245,7 @@ mod tests {
                 entrypoint: pool.config.entry_point,
                 is_addition: false,
             }],
+            address_updates: vec![],
             reorg_larger_than_history: false,
         })
         .await;
@@ -1276,6 +1280,7 @@ mod tests {
                 entrypoint: pool.config.entry_point,
                 is_addition: true,
             }],
+            address_updates: vec![],
             reorg_larger_than_history: false,
         })
         .await;
@@ -1313,6 +1318,7 @@ mod tests {
             unmined_ops: vec![],
             entity_balance_updates: vec![],
             unmined_entity_balance_updates: vec![],
+            address_updates: vec![],
             reorg_larger_than_history: false,
         })
         .await;
@@ -1358,6 +1364,7 @@ mod tests {
             unmined_ops: vec![],
             entity_balance_updates: vec![],
             unmined_entity_balance_updates: vec![],
+            address_updates: vec![],
             reorg_larger_than_history: false,
         })
         .await;
@@ -1387,7 +1394,7 @@ mod tests {
 
         // Ops 0 through 3 should be included
         for uo in uos.iter().take(4) {
-            pool.add_operation(OperationOrigin::Local, uo.clone())
+            pool.add_operation(OperationOrigin::Local, uo.clone(), default_perms())
                 .await
                 .unwrap();
         }
@@ -1404,7 +1411,7 @@ mod tests {
 
         // Second op should be throttled
         let ret = pool
-            .add_operation(OperationOrigin::Local, uos[4].clone())
+            .add_operation(OperationOrigin::Local, uos[4].clone(), default_perms())
             .await;
 
         assert!(ret.is_err());
@@ -1434,12 +1441,13 @@ mod tests {
             entity_balance_updates: vec![],
             unmined_entity_balance_updates: vec![],
             unmined_ops: vec![],
+            address_updates: vec![],
             reorg_larger_than_history: false,
         })
         .await;
 
         // Second op should be included
-        pool.add_operation(OperationOrigin::Local, uos[4].clone())
+        pool.add_operation(OperationOrigin::Local, uos[4].clone(), default_perms())
             .await
             .unwrap();
         check_ops(
@@ -1467,7 +1475,9 @@ mod tests {
         pool.set_reputation(address, ops_seen, ops_included);
 
         // First op should be banned
-        let ret = pool.add_operation(OperationOrigin::Local, uo.clone()).await;
+        let ret = pool
+            .add_operation(OperationOrigin::Local, uo.clone(), default_perms())
+            .await;
         assert!(ret.is_err());
         match ret.unwrap_err() {
             MempoolError::EntityThrottled(entity) => {
@@ -1501,7 +1511,7 @@ mod tests {
         let pool = create_pool_with_entry_point(vec![op], entrypoint);
 
         let ret = pool
-            .add_operation(OperationOrigin::Local, uo.clone())
+            .add_operation(OperationOrigin::Local, uo.clone(), default_perms())
             .await
             .unwrap_err();
 
@@ -1522,7 +1532,10 @@ mod tests {
         let ops = vec![op.clone()];
         let pool = create_pool(ops);
 
-        match pool.add_operation(OperationOrigin::Local, op.op).await {
+        match pool
+            .add_operation(OperationOrigin::Local, op.op, default_perms())
+            .await
+        {
             Err(MempoolError::PrecheckViolation(
                 PrecheckViolation::SenderIsNotContractAndNoInitCode(_),
             )) => {}
@@ -1544,7 +1557,10 @@ mod tests {
         let ops = vec![op.clone()];
         let pool = create_pool(ops);
 
-        match pool.add_operation(OperationOrigin::Local, op.op).await {
+        match pool
+            .add_operation(OperationOrigin::Local, op.op, default_perms())
+            .await
+        {
             Err(MempoolError::SimulationViolation(SimulationViolation::DidNotRevert)) => {}
             _ => panic!("Expected DidNotRevert error"),
         }
@@ -1557,12 +1573,12 @@ mod tests {
         let pool = create_pool(vec![op.clone()]);
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
 
         let err = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap_err();
         assert!(matches!(err, MempoolError::OperationAlreadyKnown));
@@ -1576,7 +1592,7 @@ mod tests {
         let pool = create_pool(vec![op.clone()]);
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1586,7 +1602,7 @@ mod tests {
             .build();
 
         let err = pool
-            .add_operation(OperationOrigin::Local, uo.into())
+            .add_operation(OperationOrigin::Local, uo.into(), default_perms())
             .await
             .unwrap_err();
 
@@ -1637,7 +1653,7 @@ mod tests {
         let pool = create_pool_with_entry_point(vec![op.clone()], entrypoint);
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1649,7 +1665,7 @@ mod tests {
                 .into();
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, replacement.clone())
+            .add_operation(OperationOrigin::Local, replacement.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1674,7 +1690,7 @@ mod tests {
         let pool = create_pool(vec![op.clone()]);
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1698,7 +1714,7 @@ mod tests {
         let pool = create_pool(vec![op.clone()]);
 
         let hash = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1712,7 +1728,7 @@ mod tests {
         let pool = create_pool(vec![op.clone()]);
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1729,7 +1745,7 @@ mod tests {
         let pool = create_pool(vec![op.clone()]);
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1749,7 +1765,7 @@ mod tests {
         let pool = create_pool(vec![op.clone()]);
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
         let hash = op.op.hash();
@@ -1770,7 +1786,7 @@ mod tests {
         let pool = create_pool(vec![op.clone()]);
 
         let _ = pool
-            .add_operation(OperationOrigin::Local, op.op.clone())
+            .add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1788,12 +1804,12 @@ mod tests {
         let pool = create_pool(ops.clone());
 
         for op in ops.iter().take(4) {
-            pool.add_operation(OperationOrigin::Local, op.op.clone())
+            pool.add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
                 .await
                 .unwrap();
         }
         assert!(pool
-            .add_operation(OperationOrigin::Local, ops[4].op.clone())
+            .add_operation(OperationOrigin::Local, ops[4].op.clone(), default_perms())
             .await
             .is_err());
     }
@@ -1811,12 +1827,12 @@ mod tests {
         let pool = create_pool(ops.clone());
 
         for op in ops.iter().take(4) {
-            pool.add_operation(OperationOrigin::Local, op.op.clone())
+            pool.add_operation(OperationOrigin::Local, op.op.clone(), default_perms())
                 .await
                 .unwrap();
         }
 
-        pool.add_operation(OperationOrigin::Local, ops[4].op.clone())
+        pool.add_operation(OperationOrigin::Local, ops[4].op.clone(), default_perms())
             .await
             .unwrap();
 
@@ -1868,7 +1884,9 @@ mod tests {
             ep,
             MempoolConfig::default(),
         );
-        let ret = pool.add_operation(OperationOrigin::Local, op.op).await;
+        let ret = pool
+            .add_operation(OperationOrigin::Local, op.op, default_perms())
+            .await;
         let actual_eff = 100_000_f32 / 550_000_f32;
 
         match ret.err().unwrap() {
@@ -1908,7 +1926,9 @@ mod tests {
             ep,
             MempoolConfig::default(),
         );
-        let ret = pool.add_operation(OperationOrigin::Local, op.op).await;
+        let ret = pool
+            .add_operation(OperationOrigin::Local, op.op, default_perms())
+            .await;
         let actual_eff = 10_000_f32 / 50_000_f32;
 
         match ret.err().unwrap() {
@@ -1933,7 +1953,7 @@ mod tests {
         });
 
         let pool = create_pool_with_config(config, vec![op.clone()]);
-        pool.add_operation(OperationOrigin::Local, op.op)
+        pool.add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .unwrap();
     }
@@ -1953,7 +1973,7 @@ mod tests {
         {
             let pool = create_pool_with_config(config.clone(), vec![op.clone()]);
             assert!(pool
-                .add_operation(OperationOrigin::Local, op.clone().op)
+                .add_operation(OperationOrigin::Local, op.clone().op, default_perms())
                 .await
                 .is_err());
         }
@@ -1961,7 +1981,7 @@ mod tests {
             config.support_7702 = true;
             let pool = create_pool_with_config(config.clone(), vec![op.clone()]);
             assert!(pool
-                .add_operation(OperationOrigin::Local, op.clone().op)
+                .add_operation(OperationOrigin::Local, op.clone().op, default_perms())
                 .await
                 .is_err());
         }
@@ -2000,7 +2020,11 @@ mod tests {
 
             let pool = create_pool_with_config(config.clone(), vec![signed_op.clone()]);
             assert!(pool
-                .add_operation(OperationOrigin::Local, signed_op.clone().op)
+                .add_operation(
+                    OperationOrigin::Local,
+                    signed_op.clone().op,
+                    default_perms()
+                )
                 .await
                 .is_ok());
         }
@@ -2020,7 +2044,7 @@ mod tests {
         });
 
         let pool = create_pool_with_config(config, vec![op.clone()]);
-        pool.add_operation(OperationOrigin::Local, op.op)
+        pool.add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .unwrap();
 
@@ -2036,7 +2060,7 @@ mod tests {
         let ops = vec![op.clone()];
         let pool = create_pool(ops);
         let err = pool
-            .add_operation(OperationOrigin::Local, op.op)
+            .add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .err()
             .unwrap();
@@ -2076,7 +2100,7 @@ mod tests {
         let ops = vec![op.clone()];
         let pool = create_pool_with_config(config, ops);
         let hash = pool
-            .add_operation(OperationOrigin::Local, op.op)
+            .add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .unwrap();
 
@@ -2113,7 +2137,7 @@ mod tests {
         let ops = vec![op.clone()];
         let pool = create_pool_with_config(config, ops);
         let err = pool
-            .add_operation(OperationOrigin::Local, op.op)
+            .add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .err()
             .unwrap();
@@ -2156,7 +2180,7 @@ mod tests {
         let op = create_op_with_aggregator(UserOperationRequiredFields::default(), agg_address);
 
         let pool = create_pool_with_mempool_config(config, vec![op.clone()], mempool_config);
-        pool.add_operation(OperationOrigin::Local, op.op)
+        pool.add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .unwrap();
 
@@ -2201,13 +2225,58 @@ mod tests {
         let op = create_op_with_aggregator(UserOperationRequiredFields::default(), agg_address);
 
         let pool = create_pool_with_mempool_config(config, vec![op.clone()], mempool_config);
-        pool.add_operation(OperationOrigin::Local, op.op)
+        pool.add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .unwrap();
 
         let best = pool.best_operations(10000, 0, Some(filter_id)).unwrap();
         assert_eq!(best.len(), 1);
     }
+
+    #[tokio::test]
+    async fn test_trusted_uo() {
+        let config = default_config();
+        let perms = UserOperationPermissions {
+            trusted: true,
+            ..Default::default()
+        };
+
+        let op = create_trusted_op(Address::random(), 0, 0);
+        let pool = create_pool_with_config(config, vec![op.clone()]);
+        pool.add_operation(OperationOrigin::Local, op.op, perms)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_max_allowed_in_pool_for_sender() {
+        let config = default_config();
+        let perms = UserOperationPermissions {
+            max_allowed_in_pool_for_sender: Some(2),
+            ..Default::default()
+        };
+        let sender = Address::random();
+
+        let op1 = create_op(sender, 1, 100, None);
+        let op2 = create_op(sender, 2, 100, None);
+        let op3 = create_op(sender, 3, 100, None);
+
+        let pool = create_pool_with_config(config, vec![op1.clone(), op2.clone(), op3.clone()]);
+        pool.add_operation(OperationOrigin::Local, op1.op, perms.clone())
+            .await
+            .unwrap();
+        pool.add_operation(OperationOrigin::Local, op2.op, perms.clone())
+            .await
+            .unwrap();
+        let err = pool
+            .add_operation(OperationOrigin::Local, op3.op, perms)
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(err, MempoolError::MaxOperationsReached(2, _)));
+    }
+
     #[derive(Clone, Debug)]
     struct OpWithErrors {
         op: UserOperationVariant,
@@ -2215,6 +2284,7 @@ mod tests {
         precheck_error: Option<PrecheckViolation>,
         simulation_error: Option<SimulationViolation>,
         staked: bool,
+        trusted: bool,
     }
 
     fn default_config() -> PoolConfig {
@@ -2316,19 +2386,21 @@ mod tests {
             .returning(|| Ok(FeeUpdate::default()));
 
         for op in ops {
-            prechecker.expect_check().returning(move |_, _| {
+            prechecker.expect_check().returning(move |_, _, _| {
                 if let Some(error) = &op.precheck_error {
                     Err(PrecheckError::Violations(vec![error.clone()]))
                 } else {
                     Ok(PrecheckReturn {
-                        da_gas_data: DAGasUOData::Empty,
+                        da_gas_data: DAGasData::Empty,
                         required_pre_verification_gas: 100_000,
                     })
                 }
             });
+            let is_trusted = op.trusted;
             simulator
                 .expect_simulate_validation()
-                .returning(move |_, _, _| {
+                .withf(move |_, &trusted, _, _| is_trusted == trusted)
+                .returning(move |_, _, _, _| {
                     if let Some(error) = &op.simulation_error {
                         Err(SimulationError {
                             violation_error: ViolationError::Violations(vec![error.clone()]),
@@ -2376,7 +2448,9 @@ mod tests {
         let uos = ops.iter().map(|op| op.op.clone()).collect::<Vec<_>>();
         let pool = create_pool_with_entry_point(ops, entrypoint);
         for op in &uos {
-            let _ = pool.add_operation(OperationOrigin::Local, op.clone()).await;
+            let _ = pool
+                .add_operation(OperationOrigin::Local, op.clone(), default_perms())
+                .await;
         }
         (pool, uos)
     }
@@ -2390,7 +2464,9 @@ mod tests {
         let uos = ops.iter().map(|op| op.op.clone()).collect::<Vec<_>>();
         let pool = create_pool(ops);
         for op in &uos {
-            let _ = pool.add_operation(OperationOrigin::Local, op.clone()).await;
+            let _ = pool
+                .add_operation(OperationOrigin::Local, op.clone(), default_perms())
+                .await;
         }
         (pool, uos)
     }
@@ -2427,6 +2503,7 @@ mod tests {
             precheck_error: None,
             simulation_error: None,
             staked: false,
+            trusted: false,
         }
     }
 
@@ -2454,6 +2531,7 @@ mod tests {
             precheck_error,
             simulation_error,
             staked,
+            trusted: false,
         }
     }
 
@@ -2468,6 +2546,7 @@ mod tests {
             precheck_error: None,
             simulation_error: None,
             staked: false,
+            trusted: false,
         }
     }
 
@@ -2485,6 +2564,7 @@ mod tests {
             precheck_error: None,
             simulation_error: None,
             staked: false,
+            trusted: false,
         }
     }
 
@@ -2497,7 +2577,14 @@ mod tests {
             precheck_error: None,
             simulation_error: None,
             staked: false,
+            trusted: false,
         }
+    }
+
+    fn create_trusted_op(sender: Address, nonce: usize, max_fee_per_gas: u128) -> OpWithErrors {
+        let mut op = create_op_with_errors(sender, nonce, max_fee_per_gas, None, None, false);
+        op.trusted = true;
+        op
     }
 
     fn check_ops(ops: Vec<Arc<PoolOperation>>, expected: Vec<UserOperationVariant>) {
@@ -2511,5 +2598,9 @@ mod tests {
         let actual_hashes = actual.iter().map(|op| op.uo.hash()).collect::<HashSet<_>>();
         let expected_hashes = expected.iter().map(|op| op.hash()).collect::<HashSet<_>>();
         assert_eq!(actual_hashes, expected_hashes);
+    }
+
+    fn default_perms() -> UserOperationPermissions {
+        UserOperationPermissions::default()
     }
 }

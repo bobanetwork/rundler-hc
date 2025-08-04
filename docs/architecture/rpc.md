@@ -15,7 +15,7 @@ It also supports a health check endpoint.
 
 ### `eth_` Namespace
 
-Methods defined by the [ERC-4337 spec](https://eips.ethereum.org/EIPS/eip-4337#rpc-methods-eth-namespace).
+Methods defined by the [ERC-7769 spec](https://eips.ethereum.org/EIPS/eip-7769#rpc-methods-eth-namespace).
 
 | Method | Supported |
 | ------ | :-----------: |
@@ -28,7 +28,7 @@ Methods defined by the [ERC-4337 spec](https://eips.ethereum.org/EIPS/eip-4337#r
 
 ### `debug_` Namespace
 
-Method defined by the [ERC-4337 spec](https://eips.ethereum.org/EIPS/eip-4337#rpc-methods-debug-namespace). Used only for debugging/testing and should be disabled on production APIs.
+Method defined by the [ERC-7769 spec](https://eips.ethereum.org/EIPS/eip-7769#rpc-methods-debug-namespace). Used only for debugging/testing and should be disabled on production APIs.
 
 | Method | Supported | Non-Standard |
 | ------ | :-----------: | :--: |
@@ -42,6 +42,8 @@ Method defined by the [ERC-4337 spec](https://eips.ethereum.org/EIPS/eip-4337#rp
 | [`debug_bundler_getStakeStatus`](#debug_bundler_getstakestatus) | ✅ | ✅ |
 | [`debug_bundler_clearMempool`](#debug_bundler_clearMempool) | ✅ | ✅
 | [`debug_bundler_dumpPaymasterBalances`](#debug_bundler_dumpPaymasterBalances) | ✅ | ✅
+
+Non standard API definitions:
 
 #### `debug_bundler_getStakeStatus`
 
@@ -146,7 +148,8 @@ Rundler specific methods that are not specified by the ERC-4337 spec. This names
 | Method | Supported |
 | ------ | :-----------: |
 | [`rundler_maxPriorityFeePerGas`](#rundler_maxpriorityfeepergas) | ✅ |
-| [`rundler_dropLocalUserOperation`](#rundler_droplocaluseroperation) | ✅ | 
+| [`rundler_dropLocalUserOperation`](#rundler_droplocaluseroperation) | ✅ |
+| [`rundler_getMinedUserOperation`](#rundler_getmineduseroperation) | ✅ |
 
 #### `rundler_maxPriorityFeePerGas`
 
@@ -215,6 +218,44 @@ Drops a user operation from the local mempool for the given sender/nonce. The us
   "jsonrpc": "2.0",
   "id": 1,
   "result": ["0x..."] // hash of UO if dropped, or empty if a UO is not found for the sender/ID
+}
+```
+
+#### `rundler_getMinedUserOperation`
+
+Gets a mined user operation object and its receipt from the given user operation hash, transaction hash, and entry point address.
+
+Used as an alternative to `eth_getUserOperationByHash` and `eth_getUserOperationReceipt` for use cases where the transaction hash containing the mined user operation is already known. This allows Rundler to skip an expensive/impossible `eth_getLogs` call to search for a user operation event. Instead, Rundler can retrieve the event directly from the transaction receipt.
+
+Returns `null` if the user operation is not found.
+
+NOTE: The returned user operation receipt is slightly different than the receipt returned in `eth_getUserOperationReceipt`. The `receipt` subfield of the user operation receipt contains the transaction receipt. Typically this transaction receipt should contain all logs emitted by the transaction. This RPC endpoint removes all logs from the outer transaction receipt to save resources returning typically unused information. Applications needing the outer logs can process the transaction receipt separately.
+
+```
+# Request
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "rundler_getMinedUserOperation",
+  "params": [
+    "0x...", // user operation hash
+    "0x...", // transaction hash containing mined user operation
+    "0x...", // entry point address
+  ]
+}
+
+# Response
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    userOperation: {
+      ... // User operation
+    },
+    receipt: {
+      ... // User operation receipt
+    }
+  }
 }
 ```
 
@@ -308,6 +349,72 @@ Currently, it simply queries each the `Pool` and the `Builder` servers to check 
 | Healthy | 200 | `ok` |
 | Unhealthy | 500 | JSON-RPC formatted error message | 
 
+## User Operation Permissions
+
+Rundler supports a non-standard 3rd positional parameter on `eth_sendUserOperation` to enabled special permissions on a per-user operation basis. If `rpc.permissions_enabled` is set, these permissions will be sent to the mempool. If disabled, the permissions will be ignored.
+
+These permissions are meant to be used only by trusted connections. For example, an internal proxy that has a trusted relationship with a sender can tag that user operation as `trusted` and skip complex untrusted simulation.
+
+When enabled, the `eth_sendUserOperation` request schema becomes:
+
+```
+# Request
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "eth_sendUserOperation",
+  "params": [
+    {
+      ... // user operation fields
+    }
+    "0x....", // entry point address 
+    {
+      trusted: bool,                      // optional, true if the UO should be trusted and simulation should be skipped.
+      maxAllowedInPoolForSender: uint64,  // optional, the maximum number of UOs allowed in the mempool for this sender
+      underpricedAcceptPct: uint64,       // optional, the percentage underpriced a UO may be while still allowed to enter the mempool
+      underpricedBundlePct: uint64,       // optional, the percentage underpriced a UO may be while still bundled
+      bundlerSponsorship: {               // optional, set if bundler sponsoring
+        maxCost: uint256,                 // required if bundler sponsorship, sets the max cost for the sponsorship
+        validUntil: uint64                // required if bundler sponsorship, sets the expiry time for the sponsorship in seconds
+      }
+    }
+  ]
+}
+```
+
+### Available Permissions
+
+#### `trusted`
+
+The `trusted` parameter on the UO permissions object causes the mempool to "trust" that the user operation will not cause a DOS attack on the bundler. With this trust, the bundler can skip applying the ERC-7562 simulation rules on the user operation, skipping the costly debug trace call.
+
+#### `maxAllowedInPoolForSender`
+
+The `maxAllowedInPoolForSender` parameter on the UO permissions object sets the maximum number of UOs this particular sender is allowed to have in the mempool. If unset, this will default to `pool.same_sender_mempool_count` from the CLI parameters.
+
+#### `Underpriced`
+
+The `underpricedAcceptPct` and `underpricedBundlePct` permissions parameters can relax the bundler's fee checks.
+
+`underpricedAcceptPct` relaxes the fee check during precheck upon `eth_sendUserOperation`. It allows a UO to be X% of the current estimated fees and still accepted to the mempool. NOTE: setting this too low without also relaxing pricing on bundling can lead to stuck UOs and long time to mine.
+
+`underpricedBundlePct` relaxes the fee check during bundling. It allows a UO to be X% of the bundle fees and still added to a bundle. NOTE: this causes the bundler to lose funds. Only set this if the bundler is willing to "sponsor" a portion of the UOs fee in exchange for higher liveliness.
+
+NOTE: This fee relaxation only applies to `preVerificationGas` if `chain.da_pre_verification_gas` is true (i.e. PVG is dynamic). Else the UO must pay 100% of the static value.
+
+#### `bundlerSponsorship`
+
+The `bundlerSponsorship` permission tells the bundler to sponsor a user operation. That is, pay for the entirety of the gas fees onchain. It contains two fields. `maxCost` sets the maximum total cost for the user operation that the bundler should sponsor. `validUntil` sets a time expiry on the sponsorship.
+
+The bundler will skip all fee checks and instead just check `maxCost` and `validUntil`. If the UO passes those checks, it will bundle the UO and sponsor all of the gas. The bundler will lose funds on this operation and an out of process mechanism must be used to refund the bundler's balance.
+
+To be eligible for `bundlerSponsorship` a user operation must have certain fields set to zero or empty. Those include:
+* `maxFeePerGas` = 0
+* `maxPriorityFeePerGas` = 0
+* `preVerificationGas` = 0
+* `paymaster` = empty
+* `paymasterData` = empty
+* `paymasterAndData` (v0.6) = empty
 
 ## Gas Estimation
 

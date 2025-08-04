@@ -11,6 +11,8 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
+#![allow(clippy::result_large_err)]
+
 use std::{
     net::SocketAddr,
     sync::{
@@ -150,7 +152,6 @@ impl OpPool for OpPoolImpl {
 
     async fn add_op(&self, request: Request<AddOpRequest>) -> Result<Response<AddOpResponse>> {
         let req = request.into_inner();
-        let ep = self.get_entry_point(&req.entry_point)?;
 
         let proto_op = req
             .op
@@ -159,8 +160,17 @@ impl OpPool for OpPoolImpl {
             UserOperationVariant::try_uo_from_proto(proto_op, &self.chain_spec).map_err(|e| {
                 Status::invalid_argument(format!("Failed to convert to UserOperation: {e}"))
             })?;
+        let permissions = req
+            .permissions
+            .ok_or_else(|| Status::invalid_argument("Permissions are required in AddOpRequest"))?
+            .try_into()
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "Failed to convert to UserOperationPermissions: {e}"
+                ))
+            })?;
 
-        let resp = match self.local_pool.add_op(ep, uo).await {
+        let resp = match self.local_pool.add_op(uo, permissions).await {
             Ok(hash) => AddOpResponse {
                 result: Some(add_op_response::Result::Success(AddOpSuccess {
                     hash: hash.to_vec(),
@@ -539,7 +549,7 @@ impl OpPool for OpPoolImpl {
 
     async fn subscribe_new_heads(
         &self,
-        _request: Request<SubscribeNewHeadsRequest>,
+        request: Request<SubscribeNewHeadsRequest>,
     ) -> Result<Response<Self::SubscribeNewHeadsStream>> {
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -550,8 +560,16 @@ impl OpPool for OpPoolImpl {
             return Err(Status::resource_exhausted("Too many block subscriptions"));
         }
 
+        let req = request.into_inner();
+        let to_track = req
+            .to_track
+            .into_iter()
+            .map(|a| from_bytes(&a))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Status::invalid_argument(format!("Invalid address: {e}")))?;
+
         let num_block_subscriptions = Arc::clone(&self.num_block_subscriptions);
-        let mut new_heads = match self.local_pool.subscribe_new_heads().await {
+        let mut new_heads = match self.local_pool.subscribe_new_heads(to_track).await {
             Ok(new_heads) => new_heads,
             Err(error) => {
                 tracing::error!("Failed to subscribe to new blocks: {error}");

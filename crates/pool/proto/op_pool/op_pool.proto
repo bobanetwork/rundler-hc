@@ -24,6 +24,19 @@ message UserOperation {
   }
 }
 
+message UserOperationPermissions {
+  bool trusted = 1;
+  optional uint64 max_allowed_in_pool_for_sender = 2;
+  optional uint32 underpriced_accept_pct = 3;
+  optional uint32 underpriced_bundle_pct = 4;
+  BundlerSponsorship bundler_sponsorship = 5;
+}
+
+message BundlerSponsorship {
+  bytes max_cost = 1;
+  uint64 valid_until = 2;
+}
+
 // Protocol Buffer representation of an 7702 authorization tuple. See the official 
 // specification at https://eips.ethereum.org/EIPS/eip-7702
 message AuthorizationTuple {
@@ -177,30 +190,32 @@ message MempoolOp {
   // The entry point address of this operation
   bytes entry_point = 8;
   // The DA gas data for the UO
-  DaGasUoData da_gas_data = 9;
+  DaGasData da_gas_data = 9;
   // The filter ID to apply to the UserOperation
   string filter_id = 10;
+  // The permissions for the UserOperation
+  UserOperationPermissions permissions = 11;
 }
 
 // Data associated with a user operation for DA gas calculations
-message DaGasUoData {
+message DaGasData {
   oneof data {
-    EmptyUoData empty = 1;
-    NitroDaGasUoData nitro = 2;
-    BedrockDaGasUoData bedrock = 3;
+    EmptyGasData empty = 1;
+    NitroDaGasData nitro = 2;
+    BedrockDaGasData bedrock = 3;
   }
 }
 
-message EmptyUoData {}
+message EmptyGasData {}
 
 // Data associated with a user operation for Nitro DA gas calculations
-message NitroDaGasUoData {
-  bytes uo_units = 1;
+message NitroDaGasData {
+  bytes units = 1;
 }
 
 // Data associated with a user operation for Bedrock DA gas calculations
-message BedrockDaGasUoData {
-  uint64 uo_units = 1;
+message BedrockDaGasData {
+  uint64 units = 1;
 }
 
 // Defines the gRPC endpoints for a UserOperation mempool service
@@ -269,10 +284,10 @@ message GetSupportedEntryPointsResponse {
 }
 
 message AddOpRequest {
-  // The serialized entry point address via which the UserOperation is being submitted
-  bytes entry_point = 1;
   // The UserOperation to add to the mempool
-  UserOperation op = 2;
+  UserOperation op = 1;
+  // The permissions to use for the UserOperation
+  UserOperationPermissions permissions = 2;
 }
 message AddOpResponse {
   oneof result {
@@ -477,7 +492,10 @@ message PaymasterBalance {
   bytes confirmed_balance = 3;
 }
 
-message SubscribeNewHeadsRequest {}
+message SubscribeNewHeadsRequest {
+  // The addresses to track
+  repeated bytes to_track = 1;
+}
 message SubscribeNewHeadsResponse {
   // The new chain head
   NewHead new_head = 1;
@@ -487,8 +505,19 @@ message NewHead {
   bytes block_hash = 1;
   // The block number
   uint64 block_number = 2;
+  // Address Updates
+  repeated AddressUpdate address_updates = 3;
 }
-
+message AddressUpdate {
+  // The address
+  bytes address = 1;
+  // The new nonce  
+  uint64 nonce = 2;
+  // The new balance
+  bytes balance = 3;
+  // The mined tx hashes
+  repeated bytes mined_tx_hashes = 4;
+}
 message AdminSetTrackingRequest {
   // The serialized entry point address via which the UserOperation is being submitted
   bytes entry_point = 1;

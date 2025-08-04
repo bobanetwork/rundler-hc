@@ -14,14 +14,14 @@
 use alloy_primitives::{Address, B256, U64};
 use jsonrpsee::core::RpcResult;
 use rundler_provider::StateOverride;
-use rundler_types::{pool::Pool, UserOperationVariant};
+use rundler_types::{chain::IntoWithSpec, pool::Pool, UserOperationPermissions};
 use tracing::instrument;
 
 use super::{api::EthApi, EthApiServer};
 use crate::{
     types::{
-        FromRpc, RpcGasEstimate, RpcUserOperation, RpcUserOperationByHash,
-        RpcUserOperationOptionalGas, RpcUserOperationReceipt,
+        RpcGasEstimate, RpcUserOperation, RpcUserOperationByHash, RpcUserOperationOptionalGas,
+        RpcUserOperationPermissions, RpcUserOperationReceipt,
     },
     utils,
 };
@@ -36,13 +36,28 @@ where
         &self,
         op: RpcUserOperation,
         entry_point: Address,
+        permissions: Option<RpcUserOperationPermissions>,
     ) -> RpcResult<B256> {
+        // if permissions are not enabled, default them
+        let mut permissions = if self.permissions_enabled {
+            permissions
+                .map(|p| p.into_with_spec(&self.chain_spec))
+                .unwrap_or_default()
+        } else {
+            UserOperationPermissions::default()
+        };
+
+        // cap percentages at 100
+        permissions.underpriced_accept_pct = permissions.underpriced_accept_pct.map(|p| p.min(100));
+        permissions.underpriced_bundle_pct = permissions.underpriced_bundle_pct.map(|p| p.min(100));
+
         utils::safe_call_rpc_handler(
             "eth_sendUserOperation",
             EthApi::send_user_operation(
                 self,
-                UserOperationVariant::from_rpc(op, &self.chain_spec),
+                op.into_with_spec(&self.chain_spec),
                 entry_point,
+                permissions,
             ),
         )
         .await

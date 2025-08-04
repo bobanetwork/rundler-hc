@@ -17,6 +17,7 @@ use std::{
     mem,
     pin::Pin,
     sync::Arc,
+    time::Instant,
 };
 
 use alloy_primitives::{aliases::U192, Address, Bytes, B256, U256};
@@ -34,8 +35,7 @@ use rundler_provider::{
     ProvidersWithEntryPointT,
 };
 use rundler_sim::{
-    BundleExpectedStorage, ExpectedStorage, FeeEstimator, PriorityFeeMode, SimulationError,
-    SimulationResult, Simulator, ViolationError,
+    FeeEstimator, PriorityFeeMode, SimulationError, SimulationResult, Simulator, ViolationError,
 };
 use rundler_types::{
     aggregator::SignatureAggregatorResult,
@@ -44,9 +44,10 @@ use rundler_types::{
     hybrid_compute,
     pool::{Pool, PoolOperation, SimulationViolation},
     proxy::SubmissionProxy,
-    Entity, EntityInfo, EntityInfos, EntityType, EntityUpdate, EntityUpdateType, GasFees,
-    Timestamp, UserOperation, UserOperationVariant, UserOpsPerAggregator, ValidationRevert,
-    BUNDLE_BYTE_OVERHEAD, TIME_RANGE_BUFFER, USER_OP_OFFSET_WORD_SIZE,
+    BundleExpectedStorage, Entity, EntityInfo, EntityInfos, EntityType, EntityUpdate,
+    EntityUpdateType, ExpectedStorage, GasFees, Timestamp, UserOperation, UserOperationVariant,
+    UserOpsPerAggregator, ValidTimeRange, ValidationRevert, BUNDLE_BYTE_OVERHEAD,
+    TIME_RANGE_BUFFER, USER_OP_OFFSET_WORD_SIZE,
 };
 use rundler_utils::{emit::WithEntryPoint, guard_timer::CustomTimerGuard, math};
 use tokio::{sync::broadcast, try_join};
@@ -155,6 +156,7 @@ pub(crate) struct BundleProposerImpl<EP, BP> {
 pub(crate) struct Settings {
     pub(crate) chain_spec: ChainSpec,
     pub(crate) max_bundle_size: u64,
+    pub(crate) target_bundle_gas: u128,
     pub(crate) max_bundle_gas: u128,
     pub(crate) sender_eoa: Address,
     pub(crate) priority_fee_mode: PriorityFeeMode,
@@ -203,18 +205,19 @@ where
         required_fees: Option<GasFees>,
         is_replacement: bool,
     ) -> BundleProposerResult<Bundle<Self::UO>> {
-        let _bundler_build_timer = CustomTimerGuard::new(self.metric.bundle_build_ms.clone());
-        let (ops, (block_hash, _), (bundle_fees, base_fee)) = try_join!(
-            self.get_ops_from_pool(),
+        let timer = Instant::now();
+        let ops = self.get_ops_from_pool().await?;
+        if ops.is_empty() {
+            return Err(BundleProposerError::NoOperationsInitially);
+        }
+
+        let ((block_hash, _), (bundle_fees, base_fee)) = try_join!(
             self.ep_providers
                 .evm()
                 .get_latest_block_hash_and_number()
                 .map_err(BundleProposerError::from),
             self.estimate_gas_fees(required_fees)
         )?;
-        if ops.is_empty() {
-            return Err(BundleProposerError::NoOperationsInitially);
-        }
 
         // (0) Determine fees required for ops to be included in a bundle
         // if replacing, just require bundle fees increase chances of unsticking
@@ -235,7 +238,7 @@ where
         {
             let da_gas_oracle = self.ep_providers.da_gas_oracle_sync().as_ref().unwrap();
 
-            match da_gas_oracle.block_data(block_hash.into()).await {
+            match da_gas_oracle.da_block_data(block_hash.into()).await {
                 Ok(block_data) => Some(block_data),
                 Err(e) => {
                     error!("Failed to get block data for block hash {block_hash:?}, falling back to async da gas calculations: {e:?}");
@@ -326,6 +329,10 @@ where
                     }
                 }
 
+                // bundle built, record time
+                self.metric
+                    .bundle_build_ms
+                    .record(timer.elapsed().as_millis() as f64);
                 return Ok(Bundle {
                     ops_per_aggregator: context.to_ops_per_aggregator(),
                     gas_estimate,
@@ -416,13 +423,25 @@ where
         da_block_data: Option<&DAGasBlockData>,
         base_fee: u128,
         required_op_fees: GasFees,
-    ) -> Option<PoolOperation> {
+    ) -> Option<PoolOperationWithSponsoredDAGas> {
         let op_hash = op.uo.hash();
+
         println!("HC proposer check_fees op {:?}", op);
 
+        let mut required_max_fee_per_gas = required_op_fees.max_fee_per_gas;
+        let mut required_max_priority_fee_per_gas = required_op_fees.max_priority_fee_per_gas;
+
+        if let Some(pct) = op.perms.underpriced_bundle_pct {
+            required_max_fee_per_gas = math::percent_ceil(required_max_fee_per_gas, pct);
+            required_max_priority_fee_per_gas =
+                math::percent_ceil(required_max_priority_fee_per_gas, pct);
+        }
+
         // filter by fees
-        if op.uo.max_fee_per_gas() < required_op_fees.max_fee_per_gas
-            || op.uo.max_priority_fee_per_gas() < required_op_fees.max_priority_fee_per_gas
+        if (op.uo.max_fee_per_gas() < required_max_fee_per_gas
+            || op.uo.max_priority_fee_per_gas() < required_max_priority_fee_per_gas)
+            && op.perms.bundler_sponsorship.is_none()
+        // skip if bundler sponsored
         {
             self.emit(BuilderEvent::skipped_op(
                 self.builder_tag.clone(),
@@ -440,11 +459,20 @@ where
 
         if !self.settings.chain_spec.da_pre_verification_gas {
             // Skip PVG check if no da pre-verification gas as this is checked on entry to the mempool.
-            return Some(op);
+            return Some(PoolOperationWithSponsoredDAGas {
+                op,
+                sponsored_da_gas: None,
+            });
         }
 
         // TODO(bundle): assuming a bundle size of 1
         let bundle_size = 1;
+
+        let gas_price = if op.perms.bundler_sponsorship.is_some() {
+            required_op_fees.gas_price(base_fee)
+        } else {
+            op.uo.gas_price(base_fee)
+        };
 
         let required_da_gas = if self.settings.da_gas_tracking_enabled
             && da_block_data.is_some()
@@ -457,7 +485,7 @@ where
             da_gas_oracle.calc_da_gas_sync(
                 &op.da_gas_data,
                 da_block_data,
-                op.uo.gas_price(base_fee),
+                gas_price,
                 extra_data_len,
             )
         } else {
@@ -467,7 +495,7 @@ where
                 .calc_da_gas(
                     op.uo.clone().into(),
                     block_hash.into(),
-                    op.uo.gas_price(base_fee),
+                    gas_price,
                     bundle_size,
                 )
                 .await
@@ -515,7 +543,11 @@ where
             );
         }
 
-        if op.uo.pre_verification_gas() < required_pvg {
+        if let Some(pct) = op.perms.underpriced_bundle_pct {
+            required_pvg = math::percent_ceil(required_pvg, pct);
+        }
+
+        if op.uo.pre_verification_gas() < required_pvg && op.perms.bundler_sponsorship.is_none() {
             if is_hc {
                 // Workaround - reject op here instead of waiting indefinitely.
                 println!(
@@ -527,14 +559,12 @@ where
 
                 self.emit(BuilderEvent::rejected_op(
                     self.builder_tag.clone(),
-                    hc_hash,
+                    op_hash,
                     OpRejectionReason::FailedInBundle {
                         message: Arc::new("HC insufficient pre_verification_gas".to_owned()),
                     },
                 ));
-                //let err_result = (op, Err(SimulationError{ violation_error: ViolationError::Violations(Vec::new()), entity_infos: None } ));
-                //return Some(err_result);
-                return None; // FIXME
+                return None;
             } else {
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
@@ -553,7 +583,36 @@ where
             }
         }
 
-        Some(op)
+        // Check total gas cost and time for bundler sponsorship
+        let mut sponsored_da_gas = None;
+        if let Some(bundler_sponsorship) = &op.perms.bundler_sponsorship {
+            let gas_limit = op
+                .uo
+                .gas_limit(&self.settings.chain_spec, Some(bundle_size))
+                + required_pvg; // PVG is added as part of the gas limit as this is part of the cost of sponsorship
+
+            let total_gas_cost = U256::from(gas_limit) * U256::from(gas_price);
+            if total_gas_cost > bundler_sponsorship.max_cost {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_tag.clone(),
+                    op_hash,
+                    SkipReason::OverSponsorshipMaxCost {
+                        max_cost: bundler_sponsorship.max_cost,
+                        actual_cost: total_gas_cost,
+                    },
+                ));
+                return None;
+            }
+
+            if self.settings.chain_spec.include_da_gas_in_gas_limit {
+                sponsored_da_gas = Some(required_da_gas)
+            }
+        }
+
+        Some(PoolOperationWithSponsoredDAGas {
+            op,
+            sponsored_da_gas,
+        })
     }
 
     // Simulate a single op. Returns None if the op should be skipped.
@@ -561,21 +620,24 @@ where
     // Filters on any errors
     async fn simulate_op(
         &self,
-        op: PoolOperation,
+        op: PoolOperationWithSponsoredDAGas,
         block_hash: B256,
-    ) -> Option<(PoolOperation, Result<SimulationResult, SimulationError>)> {
-        let _timer_guard =
-            rundler_utils::guard_timer::CustomTimerGuard::new(self.metric.op_simulation_ms.clone());
-        let op_hash = op.uo.hash();
+    ) -> Option<(
+        PoolOperationWithSponsoredDAGas,
+        Result<SimulationResult, SimulationError>,
+    )> {
+        let _timer_guard = CustomTimerGuard::new(self.metric.op_simulation_ms.clone());
+        let op_hash = op.op.uo.hash();
 
         // Simulate
         let result = self
             .bundle_providers
             .simulator()
             .simulate_validation(
-                op.uo.clone().into(),
+                op.op.uo.clone().into(),
+                op.op.perms.trusted,
                 block_hash,
-                Some(op.expected_code_hash),
+                Some(op.op.expected_code_hash),
             )
             .await;
         let result = match result {
@@ -606,12 +668,15 @@ where
 
     async fn assemble_context(
         &self,
-        ops_with_simulations: Vec<(PoolOperation, Result<SimulationResult, SimulationError>)>,
+        ops_with_simulations: Vec<(
+            PoolOperationWithSponsoredDAGas,
+            Result<SimulationResult, SimulationError>,
+        )>,
         mut balances_by_paymaster: HashMap<Address, U256>,
     ) -> ProposalContext<<Self as BundleProposer>::UO> {
         let all_sender_addresses: HashSet<Address> = ops_with_simulations
             .iter()
-            .map(|(op, _)| op.uo.sender())
+            .map(|(op, _)| op.op.uo.sender())
             .collect();
         let mut context = ProposalContext::<<Self as BundleProposer>::UO>::new();
         let mut paymasters_to_reject = Vec::<EntityInfo>::new();
@@ -621,7 +686,8 @@ where
         let mut constructed_bundle_size = BUNDLE_BYTE_OVERHEAD;
 
         for (po, simulation) in ops_with_simulations {
-            let op = po.clone().uo;
+            // first process any possible rejections
+            let op = po.op.clone().uo;
             let simulation = match simulation {
                 Ok(simulation) => simulation,
                 Err(error) => {
@@ -638,7 +704,7 @@ where
                     } = error
                     {
                         // try to use EntityInfos from the latest simulation, but if it doesn't exist use the EntityInfos from the previous simulation
-                        let infos = entity_infos.map_or(po.entity_infos, |e| e);
+                        let infos = entity_infos.map_or(po.op.entity_infos, |e| e);
                         context.process_simulation_violations(op.into(), violations, infos);
                     }
                     continue;
@@ -657,7 +723,45 @@ where
                         valid_range: simulation.valid_time_range,
                     },
                 ));
-                context.rejected_ops.push((op.into(), po.entity_infos));
+                context.rejected_ops.push((op.into(), po.op.entity_infos));
+                continue;
+            } else if let Some(bundler_sponsorship) = &po.op.perms.bundler_sponsorship {
+                let valid_time_range =
+                    ValidTimeRange::from_genesis(bundler_sponsorship.valid_until.into());
+                if !simulation
+                    .valid_time_range
+                    .contains(Timestamp::now(), TIME_RANGE_BUFFER)
+                {
+                    self.emit(BuilderEvent::rejected_op(
+                        self.builder_tag.clone(),
+                        op.hash(),
+                        OpRejectionReason::InvalidTimeRange {
+                            valid_range: valid_time_range,
+                        },
+                    ));
+                    context.rejected_ops.push((op.into(), po.op.entity_infos));
+                    continue;
+                }
+            }
+
+            // if the bundle is at or past target, skip op and continue to finish processing any rejections
+            if gas_spent >= self.settings.target_bundle_gas {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_tag.clone(),
+                    op.hash(),
+                    SkipReason::GasLimit,
+                ));
+                continue;
+            }
+            // if this would put the bundle over its max, skip
+            let op_computation_gas_limit =
+                op.computation_gas_limit(&self.settings.chain_spec, None);
+            if gas_spent.saturating_add(op_computation_gas_limit) > self.settings.max_bundle_gas {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_tag.clone(),
+                    op.hash(),
+                    SkipReason::GasLimit,
+                ));
                 continue;
             }
 
@@ -744,15 +848,17 @@ where
                 let max_cost = op.max_gas_cost();
                 if *balance < max_cost {
                     info!("Rejected paymaster {paymaster:?} because its balance {balance:?} was too low.");
-                    paymasters_to_reject.push(po.entity_infos.paymaster.unwrap());
+                    paymasters_to_reject.push(po.op.entity_infos.paymaster.unwrap());
                     continue;
                 } else {
                     *balance -= max_cost;
                 }
             }
 
-            // Update the running gas that would need to be be spent to execute the bundle so far.
-            gas_spent += op.computation_gas_limit(&self.settings.chain_spec, None);
+            // FIXME // Update the running gas that would need to be be spent to execute the bundle so far.
+            // gas_spent += op.computation_gas_limit(&self.settings.chain_spec, None);
+            // Update the running totals
+            gas_spent = gas_spent.saturating_add(op_computation_gas_limit);
 
             if hc_ent.is_some() {
                 let (block_hash, _) = self
@@ -773,7 +879,7 @@ where
                 let sim_result = self
                     .bundle_providers
                     .simulator()
-                    .simulate_validation(u_op2.clone().into(), block_hash, None)
+                    .simulate_validation(u_op2.clone().into(), true, block_hash, None)
                     .await
                     .expect("simulate u_op2");
 
@@ -785,6 +891,7 @@ where
                     .push(OpWithSimulation {
                         op: u_op2.into(),
                         simulation: sim_result,
+                        sponsored_da_gas: po.sponsored_da_gas, // FIXME
                     });
                 cleanup_keys.push(hc_ent.clone().unwrap().map_key);
             }
@@ -800,6 +907,7 @@ where
                 .push(OpWithSimulation {
                     op: op.into(),
                     simulation,
+                    sponsored_da_gas: po.sponsored_da_gas,
                 });
         }
 
@@ -826,7 +934,7 @@ where
             let cleanup_sim = self
                 .bundle_providers
                 .simulator()
-                .simulate_validation(cleanup_op.clone().into(), block_hash, None)
+                .simulate_validation(cleanup_op.clone().into(), true, block_hash, None)
                 .await
                 .expect("simulate cleanup_op");
 
@@ -838,6 +946,7 @@ where
                 .push(OpWithSimulation {
                     op: cleanup_op.into(),
                     simulation: cleanup_sim,
+                    sponsored_da_gas: None, // FIXME
                 });
         }
 
@@ -1366,14 +1475,13 @@ where
 
     fn limit_user_operations_for_simulation(
         &self,
-        ops: Vec<PoolOperation>,
-    ) -> (Vec<PoolOperation>, u128) {
-        // Make the bundle gas limit 10% higher here so that we simulate more UOs than we need in case that we end up dropping some UOs later so we can still pack a full bundle
-        let mut gas_left = math::increase_by_percent(self.settings.max_bundle_gas, 10);
+        ops: Vec<PoolOperationWithSponsoredDAGas>,
+    ) -> (Vec<PoolOperationWithSponsoredDAGas>, u128) {
+        let mut gas_left = self.settings.max_bundle_gas;
         let mut ops_in_bundle = Vec::new();
         for op in ops {
             // if the op has an aggregator, check if the aggregator is supported, if not skip
-            if let Some(agg) = op.uo.aggregator() {
+            if let Some(agg) = op.op.uo.aggregator() {
                 if self
                     .settings
                     .chain_spec
@@ -1382,7 +1490,7 @@ where
                 {
                     self.emit(BuilderEvent::skipped_op(
                         self.builder_tag.clone(),
-                        op.uo.hash(),
+                        op.op.uo.hash(),
                         SkipReason::UnsupportedAggregator(agg),
                     ));
                     continue;
@@ -1391,11 +1499,14 @@ where
 
             // Here we use optimistic gas limits for the UOs by assuming none of the paymaster UOs use postOp calls.
             // This way after simulation once we have determined if each UO actually uses a postOp call or not we can still pack a full bundle
-            let gas = op.uo.computation_gas_limit(&self.settings.chain_spec, None);
+            let gas = op
+                .op
+                .uo
+                .computation_gas_limit(&self.settings.chain_spec, None);
             if gas_left < gas {
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
-                    op.uo.hash(),
+                    op.op.uo.hash(),
                     SkipReason::GasLimit,
                 ));
                 continue;
@@ -1474,9 +1585,16 @@ where
 }
 
 #[derive(Debug)]
+struct PoolOperationWithSponsoredDAGas {
+    op: PoolOperation,
+    sponsored_da_gas: Option<u128>,
+}
+
+#[derive(Debug)]
 struct OpWithSimulation<UO> {
     op: UO,
     simulation: SimulationResult,
+    sponsored_da_gas: Option<u128>,
 }
 
 /// A struct used internally to represent the current state of a proposed bundle
@@ -1758,7 +1876,9 @@ impl<UO: UserOperation> ProposalContext<UO> {
         // per UO gas, bundle_size == None to signal to exclude shared gas
         gas_limit += self
             .iter_ops_with_simulations()
-            .map(|sim_op| sim_op.op.gas_limit(chain_spec, None))
+            .map(|sim_op| {
+                sim_op.op.gas_limit(chain_spec, None) + sim_op.sponsored_da_gas.unwrap_or(0)
+            })
             .sum::<u128>();
 
         gas_limit
@@ -1999,7 +2119,7 @@ mod tests {
         pool::{MockPool, SimulationViolation},
         proxy::MockSubmissionProxy,
         v0_6::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
-        UserOperation as _, ValidTimeRange,
+        BundlerSponsorship, UserOperation as _, UserOperationPermissions, ValidTimeRange,
     };
 
     use super::*;
@@ -2016,6 +2136,7 @@ mod tests {
         let bundle = simple_make_bundle(vec![MockOp {
             op: op.clone(),
             simulation_result: Box::new(|| Ok(SimulationResult::default())),
+            perms: UserOperationPermissions::default(),
         }])
         .await;
 
@@ -2050,6 +2171,7 @@ mod tests {
                     entity_infos: None,
                 })
             }),
+            perms: UserOperationPermissions::default(),
         }])
         .await;
         assert!(bundle.ops_per_aggregator.is_empty());
@@ -2067,6 +2189,7 @@ mod tests {
                     entity_infos: None,
                 })
             }),
+            perms: UserOperationPermissions::default(),
         }])
         .await;
         assert!(bundle.ops_per_aggregator.is_empty());
@@ -2086,6 +2209,7 @@ mod tests {
                     entity_infos: None,
                 })
             }),
+            perms: UserOperationPermissions::default(),
         }])
         .await;
         assert!(bundle.ops_per_aggregator.is_empty());
@@ -2108,6 +2232,7 @@ mod tests {
                         ..Default::default()
                     })
                 }),
+                perms: UserOperationPermissions::default(),
             }])
             .await;
             assert!(bundle.ops_per_aggregator.is_empty());
@@ -2128,6 +2253,7 @@ mod tests {
                         ..Default::default()
                     })
                 }),
+                perms: UserOperationPermissions::default(),
             },
             MockOp {
                 op: op2.clone(),
@@ -2137,6 +2263,7 @@ mod tests {
                         ..Default::default()
                     })
                 }),
+                perms: UserOperationPermissions::default(),
             },
         ])
         .await;
@@ -2163,10 +2290,12 @@ mod tests {
                 MockOp {
                     op: op1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -2202,10 +2331,12 @@ mod tests {
                 MockOp {
                     op: op1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -2251,10 +2382,12 @@ mod tests {
                 MockOp {
                     op: op1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -2310,18 +2443,22 @@ mod tests {
                 MockOp {
                     op: unaggregated_op.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: aggregated_op_a1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: aggregated_op_a2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: aggregated_op_b.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![
@@ -2407,18 +2544,22 @@ mod tests {
                 MockOp {
                     op: unaggregated_op.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: aggregated_op_a1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: aggregated_op_a2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: aggregated_op_b.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![
@@ -2480,26 +2621,32 @@ mod tests {
                 MockOp {
                     op: op1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op3.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op4.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op5.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op6.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -2571,6 +2718,7 @@ mod tests {
                         entity_infos: Some(entity_infos),
                     })
                 }),
+                perms: UserOperationPermissions::default(),
             }],
             vec![],
             vec![],
@@ -2632,6 +2780,7 @@ mod tests {
                         entity_infos: Some(entity_infos),
                     })
                 }),
+                perms: UserOperationPermissions::default(),
             }],
             vec![],
             vec![],
@@ -2713,6 +2862,7 @@ mod tests {
                             entity_infos: Some(entity_infos_1),
                         })
                     }),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op_2.clone(),
@@ -2731,6 +2881,7 @@ mod tests {
                             entity_infos: Some(entity_infos_2),
                         })
                     }),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -2757,14 +2908,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bundle_gas_limit_simple() {
-        // Limit is 10M
+    async fn test_bundle_gas_limit_max() {
+        // Target is 10M, max is 25M
         // Each OP has 1M pre_verification_gas, 0 verification_gas_limit, call_gas_limit is passed in
         let op1 = op_with_sender_call_gas_limit(address(1), 4_000_000);
         let op2 = op_with_sender_call_gas_limit(address(2), 3_000_000);
-        // these two shouldn't be included in the bundle
-        let op3 = op_with_sender_call_gas_limit(address(3), 10_000_000);
-        let op4 = op_with_sender_call_gas_limit(address(4), 10_000_000);
+        // these two shouldn't be included in the bundle as they put us over the max
+        let op3 = op_with_sender_call_gas_limit(address(3), 20_000_000);
+        let op4 = op_with_sender_call_gas_limit(address(4), 20_000_000);
         let deposit = parse_units("1", "ether").unwrap().into();
 
         let bundle = mock_make_bundle(
@@ -2772,18 +2923,22 @@ mod tests {
                 MockOp {
                     op: op1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op3.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op4.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -2822,7 +2977,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bundle_gas_limit() {
+    async fn test_bundle_gas_limit_target() {
+        // Target is 10M, max is 25M
+        // Each OP has 1M pre_verification_gas, 0 verification_gas_limit, call_gas_limit is passed in
+        let op1 = op_with_sender_call_gas_limit(address(1), 4_000_000);
+        let op2 = op_with_sender_call_gas_limit(address(2), 6_000_000);
+        // this op should be included in the bundle as we're already at the target
+        let op3 = op_with_sender_call_gas_limit(address(3), 1_000_000);
+        let deposit = parse_units("1", "ether").unwrap().into();
+
+        let bundle = mock_make_bundle(
+            vec![
+                MockOp {
+                    op: op1.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
+                },
+                MockOp {
+                    op: op2.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
+                },
+                MockOp {
+                    op: op3.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
+                },
+            ],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![deposit, deposit, deposit],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        let cs = ChainSpec::default();
+        let expected_gas_limit: u64 = (op1.gas_limit(&cs, None)
+            + op2.gas_limit(&cs, None)
+            + rundler_types::bundle_shared_gas(&cs))
+        .try_into()
+        .unwrap();
+
+        assert_eq!(bundle.entity_updates, vec![]);
+        assert_eq!(bundle.rejected_ops, vec![]);
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![op1, op2],
+                ..Default::default()
+            }]
+        );
+        assert_eq!(
+            bundle.gas_estimate,
+            math::increase_by_percent(expected_gas_limit, BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bundle_gas_limit_da_gas() {
         let cs = ChainSpec::default();
         let op1 = op_with_gas(100_000, 100_000, 1_000_000, false);
         let op2 = op_with_gas(100_000, 100_000, 200_000, false);
@@ -2837,6 +3055,7 @@ mod tests {
                             requires_post_op: false,
                             ..Default::default()
                         },
+                        sponsored_da_gas: Some(100_000),
                     },
                     OpWithSimulation {
                         op: op2.clone(),
@@ -2844,6 +3063,7 @@ mod tests {
                             requires_post_op: false,
                             ..Default::default()
                         },
+                        sponsored_da_gas: None,
                     },
                 ],
                 signature: Default::default(),
@@ -2858,7 +3078,8 @@ mod tests {
 
         let expected_gas_limit = op1.gas_limit(&cs, None)
             + op2.gas_limit(&cs, None)
-            + rundler_types::bundle_shared_gas(&cs);
+            + rundler_types::bundle_shared_gas(&cs)
+            + 100_000; // sponsored DA gas
 
         assert_eq!(context.get_bundle_gas_limit(&cs), expected_gas_limit);
     }
@@ -2879,6 +3100,7 @@ mod tests {
                             requires_post_op: true, // uses postOp
                             ..Default::default()
                         },
+                        sponsored_da_gas: None,
                     },
                     OpWithSimulation {
                         op: op2.clone(),
@@ -2886,6 +3108,7 @@ mod tests {
                             requires_post_op: false,
                             ..Default::default()
                         },
+                        sponsored_da_gas: None,
                     },
                 ],
                 signature: Default::default(),
@@ -2913,6 +3136,7 @@ mod tests {
             vec![MockOp {
                 op: op1.clone(),
                 simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                perms: UserOperationPermissions::default(),
             }],
             vec![],
             vec![HandleOpsOut::PostOpRevert, HandleOpsOut::PostOpRevert],
@@ -2940,10 +3164,12 @@ mod tests {
                 MockOp {
                     op: op1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -2992,14 +3218,17 @@ mod tests {
                 MockOp {
                     op: unaggregated_op.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: aggregated_op_a1.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: aggregated_op_a2.clone(),
                     simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![MockAggregator {
@@ -3053,6 +3282,7 @@ mod tests {
                         ..Default::default()
                     })
                 }),
+                perms: UserOperationPermissions::default(),
             }],
             vec![],
             vec![HandleOpsOut::Success],
@@ -3094,6 +3324,7 @@ mod tests {
                         ..Default::default()
                     })
                 }),
+                perms: UserOperationPermissions::default(),
             }],
             vec![],
             vec![HandleOpsOut::Success],
@@ -3129,6 +3360,7 @@ mod tests {
                         ..Default::default()
                     })
                 }),
+                perms: UserOperationPermissions::default(),
             }],
             vec![],
             vec![HandleOpsOut::Success],
@@ -3167,6 +3399,7 @@ mod tests {
                             ..Default::default()
                         })
                     }),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op1.clone(),
@@ -3176,6 +3409,7 @@ mod tests {
                             ..Default::default()
                         })
                     }),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -3213,6 +3447,7 @@ mod tests {
             vec![MockOp {
                 op: op.clone(),
                 simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                perms: UserOperationPermissions::default(),
             }],
             vec![],
             vec![HandleOpsOut::Success],
@@ -3255,6 +3490,7 @@ mod tests {
             vec![MockOp {
                 op: op.clone(),
                 simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                perms: UserOperationPermissions::default(),
             }],
             vec![],
             vec![HandleOpsOut::Revert(bytes)],
@@ -3296,6 +3532,7 @@ mod tests {
                             ..Default::default()
                         })
                     }),
+                    perms: UserOperationPermissions::default(),
                 },
                 MockOp {
                     op: op1.clone(),
@@ -3305,6 +3542,7 @@ mod tests {
                             ..Default::default()
                         })
                     }),
+                    perms: UserOperationPermissions::default(),
                 },
             ],
             vec![],
@@ -3334,9 +3572,302 @@ mod tests {
         assert_eq!(bundle.expected_storage.0, expected_storage1_clone.0);
     }
 
+    #[tokio::test]
+    async fn test_trusted_op() {
+        let op = default_op();
+        let bundle = mock_make_bundle(
+            vec![MockOp {
+                op: op.clone(),
+                simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                perms: UserOperationPermissions {
+                    trusted: true,
+                    ..Default::default()
+                },
+            }],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![op],
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trusted_untrusted_ops() {
+        let op0 = op_with_sender(address(1));
+        let op1 = op_with_sender(address(2));
+        let bundle = mock_make_bundle(
+            vec![
+                MockOp {
+                    op: op0.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions {
+                        trusted: true,
+                        ..Default::default()
+                    },
+                },
+                MockOp {
+                    op: op1.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions::default(),
+                },
+            ],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![op0, op1],
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_underpriced_op_perms() {
+        let op0 = op_with_sender_and_fees(address(1), 7500, 0, DEFAULT_PVG); // accept
+        let op1 = op_with_sender_and_fees(address(2), 7499, 0, DEFAULT_PVG); // reject w/o remove
+        let bundle = mock_make_bundle(
+            vec![
+                MockOp {
+                    op: op0.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions {
+                        underpriced_bundle_pct: Some(75),
+                        ..Default::default()
+                    },
+                },
+                MockOp {
+                    op: op1.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions {
+                        underpriced_bundle_pct: Some(75),
+                        ..Default::default()
+                    },
+                },
+            ],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            10000,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![op0],
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_underpriced_op_perms_pvg() {
+        let cs = ChainSpec {
+            da_pre_verification_gas: true,
+            ..Default::default()
+        };
+        let mock_op0 = op_with_sender_and_fees(address(1), 10000, 0, DEFAULT_PVG);
+        let required_pvg = mock_op0.required_pre_verification_gas(&cs, 1, DEFAULT_DA_PVG);
+
+        let op0 = op_with_sender_and_fees(address(1), 10000, 0, math::percent(required_pvg, 75)); // accept
+        let op1 =
+            op_with_sender_and_fees(address(2), 10000, 0, math::percent(required_pvg, 75 - 1)); // reject w/o remove
+        let bundle = mock_make_bundle(
+            vec![
+                MockOp {
+                    op: op0.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions {
+                        underpriced_bundle_pct: Some(75),
+                        ..Default::default()
+                    },
+                },
+                MockOp {
+                    op: op1.clone(),
+                    simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                    perms: UserOperationPermissions {
+                        underpriced_bundle_pct: Some(75),
+                        ..Default::default()
+                    },
+                },
+            ],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            10000,
+            0,
+            false,
+            ExpectedStorage::default(),
+            true, // da_gas_tracking_enabled == dynamic PVG
+            vec![],
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![op0],
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bundler_sponsorship_skip_fee_check() {
+        let mock_op = op_with_sender_and_fees(address(1), 0, 0, 0); // Zero fees
+        let perms = UserOperationPermissions {
+            bundler_sponsorship: Some(BundlerSponsorship {
+                max_cost: U256::from(1000000000000_u64), // High enough max cost
+                valid_until: u64::MAX,                   // Never expires
+            }),
+            ..Default::default()
+        };
+
+        let bundle = mock_make_bundle(
+            vec![MockOp {
+                op: mock_op.clone(),
+                simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                perms,
+            }],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            100,
+            10,
+            false,
+            ExpectedStorage::default(),
+            true,
+            vec![],
+            None,
+        )
+        .await;
+
+        // Operation should be included despite having zero fees
+        assert_eq!(
+            bundle.ops_per_aggregator,
+            vec![UserOpsPerAggregator {
+                user_ops: vec![mock_op],
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bundler_sponsorship_expired() {
+        let mock_op = op_with_sender_and_fees(address(1), 0, 0, 0); // Zero fees
+        let perms = UserOperationPermissions {
+            bundler_sponsorship: Some(BundlerSponsorship {
+                max_cost: U256::from(1000), // High enough max cost
+                valid_until: u64::MAX,      // Never expires
+            }),
+            ..Default::default()
+        };
+        let error = mock_make_bundle_allow_error(
+            vec![MockOp {
+                op: mock_op.clone(),
+                simulation_result: Box::new(|| {
+                    Ok(SimulationResult {
+                        valid_time_range: ValidTimeRange::from_genesis(200.into()), // Current time > valid_until
+                        ..Default::default()
+                    })
+                }),
+                perms,
+            }],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            10000,
+            1000,
+            false,
+            ExpectedStorage::default(),
+            true,
+            vec![],
+            None,
+        )
+        .await
+        .expect_err("should fail to bundle");
+
+        assert!(matches!(
+            error,
+            BundleProposerError::NoOperationsAfterFeeFilter
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_bundler_sponsorship_over_max_cost() {
+        let mock_op = op_with_gas(0, 100_000, 100_000, false); // High gas limits
+        let perms = UserOperationPermissions {
+            bundler_sponsorship: Some(BundlerSponsorship {
+                max_cost: U256::from(1_000_000), // Max cost too low for gas price * gas limit
+                valid_until: u64::MAX,
+            }),
+            ..Default::default()
+        };
+
+        let error = mock_make_bundle_allow_error(
+            vec![MockOp {
+                op: mock_op.clone(),
+                simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                perms,
+            }],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            10_000, // High base fee
+            1_000,  // High priority fee
+            false,
+            ExpectedStorage::default(),
+            true,
+            vec![],
+            None,
+        )
+        .await
+        .expect_err("should fail to bundle");
+
+        assert!(matches!(
+            error,
+            BundleProposerError::NoOperationsAfterFeeFilter
+        ));
+    }
+
     struct MockOp {
         op: UserOperation,
         simulation_result: Box<dyn Fn() -> Result<SimulationResult, SimulationError> + Send + Sync>,
+        perms: UserOperationPermissions,
     }
 
     struct MockAggregator {
@@ -3377,6 +3908,37 @@ mod tests {
         aggregators: Vec<MockSignatureAggregator>,
         proxy: Option<MockSubmissionProxy>,
     ) -> Bundle<UserOperation> {
+        mock_make_bundle_allow_error(
+            mock_ops,
+            mock_aggregators,
+            mock_handle_ops_call_results,
+            mock_paymaster_deposits,
+            base_fee,
+            max_priority_fee_per_gas,
+            notify_condition_not_met,
+            actual_storage,
+            da_gas_tracking_enabled,
+            aggregators,
+            proxy,
+        )
+        .await
+        .expect("should make a bundle")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn mock_make_bundle_allow_error(
+        mock_ops: Vec<MockOp>,
+        mock_aggregators: Vec<MockAggregator>,
+        mock_handle_ops_call_results: Vec<HandleOpsOut>,
+        mock_paymaster_deposits: Vec<U256>,
+        base_fee: u128,
+        max_priority_fee_per_gas: u128,
+        notify_condition_not_met: bool,
+        actual_storage: ExpectedStorage,
+        da_gas_tracking_enabled: bool,
+        aggregators: Vec<MockSignatureAggregator>,
+        proxy: Option<MockSubmissionProxy>,
+    ) -> BundleProposerResult<Bundle<UserOperation>> {
         let mut chain_spec = ChainSpec {
             da_pre_verification_gas: da_gas_tracking_enabled,
             ..Default::default()
@@ -3388,7 +3950,7 @@ mod tests {
         let proxy_address = proxy.as_ref().map(|p| p.address());
         let ops: Vec<_> = mock_ops
             .iter()
-            .map(|MockOp { op, .. }| PoolOperation {
+            .map(|MockOp { op, perms, .. }| PoolOperation {
                 uo: op.clone().into(),
                 expected_code_hash,
                 entry_point: chain_spec.entry_point_address_v0_6,
@@ -3400,6 +3962,7 @@ mod tests {
                 aggregator: None,
                 da_gas_data: Default::default(),
                 filter_id: None,
+                perms: perms.clone(),
             })
             .collect();
 
@@ -3408,17 +3971,25 @@ mod tests {
             .expect_get_ops()
             .returning(move |_, _, _, _| Ok(ops.clone()));
 
-        let simulations_by_op: HashMap<_, _> = mock_ops
-            .into_iter()
-            .map(|op| (op.op.hash(), op.simulation_result))
-            .collect();
+        let simulations_by_op: Arc<HashMap<B256, MockOp>> = Arc::from(
+            mock_ops
+                .into_iter()
+                .map(|op| (op.op.hash(), op))
+                .collect::<HashMap<_, _>>(),
+        );
+        let simulations_by_op_cloned: Arc<HashMap<_, _>> = Arc::clone(&simulations_by_op);
+
         let mut simulator = MockSimulator::new();
         simulator
             .expect_simulate_validation()
-            .withf(move |_, &block_hash, &code_hash| {
-                block_hash == current_block_hash && code_hash == Some(expected_code_hash)
+            .withf(move |op, &trusted, &block_hash, &code_hash| {
+                block_hash == current_block_hash
+                    && code_hash == Some(expected_code_hash)
+                    && simulations_by_op_cloned[&op.hash()].perms.trusted == trusted
             })
-            .returning(move |op, _, _| simulations_by_op[&op.hash()]());
+            .returning(move |op, _, _, _| {
+                simulations_by_op[&op.hash()].simulation_result.as_ref()()
+            });
         let mut entry_point = MockEntryPointV0_6::new();
         entry_point
             .expect_address()
@@ -3491,13 +4062,13 @@ mod tests {
         });
         let bd_cloned = block_data.clone();
         da_oracle
-            .expect_block_data()
+            .expect_da_block_data()
             .returning(move |_| Ok(bd_cloned.clone()));
         da_oracle
             .expect_calc_da_gas_sync()
             .returning(move |_, bd, _, _| {
                 assert_eq!(*bd, block_data);
-                100_000
+                DEFAULT_DA_PVG
             });
 
         let mut registry = ContractRegistry::<Arc<dyn SignatureAggregator>>::default();
@@ -3521,7 +4092,8 @@ mod tests {
             Settings {
                 chain_spec,
                 max_bundle_size,
-                max_bundle_gas: 10_000_000,
+                target_bundle_gas: 10_000_000,
+                max_bundle_gas: 25_000_000,
                 sender_eoa,
                 priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
                 da_gas_tracking_enabled,
@@ -3536,10 +4108,7 @@ mod tests {
             proposer.notify_condition_not_met();
         }
 
-        proposer
-            .make_bundle(None, false)
-            .await
-            .expect("should make a bundle")
+        proposer.make_bundle(None, false).await
     }
 
     fn address(n: u8) -> Address {
@@ -3560,6 +4129,7 @@ mod tests {
 
     // UOs require PVG to pass the PVG check even when fees are 0
     const DEFAULT_PVG: u128 = 1_000_000;
+    const DEFAULT_DA_PVG: u128 = 100_000;
 
     fn op_with_sender(sender: Address) -> UserOperation {
         op_from_required(UserOperationRequiredFields {

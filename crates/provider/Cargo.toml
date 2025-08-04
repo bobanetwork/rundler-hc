@@ -8,10 +8,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-rundler-bindings-fastlz.workspace = true
-rundler-contracts.workspace = true
-rundler-types.workspace = true
-rundler-utils.workspace = true
 
 alloy-consensus.workspace = true
 alloy-contract.workspace = true
@@ -23,33 +19,37 @@ alloy-rlp.workspace = true
 alloy-rpc-client.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-rpc-types-trace.workspace = true
+alloy-serde.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
 alloy-transport-http.workspace = true
 
-reth-tasks = { workspace = true, features = ["rayon"] }
-
 anyhow.workspace = true
 async-trait.workspace = true
 auto_impl.workspace = true
-const-hex.workspace = true
 futures-util.workspace = true
+
+mockall = { workspace = true, optional = true }
 pin-project.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+
+reth-tasks = { workspace = true, features = ["rayon"] }
+rundler-bindings-fastlz.workspace = true
+rundler-contracts.workspace = true
+rundler-types.workspace = true
+rundler-utils.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
 url.workspace = true
 
-mockall = { workspace = true, optional = true }
-
 [features]
 test-utils = ["mockall"]
 
 [dev-dependencies]
 alloy-provider = { workspace = true, features = ["debug-api", "anvil-node"] }
-alloy-sol-macro.workspace = true
 tiny_http.workspace = true
 tokio.workspace = true

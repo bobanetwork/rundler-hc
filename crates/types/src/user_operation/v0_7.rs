@@ -453,6 +453,27 @@ impl UserOperation {
     }
 }
 
+#[cfg(feature = "test-utils")]
+impl Default for UserOperation {
+    fn default() -> Self {
+        UserOperationBuilder::new(
+            &ChainSpec::default(),
+            UserOperationRequiredFields {
+                sender: Address::ZERO,
+                nonce: U256::ZERO,
+                call_data: Bytes::new(),
+                signature: Bytes::new(),
+                call_gas_limit: 0,
+                verification_gas_limit: 0,
+                pre_verification_gas: 0,
+                max_fee_per_gas: 0,
+                max_priority_fee_per_gas: 0,
+            },
+        )
+        .build()
+    }
+}
+
 impl From<UserOperationVariant> for UserOperation {
     /// Converts a UserOperationVariant to a UserOperation 0.7
     ///
@@ -575,15 +596,6 @@ impl UserOperationOptionalGas {
             );
         }
 
-        if let Some(address) = self.eip7702_auth_address {
-            let auth = Eip7702Auth {
-                address,
-                chain_id: chain_spec.id,
-                ..Default::default()
-            };
-            builder = builder.authorization_tuple(auth.max_fill());
-        }
-
         if let Some(factory) = self.factory {
             builder = builder.factory(factory, vec![255_u8; self.factory_data.len()].into());
         }
@@ -593,7 +605,7 @@ impl UserOperationOptionalGas {
                 chain_id: chain_spec.id,
                 ..Default::default()
             };
-            builder = builder.authorization_tuple(auth.random_fill());
+            builder = builder.authorization_tuple(auth.max_fill());
         }
         if let Some(aggregator) = self.aggregator {
             builder = builder.aggregator(aggregator);

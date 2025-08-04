@@ -33,7 +33,6 @@ services:
     command: >
       node
       --disable_entry_point_v0_6
-      --builder.dropped_status_unsupported
 
   offchain-rpc:
     build:

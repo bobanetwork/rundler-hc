@@ -13,39 +13,83 @@
 
 use std::time::Duration;
 
-use alloy_signer::Signer as _;
+use alloy_consensus::SignableTransaction;
+use alloy_network::{EthereumWallet, TxSigner};
+use alloy_primitives::{Address, PrimitiveSignature};
 use alloy_signer_aws::AwsSigner;
 use anyhow::Context;
 use aws_config::{BehaviorVersion, Region};
 use aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder;
 use rslock::{Lock, LockGuard, LockManager};
-use rundler_provider::EvmProvider;
 use rundler_task::TaskSpawner;
 use tokio::{sync::oneshot, time::sleep};
 
-use super::monitor_account_balance;
+use crate::Result;
 
-/// A KMS signer handle that will release the key_id when dropped.
-#[derive(Debug)]
-pub(crate) struct KmsSigner {
-    pub(crate) signer: AwsSigner,
+pub(crate) async fn create_wallet_from_key_ids(
+    key_ids: Vec<String>,
+    chain_id: u64,
+) -> Result<EthereumWallet> {
+    let mut wallet = EthereumWallet::default();
+    let config = aws_config::load_defaults(BehaviorVersion::v2025_01_17()).await;
+    let client = aws_sdk_kms::Client::new(&config);
+
+    for key_id in key_ids {
+        let signer = AwsSigner::new(client.clone(), key_id.to_string(), Some(chain_id))
+            .await
+            .context("should create aws kms signer")?;
+        wallet.register_signer(signer);
+    }
+
+    Ok(wallet)
 }
-impl KmsSigner {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn connect<P: EvmProvider + Clone + 'static, T: TaskSpawner>(
+
+pub(crate) async fn create_signer_from_key_id(key_id: String, chain_id: u64) -> Result<AwsSigner> {
+    let config = aws_config::load_defaults(BehaviorVersion::v2025_01_17()).await;
+    let client = aws_sdk_kms::Client::new(&config);
+    Ok(
+        AwsSigner::new(client.clone(), key_id.to_string(), Some(chain_id))
+            .await
+            .context("should create aws kms signer")?,
+    )
+}
+
+pub(crate) struct LockingKmsSigner {
+    inner: AwsSigner,
+    key_id: String,
+}
+
+#[async_trait::async_trait]
+impl TxSigner<PrimitiveSignature> for LockingKmsSigner {
+    fn address(&self) -> Address {
+        TxSigner::address(&self.inner)
+    }
+
+    async fn sign_transaction(
+        &self,
+        tx: &mut dyn SignableTransaction<PrimitiveSignature>,
+    ) -> alloy_signer::Result<PrimitiveSignature> {
+        self.inner.sign_transaction(tx).await
+    }
+}
+
+impl LockingKmsSigner {
+    pub(crate) fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    pub(crate) async fn connect<T: TaskSpawner>(
         task_spawner: &T,
-        provider: P,
         chain_id: u64,
         key_ids: Vec<String>,
         redis_uri: String,
         ttl_millis: u64,
         kms_url: String,
         kms_region: String,
-    ) -> anyhow::Result<Self> {
-        let mut builder = aws_config::load_defaults(BehaviorVersion::v2024_03_28())
+    ) -> Result<Self> {
+        let mut builder = aws_config::load_defaults(BehaviorVersion::v2025_01_17())
             .await
             .into_builder();
-
         if !kms_region.is_empty() {
             builder.set_region(Region::new(kms_region));
         }
@@ -84,12 +128,15 @@ impl KmsSigner {
             signer.address()
         );
 
-        task_spawner.spawn(Box::pin(monitor_account_balance(
-            signer.address(),
-            provider.clone(),
-        )));
+        tracing::info!(
+            "Connected to KMS key {key_id}. Address: {}",
+            signer.address()
+        );
 
-        Ok(Self { signer })
+        Ok(Self {
+            inner: signer,
+            key_id,
+        })
     }
 
     async fn lock_manager_loop(
@@ -149,7 +196,7 @@ impl KmsSigner {
     }
 }
 
-async fn try_lock<'a>(lm: &'a LockManager, lock_id: &str, ttl_millis: u64) -> Option<Lock<'a>> {
+async fn try_lock(lm: &LockManager, lock_id: &str, ttl_millis: u64) -> Option<Lock> {
     match lm
         .lock(lock_id.as_bytes(), Duration::from_millis(ttl_millis))
         .await

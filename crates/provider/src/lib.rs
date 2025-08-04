@@ -37,18 +37,19 @@ pub use alloy::{
     evm::AlloyEvmProvider,
     new_alloy_da_gas_oracle, new_alloy_evm_provider, new_alloy_provider,
 };
-
+pub use alloy_provider::network::{AnyHeader, AnyNetwork, AnyReceiptEnvelope, AnyTxEnvelope};
+pub use alloy_serde::WithOtherFields;
+use alloy_transport::{BoxTransport, Transport};
 mod traits;
 // re-export alloy RPC types
 use std::marker::PhantomData;
 
+pub use alloy_consensus::{ReceiptWithBloom, Transaction as TransactionTrait};
 pub use alloy_json_rpc::{RpcParam, RpcReturn};
 pub use alloy_rpc_types_eth::{
     state::{AccountOverride, StateOverride},
-    Block, BlockHashOrNumber, BlockId, BlockNumberOrTag, FeeHistory, Filter, FilterBlockOption,
-    Header as BlockHeader, Log, ReceiptEnvelope as TransactionReceiptEnvelope,
-    ReceiptWithBloom as TransactionReceiptWithBloom, RpcBlockHash, Transaction, TransactionReceipt,
-    TransactionRequest,
+    BlockHashOrNumber, BlockId, BlockNumberOrTag, FeeHistory, Filter, FilterBlockOption,
+    Header as BlockHeader, Log, RpcBlockHash,
 };
 pub use alloy_rpc_types_trace::geth::{
     CallConfig as GethDebugTracerCallConfig, CallFrame as GethDebugTracerCallFrame,
@@ -65,6 +66,27 @@ use rundler_types::{
 pub use traits::test_utils::*;
 pub use traits::*;
 
+/// Transaction request type for all networks.
+pub type TransactionRequest = alloy_rpc_types_eth::TransactionRequest;
+/// Transaction receipt type for all networks.
+pub type TransactionReceipt = alloy_rpc_types_eth::TransactionReceipt<AnyReceiptEnvelope<Log>>;
+/// Transaction type for all networks.
+pub type Transaction = alloy_rpc_types_eth::Transaction<AnyTxEnvelope>;
+/// Block type for all networks.
+pub type Block = alloy_rpc_types_eth::Block<
+    WithOtherFields<Transaction>,
+    alloy_rpc_types_eth::Header<AnyHeader>,
+>;
+/// Alloy provider type for all networks.
+pub trait AlloyProvider<T: Transport + Clone = BoxTransport>:
+    alloy_provider::Provider<T, AnyNetwork> + Clone
+{
+}
+impl<T: Transport + Clone, AP: alloy_provider::Provider<T, AnyNetwork> + Clone> AlloyProvider<T>
+    for AP
+{
+}
+
 /// A trait that provides access to various providers.
 pub trait Providers: Send + Sync + Clone {
     /// The EVM provider.
@@ -75,6 +97,9 @@ pub trait Providers: Send + Sync + Clone {
 
     /// The entry point provider for v0.7.
     type EntryPointV0_7: EntryPointProvider<UserOperationV0_7> + Clone;
+
+    /// The DA gas oracle provider.
+    type DAGasOracle: DAGasOracle + Clone;
 
     /// The DA gas oracle sync provider.
     type DAGasOracleSync: DAGasOracleSync + Clone;
@@ -87,6 +112,9 @@ pub trait Providers: Send + Sync + Clone {
 
     /// Returns the entry point provider for v0.7.
     fn ep_v0_7(&self) -> &Option<Self::EntryPointV0_7>;
+
+    /// Returns the DA gas oracle.
+    fn da_gas_oracle(&self) -> &Self::DAGasOracle;
 
     /// Returns the DA gas oracle sync provider.
     fn da_gas_oracle_sync(&self) -> &Option<Self::DAGasOracleSync>;

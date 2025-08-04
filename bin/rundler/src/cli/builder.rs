@@ -14,7 +14,7 @@
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use alloy_primitives::Address;
-use anyhow::{bail, Context};
+use anyhow::Context;
 use clap::Args;
 use rundler_builder::{
     self, BloxrouteSenderArgs, BuilderEvent, BuilderEventKind, BuilderSettings, BuilderTask,
@@ -40,6 +40,7 @@ use tokio::sync::broadcast;
 
 use super::{
     proxy::{PassThroughProxy, SubmissionProxyType},
+    signer::SignerArgs,
     CommonArgs,
 };
 
@@ -67,73 +68,8 @@ pub struct BuilderArgs {
     )]
     host: String,
 
-    /// Private key to use for signing transactions
-    /// DEPRECATED: Use `builder.private_keys` instead
-    ///
-    /// If both `builder.private_key` and `builder.private_keys` are set, `builder.private_key` is appended
-    /// to `builder.private_keys`. Keys must be unique.
-    #[arg(
-        long = "builder.private_key",
-        name = "builder.private_key",
-        env = "BUILDER_PRIVATE_KEY"
-    )]
-    private_key: Option<String>,
-
-    /// Private keys to use for signing transactions
-    ///
-    /// Cannot use both `builder.private_keys` and `builder.aws_kms_key_ids` at the same time.
-    #[arg(
-        long = "builder.private_keys",
-        name = "builder.private_keys",
-        env = "BUILDER_PRIVATE_KEYS",
-        value_delimiter = ','
-    )]
-    private_keys: Vec<String>,
-
-    /// AWS KMS key IDs to use for signing transactions
-    #[arg(
-        long = "builder.aws_kms_key_ids",
-        name = "builder.aws_kms_key_ids",
-        env = "BUILDER_AWS_KMS_KEY_IDS",
-        value_delimiter = ','
-    )]
-    aws_kms_key_ids: Vec<String>,
-
-    /// Custom KMS server
-    #[arg(
-        long = "builder.kms_url",
-        name = "builder.kms_url",
-        env = "BUILDER_KMS_URL",
-        default_value = ""
-    )]
-    kms_url: String,
-
-    /// Region for custom KMS server
-    #[arg(
-        long = "builder.kms_region",
-        name = "builder.kms_region",
-        env = "BUILDER_KMS_REGION",
-        default_value = ""
-    )]
-    kms_region: String,
-
-    /// Redis URI to use for KMS leasing
-    #[arg(
-        long = "builder.redis_uri",
-        name = "builder.redis_uri",
-        env = "BUILDER_REDIS_URI",
-        default_value = ""
-    )]
-    redis_uri: String,
-
-    /// Redis lock TTL in milliseconds
-    #[arg(
-        long = "builder.redis_lock_ttl_millis",
-        name = "builder.redis_lock_ttl_millis",
-        env = "BUILDER_REDIS_LOCK_TTL_MILLIS",
-        default_value = "60000"
-    )]
-    redis_lock_ttl_millis: u64,
+    #[command(flatten)]
+    signer_args: SignerArgs,
 
     /// Maximum number of ops to include in one bundle.
     #[arg(
@@ -167,17 +103,6 @@ pub struct BuilderArgs {
     )]
     pub submit_url: Option<String>,
 
-    /// If true, use the submit endpoint for transaction status checks.
-    ///
-    /// Only used when BUILDER_SENDER is "raw"
-    #[arg(
-        long = "builder.use_submit_for_status",
-        name = "builder.use_submit_for_status",
-        env = "BUILDER_USE_SUBMIT_FOR_STATUS",
-        default_value = "false"
-    )]
-    pub use_submit_for_status: bool,
-
     /// Use the conditional RPC endpoint for transaction submission.
     ///
     /// Only used when BUILDER_SENDER is "raw"
@@ -188,17 +113,6 @@ pub struct BuilderArgs {
         default_value = "false"
     )]
     pub use_conditional_rpc: bool,
-
-    /// If the "dropped" status is unsupported by the status provider.
-    ///
-    /// Only used when BUILDER_SENDER is "raw"
-    #[arg(
-        long = "builder.dropped_status_unsupported",
-        name = "builder.dropped_status_unsupported",
-        env = "BUILDER_DROPPED_STATUS_UNSUPPORTED",
-        default_value = "false"
-    )]
-    pub dropped_status_unsupported: bool,
 
     /// A list of builders to pass into the Flashbots Relay RPC.
     ///
@@ -348,34 +262,8 @@ impl BuilderArgs {
             num_builders += common.num_builders_v0_7;
         }
 
-        if (self.private_key.is_some() || !self.private_keys.is_empty())
-            && !self.aws_kms_key_ids.is_empty()
-        {
-            bail!(
-                "Cannot use both builder.private_key(s) and builder.aws_kms_key_ids at the same time."
-            );
-        }
-
-        let mut private_keys = self.private_keys.clone();
-        if self.private_key.is_some() || !self.private_keys.is_empty() {
-            if let Some(pk) = &self.private_key {
-                private_keys.push(pk.clone());
-            }
-
-            if num_builders > private_keys.len() as u64 {
-                bail!(
-                    "Found {} private keys, but need {} keys for the number of builders. You may need to disable one of the entry points.",
-                    private_keys.len(), num_builders
-                );
-            }
-        } else if self.aws_kms_key_ids.len() < num_builders as usize {
-            bail!(
-                "Not enough AWS KMS key IDs for the number of builders. Need {} keys, found {}. You may need to disable one of the entry points.",
-                num_builders, self.aws_kms_key_ids.len()
-            );
-        }
-
         let sender_args = self.sender_args(&chain_spec, &rpc_url)?;
+        let signing_scheme = self.signer_args.signing_scheme(num_builders as usize)?;
 
         let da_gas_tracking_enabled =
             super::lint_da_gas_tracking(common.da_gas_tracking_enabled, &chain_spec);
@@ -384,17 +272,15 @@ impl BuilderArgs {
 
         Ok(BuilderTaskArgs {
             entry_points,
-            chain_spec,
+            signing_scheme,
+            auto_fund: true,
             unsafe_mode: common.unsafe_mode,
             rpc_url,
-            private_keys,
-            aws_kms_key_ids: self.aws_kms_key_ids.clone(),
-            kms_url: self.kms_url.clone(),
-            kms_region: self.kms_region.clone(),
-            redis_uri: self.redis_uri.clone(),
-            redis_lock_ttl_millis: self.redis_lock_ttl_millis,
             max_bundle_size: self.max_bundle_size,
-            max_bundle_gas: common.max_bundle_gas,
+            target_bundle_gas: chain_spec
+                .block_gas_limit_mult(common.target_bundle_block_gas_limit_ratio),
+            max_bundle_gas: chain_spec
+                .block_gas_limit_mult(common.max_bundle_block_gas_limit_ratio),
             bundle_base_fee_overhead_percent: common.bundle_base_fee_overhead_percent,
             bundle_priority_fee_overhead_percent: common.bundle_priority_fee_overhead_percent,
             priority_fee_mode,
@@ -408,6 +294,7 @@ impl BuilderArgs {
             da_gas_tracking_enabled,
             provider_client_timeout_seconds,
             max_expected_storage_slots: common.max_expected_storage_slots.unwrap_or(usize::MAX),
+            chain_spec,
         })
     }
 
@@ -419,8 +306,6 @@ impl BuilderArgs {
         match self.sender_type {
             TransactionSenderKind::Raw => Ok(TransactionSenderArgs::Raw(RawSenderArgs {
                 submit_url: self.submit_url.clone().unwrap_or_else(|| rpc_url.into()),
-                use_submit_for_status: self.use_submit_for_status,
-                dropped_status_supported: !self.dropped_status_unsupported,
                 use_conditional_rpc: self.use_conditional_rpc,
             })),
             TransactionSenderKind::Flashbots => {
@@ -434,9 +319,6 @@ impl BuilderArgs {
                         .flashbots_relay_url
                         .clone()
                         .context("should have a relay URL (chain spec: flashbots_relay_url)")?,
-                    status_url: chain_spec.flashbots_status_url.clone().context(
-                        "should have a flashbots status URL (chain spec: flashbots_status_url)",
-                    )?,
                     auth_key: self.flashbots_relay_auth_key.clone().context(
                         "should have a flashbots relay auth key (cli: flashbots_relay_auth_key)",
                     )?,
@@ -604,12 +486,29 @@ pub async fn spawn_tasks<T: TaskSpawnerExt + 'static>(
     )
     .await?;
 
+    let signer_manager = rundler_signer::new_signer_manager(
+        &task_args.signing_scheme,
+        task_args.auto_fund,
+        &chain_spec,
+        providers.evm().clone(),
+        providers.da_gas_oracle().clone(),
+        &task_spawner,
+    )
+    .await?;
+
+    let builder_builder = LocalBuilderBuilder::new(
+        REQUEST_CHANNEL_CAPACITY,
+        signer_manager.clone(),
+        Arc::new(pool.clone()),
+    );
+
     BuilderTask::new(
         task_args,
         event_sender,
-        LocalBuilderBuilder::new(REQUEST_CHANNEL_CAPACITY),
+        builder_builder,
         pool,
         providers,
+        signer_manager,
     )
     .spawn(task_spawner)
     .await?;

@@ -23,16 +23,8 @@ pub(crate) use flashbots::FlashbotsTransactionSender;
 use mockall::automock;
 pub(crate) use raw::RawTransactionSender;
 use rundler_provider::{EvmProvider, ProviderError, TransactionRequest};
-use rundler_sim::ExpectedStorage;
-use rundler_types::GasFees;
-
-use crate::signer::Signer;
-
-#[derive(Debug)]
-pub(crate) struct SentTxInfo {
-    pub(crate) nonce: u64,
-    pub(crate) tx_hash: B256,
-}
+use rundler_signer::SignerLease;
+use rundler_types::{ExpectedStorage, GasFees};
 
 #[derive(Debug)]
 pub(crate) struct CancelTxInfo {
@@ -40,13 +32,6 @@ pub(crate) struct CancelTxInfo {
     // True if the transaction was soft-cancelled. Soft-cancellation is when the RPC endpoint
     // accepts the cancel without an onchain transaction.
     pub(crate) soft_cancelled: bool,
-}
-
-#[derive(Debug)]
-pub(crate) enum TxStatus {
-    Pending,
-    Mined { block_number: u64 },
-    Dropped,
 }
 
 /// Errors from transaction senders
@@ -73,6 +58,9 @@ pub(crate) enum TxSenderError {
     /// Soft cancellation failed
     #[error("soft cancel failed")]
     SoftCancelFailed,
+    /// Insufficient funds for transaction
+    #[error("insufficient funds for transaction")]
+    InsufficientFunds,
     /// All other errors
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -88,25 +76,24 @@ pub(crate) trait TransactionSender: Send + Sync {
         &self,
         tx: TransactionRequest,
         expected_storage: &ExpectedStorage,
-    ) -> Result<SentTxInfo>;
+        signer: &SignerLease,
+    ) -> Result<B256>;
 
     async fn cancel_transaction(
         &self,
         tx_hash: B256,
         nonce: u64,
         gas_fees: GasFees,
+        signer: &SignerLease,
     ) -> Result<CancelTxInfo>;
-
-    async fn get_transaction_status(&self, tx_hash: B256) -> Result<TxStatus>;
-
-    fn address(&self) -> Address;
 }
 
-#[enum_dispatch]
-pub(crate) enum TransactionSenderEnum<P: EvmProvider, S: Signer> {
-    Raw(RawTransactionSender<P, S>),
-    Flashbots(FlashbotsTransactionSender<P, S>),
-    PolygonBloxroute(PolygonBloxrouteTransactionSender<P, S>),
+#[enum_dispatch(TransactionSender)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum TransactionSenderEnum<P: EvmProvider> {
+    Raw(RawTransactionSender<P>),
+    Flashbots(FlashbotsTransactionSender),
+    PolygonBloxroute(PolygonBloxrouteTransactionSender<P>),
 }
 
 /// Transaction sender types
@@ -137,10 +124,6 @@ pub enum TransactionSenderArgs {
 pub struct RawSenderArgs {
     /// Submit URL
     pub submit_url: String,
-    /// Use submit for status
-    pub use_submit_for_status: bool,
-    /// If the "dropped" status is supported by the status provider
-    pub dropped_status_supported: bool,
     /// If the sender should use the conditional endpoint
     pub use_conditional_rpc: bool,
 }
@@ -159,20 +142,16 @@ pub struct FlashbotsSenderArgs {
     pub builders: Vec<String>,
     /// Flashbots relay URL
     pub relay_url: String,
-    /// Flashbots protect tx status URL (NOTE: must end in "/")
-    pub status_url: String,
     /// Auth Key
     pub auth_key: String,
 }
 
 impl TransactionSenderArgs {
-    pub(crate) fn into_sender<S: Signer>(
+    pub(crate) fn into_sender(
         self,
         rpc_url: &str,
-        signer: S,
         provider_client_timeout_seconds: u64,
-    ) -> std::result::Result<TransactionSenderEnum<impl EvmProvider, S>, SenderConstructorErrors>
-    {
+    ) -> std::result::Result<TransactionSenderEnum<impl EvmProvider>, SenderConstructorErrors> {
         let provider =
             rundler_provider::new_alloy_evm_provider(rpc_url, provider_client_timeout_seconds)?;
         let sender = match self {
@@ -182,36 +161,16 @@ impl TransactionSenderArgs {
                     provider_client_timeout_seconds,
                 )?;
 
-                if args.use_submit_for_status {
-                    TransactionSenderEnum::Raw(RawTransactionSender::new(
-                        submitter.clone(),
-                        submitter,
-                        signer,
-                        args.dropped_status_supported,
-                        args.use_conditional_rpc,
-                    ))
-                } else {
-                    TransactionSenderEnum::Raw(RawTransactionSender::new(
-                        submitter,
-                        provider,
-                        signer,
-                        args.dropped_status_supported,
-                        args.use_conditional_rpc,
-                    ))
-                }
+                TransactionSenderEnum::Raw(RawTransactionSender::new(
+                    submitter,
+                    args.use_conditional_rpc,
+                ))
             }
-            Self::Flashbots(args) => {
-                TransactionSenderEnum::Flashbots(FlashbotsTransactionSender::new(
-                    provider,
-                    signer,
-                    args.auth_key,
-                    args.builders,
-                    args.relay_url,
-                    args.status_url,
-                )?)
-            }
+            Self::Flashbots(args) => TransactionSenderEnum::Flashbots(
+                FlashbotsTransactionSender::new(args.auth_key, args.builders, args.relay_url)?,
+            ),
             Self::Bloxroute(args) => TransactionSenderEnum::PolygonBloxroute(
-                PolygonBloxrouteTransactionSender::new(provider, signer, &args.header)?,
+                PolygonBloxrouteTransactionSender::new(provider, &args.header)?,
             ),
         };
         Ok(sender)
@@ -293,6 +252,12 @@ fn parse_known_call_execution_failed(message: &str, code: i64) -> Option<TxSende
     if lowercase_message.contains("underpriced") {
         return Some(TxSenderError::Underpriced);
     }
+
+    // geth, erigon, reth
+    if lowercase_message.contains("insufficient funds") {
+        return Some(TxSenderError::InsufficientFunds);
+    }
+
     // Check error codes before checking the message
     // The error code is -32003 or -32005 when condition is not met: https://eips.ethereum.org/EIPS/eip-7796
     if code == -32003 || code == -32005 {

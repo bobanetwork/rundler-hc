@@ -5,8 +5,7 @@ RUST_BACKTRACE=1 ETH_POLL_INTERVAL_MILLIS=5000 \
   ../target/debug/rundler node \
   --rpc.port 3300 \
   --metrics.port 8380 \
-  --builder.dropped_status_unsupported \
   --min_stake_value 1000000000000000 \
   --min_unstake_delay 60 \
-  --builder.redis_uri=redis://127.0.0.1:6379 \
+  --signer.redis_uri=redis://127.0.0.1:6379 \
   $@ 2>&1

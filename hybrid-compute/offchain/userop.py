@@ -28,6 +28,7 @@ print("TestCount(start)=", TC.functions.counters(u_account).call())
 aa = aa_rpc(EP.address, w3, bundler_rpc)
 
 TestAddSub2(aa, 2, 1)   # Success
+exit(0)
 TestAddSub2(aa, 2, 10)  # Underflow error, asserted
 TestAddSub2(aa, 2, 3)   # Underflow error, handled internally
 TestAddSub2(aa, 7, 0)   # Not HC

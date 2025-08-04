@@ -18,17 +18,19 @@ use rundler_types::{
     authorization::Eip7702Auth,
     chain::ChainSpec,
     da::{
-        BedrockDAGasUOData as RundlerBedrockDAGasUOData, DAGasUOData as RundlerDAGasUOData,
-        NitroDAGasUOData as RundlerNitroDAGasUOData,
+        BedrockDAGasData as RundlerBedrockDAGasData, DAGasData as RundlerDAGasData,
+        NitroDAGasData as RundlerNitroDAGasData,
     },
     pool::{
-        NewHead as PoolNewHead, PaymasterMetadata as PoolPaymasterMetadata, PoolOperation,
-        Reputation as PoolReputation, ReputationStatus as PoolReputationStatus,
-        StakeStatus as RundlerStakeStatus,
+        AddressUpdate as PoolAddressUpdate, NewHead as PoolNewHead,
+        PaymasterMetadata as PoolPaymasterMetadata, PoolOperation, Reputation as PoolReputation,
+        ReputationStatus as PoolReputationStatus, StakeStatus as RundlerStakeStatus,
     },
-    v0_6, v0_7, Entity as RundlerEntity, EntityInfos, EntityType as RundlerEntityType,
-    EntityUpdate as RundlerEntityUpdate, EntityUpdateType as RundlerEntityUpdateType,
-    StakeInfo as RundlerStakeInfo, UserOperation as _, UserOperationVariant, ValidTimeRange,
+    v0_6, v0_7, BundlerSponsorship as RundlerBundlerSponsorship, Entity as RundlerEntity,
+    EntityInfos, EntityType as RundlerEntityType, EntityUpdate as RundlerEntityUpdate,
+    EntityUpdateType as RundlerEntityUpdateType, StakeInfo as RundlerStakeInfo, UserOperation as _,
+    UserOperationPermissions as RundlerUserOperationPermissions, UserOperationVariant,
+    ValidTimeRange,
 };
 
 tonic::include_proto!("op_pool");
@@ -434,47 +436,48 @@ impl From<&PoolOperation> for MempoolOp {
             expected_code_hash: op.expected_code_hash.to_proto_bytes(),
             sim_block_hash: op.sim_block_hash.to_proto_bytes(),
             account_is_staked: op.account_is_staked,
-            da_gas_data: Some(DaGasUoData::from(&op.da_gas_data)),
+            da_gas_data: Some(DaGasData::from(&op.da_gas_data)),
             filter_id: op.filter_id.clone().unwrap_or_default(),
+            permissions: Some(op.perms.clone().into()),
         }
     }
 }
 
-impl From<&RundlerDAGasUOData> for DaGasUoData {
-    fn from(data: &RundlerDAGasUOData) -> Self {
+impl From<&RundlerDAGasData> for DaGasData {
+    fn from(data: &RundlerDAGasData) -> Self {
         match data {
-            RundlerDAGasUOData::Empty => DaGasUoData {
-                data: Some(da_gas_uo_data::Data::Empty(EmptyUoData {})),
+            RundlerDAGasData::Empty => DaGasData {
+                data: Some(da_gas_data::Data::Empty(EmptyGasData {})),
             },
-            RundlerDAGasUOData::Nitro(data) => DaGasUoData {
-                data: Some(da_gas_uo_data::Data::Nitro(NitroDaGasUoData {
-                    uo_units: data.uo_units.to_proto_bytes(),
+            RundlerDAGasData::Nitro(data) => DaGasData {
+                data: Some(da_gas_data::Data::Nitro(NitroDaGasData {
+                    units: data.units.to_proto_bytes(),
                 })),
             },
-            RundlerDAGasUOData::Bedrock(data) => DaGasUoData {
-                data: Some(da_gas_uo_data::Data::Bedrock(BedrockDaGasUoData {
-                    uo_units: data.uo_units,
+            RundlerDAGasData::Bedrock(data) => DaGasData {
+                data: Some(da_gas_data::Data::Bedrock(BedrockDaGasData {
+                    units: data.units,
                 })),
             },
         }
     }
 }
 
-impl TryFrom<DaGasUoData> for RundlerDAGasUOData {
+impl TryFrom<DaGasData> for RundlerDAGasData {
     type Error = ConversionError;
 
-    fn try_from(data: DaGasUoData) -> Result<Self, Self::Error> {
+    fn try_from(data: DaGasData) -> Result<Self, Self::Error> {
         let ret = match data.data {
-            Some(da_gas_uo_data::Data::Empty(_)) => RundlerDAGasUOData::Empty,
-            Some(da_gas_uo_data::Data::Nitro(NitroDaGasUoData { uo_units })) => {
-                RundlerDAGasUOData::Nitro(RundlerNitroDAGasUOData {
-                    uo_units: from_bytes(&uo_units)?,
+            Some(da_gas_data::Data::Empty(_)) => RundlerDAGasData::Empty,
+            Some(da_gas_data::Data::Nitro(NitroDaGasData { units })) => {
+                RundlerDAGasData::Nitro(RundlerNitroDAGasData {
+                    units: from_bytes(&units)?,
                 })
             }
-            Some(da_gas_uo_data::Data::Bedrock(BedrockDaGasUoData { uo_units })) => {
-                RundlerDAGasUOData::Bedrock(RundlerBedrockDAGasUOData { uo_units })
+            Some(da_gas_data::Data::Bedrock(BedrockDaGasData { units })) => {
+                RundlerDAGasData::Bedrock(RundlerBedrockDAGasData { units })
             }
-            None => RundlerDAGasUOData::Empty,
+            None => RundlerDAGasData::Empty,
         };
 
         Ok(ret)
@@ -522,6 +525,10 @@ impl TryUoFromProto<MempoolOp> for PoolOperation {
                 .context("DA gas data should be set")?
                 .try_into()?,
             filter_id,
+            perms: op
+                .permissions
+                .context("Permissions should be set")?
+                .try_into()?,
         })
     }
 }
@@ -533,6 +540,11 @@ impl TryFrom<NewHead> for PoolNewHead {
         Ok(Self {
             block_hash: from_bytes(&new_head.block_hash)?,
             block_number: new_head.block_number,
+            address_updates: new_head
+                .address_updates
+                .into_iter()
+                .map(PoolAddressUpdate::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 }
@@ -542,6 +554,43 @@ impl From<PoolNewHead> for NewHead {
         Self {
             block_hash: head.block_hash.to_proto_bytes(),
             block_number: head.block_number,
+            address_updates: head
+                .address_updates
+                .into_iter()
+                .map(AddressUpdate::from)
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<AddressUpdate> for PoolAddressUpdate {
+    type Error = ConversionError;
+
+    fn try_from(update: AddressUpdate) -> Result<Self, Self::Error> {
+        Ok(Self {
+            address: from_bytes(&update.address)?,
+            nonce: update.nonce,
+            balance: from_bytes(&update.balance)?,
+            mined_tx_hashes: update
+                .mined_tx_hashes
+                .into_iter()
+                .map(|h| from_bytes(&h))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+impl From<PoolAddressUpdate> for AddressUpdate {
+    fn from(update: PoolAddressUpdate) -> Self {
+        Self {
+            address: update.address.to_proto_bytes(),
+            nonce: update.nonce,
+            balance: update.balance.to_proto_bytes(),
+            mined_tx_hashes: update
+                .mined_tx_hashes
+                .into_iter()
+                .map(|h| h.to_proto_bytes())
+                .collect(),
         }
     }
 }
@@ -564,6 +613,59 @@ impl From<PoolPaymasterMetadata> for PaymasterBalance {
             address: paymaster_metadata.address.to_vec(),
             confirmed_balance: paymaster_metadata.confirmed_balance.to_proto_bytes(),
             pending_balance: paymaster_metadata.pending_balance.to_proto_bytes(),
+        }
+    }
+}
+
+impl TryFrom<UserOperationPermissions> for RundlerUserOperationPermissions {
+    type Error = ConversionError;
+
+    fn try_from(permissions: UserOperationPermissions) -> Result<Self, Self::Error> {
+        Ok(Self {
+            trusted: permissions.trusted,
+            max_allowed_in_pool_for_sender: permissions
+                .max_allowed_in_pool_for_sender
+                .map(|c| c as usize),
+            underpriced_accept_pct: permissions.underpriced_accept_pct,
+            underpriced_bundle_pct: permissions.underpriced_bundle_pct,
+            bundler_sponsorship: permissions
+                .bundler_sponsorship
+                .map(|s| s.try_into())
+                .transpose()?,
+        })
+    }
+}
+
+impl From<RundlerUserOperationPermissions> for UserOperationPermissions {
+    fn from(permissions: RundlerUserOperationPermissions) -> Self {
+        Self {
+            trusted: permissions.trusted,
+            max_allowed_in_pool_for_sender: permissions
+                .max_allowed_in_pool_for_sender
+                .map(|c| c as u64),
+            underpriced_accept_pct: permissions.underpriced_accept_pct,
+            underpriced_bundle_pct: permissions.underpriced_bundle_pct,
+            bundler_sponsorship: permissions.bundler_sponsorship.map(|s| s.into()),
+        }
+    }
+}
+
+impl TryFrom<BundlerSponsorship> for RundlerBundlerSponsorship {
+    type Error = ConversionError;
+
+    fn try_from(sponsorship: BundlerSponsorship) -> Result<Self, Self::Error> {
+        Ok(Self {
+            max_cost: from_bytes(&sponsorship.max_cost)?,
+            valid_until: sponsorship.valid_until,
+        })
+    }
+}
+
+impl From<RundlerBundlerSponsorship> for BundlerSponsorship {
+    fn from(sponsorship: RundlerBundlerSponsorship) -> Self {
+        Self {
+            max_cost: sponsorship.max_cost.to_proto_bytes(),
+            valid_until: sponsorship.valid_until,
         }
     }
 }

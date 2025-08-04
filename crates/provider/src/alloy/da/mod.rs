@@ -13,15 +13,11 @@
 
 use std::sync::Arc;
 
-use alloy_primitives::{Address, Bytes};
-use alloy_provider::Provider as AlloyProvider;
+use alloy_primitives::Bytes;
 use alloy_transport::Transport;
-use rundler_types::{
-    chain::ChainSpec,
-    da::{DAGasBlockData, DAGasOracleType, DAGasUOData},
-};
+use rundler_types::{chain::ChainSpec, da::DAGasOracleType};
 
-use crate::{BlockHashOrNumber, DAGasOracle, DAGasOracleSync, ProviderResult};
+use crate::{AlloyProvider, DAGasOracle, DAGasOracleSync, ZeroDAGasOracle};
 
 mod arbitrum;
 use arbitrum::ArbitrumNitroDAGasOracle;
@@ -29,22 +25,6 @@ mod optimism;
 use optimism::OptimismBedrockDAGasOracle;
 mod local;
 use local::{CachedNitroDAGasOracle, LocalBedrockDAGasOracle};
-
-struct ZeroDAGasOracle;
-
-#[async_trait::async_trait]
-impl DAGasOracle for ZeroDAGasOracle {
-    async fn estimate_da_gas(
-        &self,
-        _data: Bytes,
-        _to: Address,
-        _block: BlockHashOrNumber,
-        _gas_price: u128,
-        _extra_data_len: usize,
-    ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)> {
-        Ok((0, DAGasUOData::Empty, DAGasBlockData::Empty))
-    }
-}
 
 /// Create a DA gas oracle for the given chain spec
 pub fn new_alloy_da_gas_oracle<'a, AP, T>(
@@ -55,7 +35,7 @@ pub fn new_alloy_da_gas_oracle<'a, AP, T>(
     Option<Arc<dyn DAGasOracleSync + 'a>>,
 )
 where
-    AP: AlloyProvider<T> + Clone + 'a,
+    AP: AlloyProvider<T> + 'a,
     T: Transport + Clone,
 {
     match chain_spec.da_gas_oracle_type {
@@ -77,6 +57,7 @@ where
             let oracle = Arc::new(LocalBedrockDAGasOracle::new(
                 chain_spec.da_gas_oracle_contract_address,
                 provider,
+                chain_spec,
             ));
             (oracle.clone(), Some(oracle))
         }
@@ -99,8 +80,9 @@ fn extend_bytes_with_random(data: Bytes, len: usize) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{address, b256, bytes, uint, U256};
-    use alloy_provider::ProviderBuilder;
+    use alloy_primitives::{address, b256, bytes, uint, Address, U256};
+    use alloy_provider::{network::AnyNetwork, Provider, ProviderBuilder};
+    use alloy_rpc_types_eth::BlockHashOrNumber;
     use alloy_sol_types::SolValue;
     use rundler_contracts::v0_7::PackedUserOperation;
 
@@ -209,7 +191,8 @@ mod tests {
         let block = provider.get_block_number().await.unwrap();
 
         let contract_oracle = OptimismBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider.clone());
-        let cached_oracle = LocalBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider);
+        let cached_oracle =
+            LocalBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider, &ChainSpec::default());
 
         let cached_res = cached_e2e(cached_oracle, block, to, uo.clone()).await;
         let contract_res = contract_oracle
@@ -228,14 +211,14 @@ mod tests {
         let block = provider.get_block_number().await.unwrap();
 
         let cached_oracle = CachedNitroDAGasOracle::new(ARB_ORACLE_ADDRESS, provider.clone());
-        let block_data_1 = cached_oracle.block_data(block.into()).await.unwrap();
+        let block_data_1 = cached_oracle.da_block_data(block.into()).await.unwrap();
 
         let uncached_oracle = CachedNitroDAGasOracle::new(ARB_ORACLE_ADDRESS, provider);
-        let block_data_2 = uncached_oracle.block_data(block.into()).await.unwrap();
+        let block_data_2 = uncached_oracle.da_block_data(block.into()).await.unwrap();
 
         assert_eq!(block_data_1, block_data_2);
 
-        let block_data_3 = cached_oracle.block_data(block.into()).await.unwrap();
+        let block_data_3 = cached_oracle.da_block_data(block.into()).await.unwrap();
 
         assert_eq!(block_data_1, block_data_3);
     }
@@ -246,15 +229,20 @@ mod tests {
         let provider = opt_provider();
         let block = provider.get_block_number().await.unwrap();
 
-        let cached_oracle = LocalBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider.clone());
-        let block_data_1 = cached_oracle.block_data(block.into()).await.unwrap();
+        let cached_oracle = LocalBedrockDAGasOracle::new(
+            OPT_ORACLE_ADDRESS,
+            provider.clone(),
+            &ChainSpec::default(),
+        );
+        let block_data_1 = cached_oracle.da_block_data(block.into()).await.unwrap();
 
-        let uncached_oracle = LocalBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider);
-        let block_data_2 = uncached_oracle.block_data(block.into()).await.unwrap();
+        let uncached_oracle =
+            LocalBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider, &ChainSpec::default());
+        let block_data_2 = uncached_oracle.da_block_data(block.into()).await.unwrap();
 
         assert_eq!(block_data_1, block_data_2);
 
-        let block_data_3 = cached_oracle.block_data(block.into()).await.unwrap();
+        let block_data_3 = cached_oracle.da_block_data(block.into()).await.unwrap();
 
         assert_eq!(block_data_1, block_data_3);
     }
@@ -295,18 +283,16 @@ mod tests {
         compare_results(gas_a, gas_b);
     }
 
-    async fn compare_opt_and_local_bedrock(
-        provider: impl AlloyProvider + Clone,
-        block: BlockHashOrNumber,
-    ) {
+    async fn compare_opt_and_local_bedrock(provider: impl AlloyProvider, block: BlockHashOrNumber) {
         let contract_oracle = OptimismBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider.clone());
-        let local_oracle = LocalBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider);
+        let local_oracle =
+            LocalBedrockDAGasOracle::new(OPT_ORACLE_ADDRESS, provider, &ChainSpec::default());
 
         compare_oracles(&contract_oracle, &local_oracle, block).await;
     }
 
     async fn compare_arb_and_cached_on_data(
-        provider: impl AlloyProvider + Clone,
+        provider: impl AlloyProvider,
         block: BlockHashOrNumber,
         data: Bytes,
     ) {
@@ -322,13 +308,14 @@ mod tests {
         to: Address,
         data: Bytes,
     ) -> u128 {
-        let block_data = oracle.block_data(block.into()).await.unwrap();
-        let uo_data = oracle.uo_data(data, to, block.into()).await.unwrap();
+        let block_data = oracle.da_block_data(block.into()).await.unwrap();
+        let uo_data = oracle.da_gas_data(data, to, block.into()).await.unwrap();
         oracle.calc_da_gas_sync(&uo_data, &block_data, 1, 0)
     }
 
-    fn opt_provider() -> impl AlloyProvider + Clone {
+    fn opt_provider() -> impl AlloyProvider {
         ProviderBuilder::new()
+            .network::<AnyNetwork>()
             .on_http(
                 format!("https://opt-sepolia.g.alchemy.com/v2/{}", get_api_key())
                     .parse()
@@ -337,8 +324,9 @@ mod tests {
             .boxed()
     }
 
-    fn arb_provider() -> impl AlloyProvider + Clone {
+    fn arb_provider() -> impl AlloyProvider {
         ProviderBuilder::new()
+            .network::<AnyNetwork>()
             .on_http(
                 format!("https://arb-mainnet.g.alchemy.com/v2/{}", get_api_key())
                     .parse()

@@ -12,16 +12,16 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use alloy_primitives::{Address, Bytes};
-use alloy_provider::Provider as AlloyProvider;
+use alloy_provider::network::AnyNetwork;
 use alloy_sol_types::sol;
 use alloy_transport::Transport;
 use anyhow::Context;
-use rundler_types::da::{DAGasBlockData, DAGasUOData};
+use rundler_types::da::{DAGasBlockData, DAGasData};
 use tracing::instrument;
 use GasPriceOracle::GasPriceOracleInstance;
 
 use super::DAGasOracle;
-use crate::{BlockHashOrNumber, ProviderResult};
+use crate::{AlloyProvider, BlockHashOrNumber, ProviderResult};
 
 // From https://github.com/ethereum-optimism/optimism/blob/f93f9f40adcd448168c6ea27820aeee5da65fcbd/packages/contracts-bedrock/src/L2/GasPriceOracle.sol#L54
 sol! {
@@ -39,7 +39,7 @@ sol! {
 }
 
 pub(super) struct OptimismBedrockDAGasOracle<AP, T> {
-    oracle: GasPriceOracleInstance<T, AP>,
+    oracle: GasPriceOracleInstance<T, AP, AnyNetwork>,
 }
 
 impl<AP, T> OptimismBedrockDAGasOracle<AP, T>
@@ -67,7 +67,7 @@ where
         block: BlockHashOrNumber,
         gas_price: u128,
         extra_data_len: usize,
-    ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)> {
+    ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)> {
         if gas_price == 0 {
             Err(anyhow::anyhow!("gas price cannot be zero"))?;
         }
@@ -90,7 +90,7 @@ where
 
         Ok((
             l1_fee.checked_div(gas_price).unwrap_or(u128::MAX),
-            DAGasUOData::Empty,
+            DAGasData::Empty,
             DAGasBlockData::Empty,
         ))
     }

@@ -12,15 +12,15 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use alloy_primitives::{Address, Bytes};
-use alloy_provider::Provider as AlloyProvider;
+use alloy_provider::network::AnyNetwork;
 use alloy_sol_types::sol;
 use alloy_transport::Transport;
-use rundler_types::da::{DAGasBlockData, DAGasUOData};
+use rundler_types::da::{DAGasBlockData, DAGasData};
 use tracing::instrument;
 use NodeInterface::NodeInterfaceInstance;
 
 use super::DAGasOracle;
-use crate::{BlockHashOrNumber, ProviderResult};
+use crate::{AlloyProvider, BlockHashOrNumber, ProviderResult};
 
 // From https://github.com/OffchainLabs/nitro-contracts/blob/fbbcef09c95f69decabaced3da683f987902f3e2/src/node-interface/NodeInterface.sol#L112
 sol! {
@@ -42,7 +42,7 @@ sol! {
 }
 
 pub(super) struct ArbitrumNitroDAGasOracle<AP, T> {
-    node_interface: NodeInterfaceInstance<T, AP>,
+    node_interface: NodeInterfaceInstance<T, AP, AnyNetwork>,
 }
 
 impl<AP, T> ArbitrumNitroDAGasOracle<AP, T>
@@ -66,16 +66,16 @@ where
     #[instrument(skip_all)]
     async fn estimate_da_gas(
         &self,
-        uo_data: Bytes,
+        data: Bytes,
         to: Address,
         block: BlockHashOrNumber,
         _gas_price: u128,
         extra_data_len: usize,
-    ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)> {
+    ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)> {
         let data = if extra_data_len > 0 {
-            super::extend_bytes_with_random(uo_data, extra_data_len)
+            super::extend_bytes_with_random(data, extra_data_len)
         } else {
-            uo_data
+            data
         };
 
         let ret = self
@@ -86,7 +86,7 @@ where
             .await?;
         Ok((
             ret.gasEstimateForL1 as u128,
-            DAGasUOData::Empty,
+            DAGasData::Empty,
             DAGasBlockData::Empty,
         ))
     }
