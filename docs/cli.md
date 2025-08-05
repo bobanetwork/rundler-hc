@@ -32,8 +32,8 @@ See [chain spec](./architecture/chain_spec.md) for a detailed description of cha
   - env: *NODE_HTTP*
 - `--max_verification_gas`: Maximum verification gas. (default: `5000000`).
   - env: *MAX_VERIFICATION_GAS*
-- `--max_bundle_gas`: Maximum bundle gas. (default: `25000000`).
-  - env: *MAX_BUNDLE_GAS*
+- `--max_uo_cost`: Maximum cost of a UO that the mempool will accept. Optional, defaults to MAX (default: `None`).
+  - env: *MAX_UO_COST*
 - `--min_stake_value`: Minimum stake value. (default: `1000000000000000000`).
   - env: *MIN_STAKE_VALUE*
 - `--min_unstake_delay`: Minimum unstake delay. (default: `84600`).
@@ -46,8 +46,6 @@ See [chain spec](./architecture/chain_spec.md) for a detailed description of cha
   - env: *USER_OPERATION_EVENT_BLOCK_DISTANCE*
 - `--user_operation_event_block_distance_fallback`: Number of blocks to search when falling back during `eth_getUserOperationByHash`/`eth_getUserOperationReceipt` upon initial failure using `user_operation_event_block_distance`. (default: None)
   - env: *USER_OPERATION_EVENT_BLOCK_DISTANCE_FALLBACK*
-- `--max_simulate_handle_ops_gas`: Maximum gas for simulating handle operations. (default: `20000000`).
-  - env: *MAX_SIMULATE_HANDLE_OPS_GAS*
 - `--verification_estimation_gas_fee`: The gas fee to use during verification estimation. (default: `1000000000000` 10K gwei).
   - env: *VERIFICATION_ESTIMATION_GAS_FEE*
   - See [RPC documentation](./architecture/rpc.md#verificationGasLimit-estimation) for details.
@@ -62,6 +60,12 @@ See [chain spec](./architecture/chain_spec.md) for a detailed description of cha
   - env: *PRIORITY_FEE_MODE_VALUE*
 - `--base_fee_accept_percent`: Percentage of the current network fees a user operation must have in order to be accepted into the mempool. (default: `100`).
   - env: *BASE_FEE_ACCEPT_PERCENT*
+- `--pre_verification_gas_accept_percent`: Percentage of the required PVG that a user operation must have in order to be accepted into the mempool. Only applies if there is dynamic PVG, else the full amount is required. (default: `50`)
+  - env: *PRE_VERIFICATION_GAS_ACCEPT_PERCENT*
+- `--execution_gas_limit_efficiency_reject_threshold`: The ratio of execution gas used to gas limit under which to reject UOs upon entry to the mempool (default: `0.0` disabled)
+  - env: *EXECUTION_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD*
+- `--verification_gas_limit_efficiency_reject_threshold`: The ratio of verification gas used to gas limit under which to reject UOs upon entry to the mempool (default: `0.0` disabled)
+  - env: *VERIFICATION_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD*
 - `--aws_region`: AWS region. (default: `us-east-1`).
   - env: *AWS_REGION*
   - (*Only required if using other AWS features*)
@@ -81,16 +85,10 @@ See [chain spec](./architecture/chain_spec.md) for a detailed description of cha
 - `--num_builders_v0_6`: The number of bundle builders to run on entry point v0.6 (default: `1`)
   - env: *NUM_BUILDERS_V0_6*
   - NOTE: ignored if `entry_point_builders_path` is set
-- `--builder_index_offset_v0_6`: If running multiple builder processes, this is the index offset to assign unique indexes to each bundle sender. (default: 0)
-  - env: *BUILDER_INDEX_OFFSET_V0_6*
-  - NOTE: ignored if `entry_point_builders_path` is set
 - `--disable_entry_point_v0_7`: Disable entry point v0.7 support. (default: `false`).
   - env: *DISABLE_ENTRY_POINT_V0_7*
 - `--num_builders_v0_7`: The number of bundle builders to run on entry point v0.7 (default: `1`)
   - env: *NUM_BUILDERS_V0_7*
-  - NOTE: ignored if `entry_point_builders_path` is set
-- `--builder_index_offset_v0_7`: If running multiple builder processes, this is the index offset to assign unique indexes to each bundle sender. (default: 0)
-  - env: *BUILDER_INDEX_OFFSET_V0_7*
   - NOTE: ignored if `entry_point_builders_path` is set
 - `--da_gas_tracking_enabled`: Enable the DA gas tracking feature of the mempool (default: `false`)
   - env: *DA_GAS_TRACKING_ENABLED*
@@ -192,8 +190,6 @@ List of command line options for configuring the Pool.
   - env: *POOL_REPUTATION_TRACKING_ENABLED*
 - `--pool.drop_min_num_blocks`: The minimum number of blocks that a UO must stay in the mempool before it can be requested to be dropped by the user (default: `10`)
   - env: *POOL_DROP_MIN_NUM_BLOCKS*
-- `--pool.gas_limit_efficiency_reject_threshold`: The ratio of gas used to gas limit under which to reject UOs upon entry to the mempool (default: `0.0` disabled)
-  - env: *POOL_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD*
 - `--pool.max_time_in_pool_secs`: The maximum amount of time a UO is allowed to be in the mempool, in seconds. (default: `None`)
   - env: *POOL_MAX_TIME_IN_POOL_SECS*
 

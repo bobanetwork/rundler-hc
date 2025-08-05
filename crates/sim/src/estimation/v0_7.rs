@@ -24,20 +24,21 @@ use rundler_contracts::v0_7::{
     ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE,
 };
 use rundler_provider::{
-    AccountOverride, DAGasProvider, EntryPoint, EvmProvider, SimulationProvider, StateOverride,
+    AccountOverride, DAGasProvider, EntryPoint, EvmProvider, FeeEstimator, SimulationProvider,
+    StateOverride,
 };
 use rundler_types::{
     chain::ChainSpec,
     v0_7::{UserOperation, UserOperationBuilder, UserOperationOptionalGas},
     GasEstimate, UserOperation as _,
 };
-use rundler_utils::math;
+use rundler_utils::{guard_timer::CustomTimerGuard, math};
 use tokio::join;
 use tracing::instrument;
 
-use super::{estimate_verification_gas::GetOpWithLimitArgs, GasEstimationError, Settings};
+use super::{estimate_verification_gas::GetOpWithLimitArgs, GasEstimationError, Metrics, Settings};
 use crate::{
-    gas, CallGasEstimator, CallGasEstimatorImpl, CallGasEstimatorSpecialization, FeeEstimator,
+    gas, CallGasEstimator, CallGasEstimatorImpl, CallGasEstimatorSpecialization,
     VerificationGasEstimator, VerificationGasEstimatorImpl, MIN_CALL_GAS_LIMIT,
 };
 
@@ -50,6 +51,7 @@ pub struct GasEstimator<P, E, VGE, CGE, F> {
     fee_estimator: F,
     verification_gas_estimator: VGE,
     call_gas_estimator: CGE,
+    metrics: Metrics,
 }
 
 #[async_trait::async_trait]
@@ -73,6 +75,7 @@ where
         state_override: StateOverride,
         _at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
+        let _timer = CustomTimerGuard::new(self.metrics.total_gas_estimate_ms.clone());
         self.check_provided_limits(&op)?;
 
         let Self {
@@ -93,13 +96,14 @@ where
             .await
             .map_err(anyhow::Error::from)?;
 
-        let pre_verification_gas = self.estimate_pre_verification_gas(&op, block_hash).await?;
+        let (pre_verification_gas, da_gas) =
+            self.estimate_pre_verification_gas(&op, block_hash).await?;
 
         let mut full_op = op
             .clone()
             .into_user_operation_builder(
                 &self.chain_spec,
-                settings.max_call_gas,
+                settings.max_bundle_execution_gas,
                 settings.max_verification_gas,
                 settings.max_paymaster_verification_gas,
             )
@@ -127,13 +131,11 @@ where
             self.estimate_call_gas(&op, full_op.clone(), block_hash, state_override);
 
         // Not try_join! because then the output is nondeterministic if multiple calls fail.
-        let timer = std::time::Instant::now();
         let (verification_gas_limit, paymaster_verification_gas_limit, call_gas_limit) = join!(
             verification_gas_future,
             paymaster_verification_gas_future,
             call_gas_future
         );
-        tracing::debug!("gas estimation took {}ms", timer.elapsed().as_millis());
 
         let verification_gas_limit = verification_gas_limit?;
         let paymaster_verification_gas_limit = paymaster_verification_gas_limit?;
@@ -148,13 +150,32 @@ where
             .build();
 
         // require that this can fit in a bundle of size 1
-        let gas_limit = op_with_gas.computation_gas_limit(&self.chain_spec, Some(1));
-        if gas_limit > self.settings.max_total_execution_gas {
+        let gas_limit = op_with_gas.bundle_computation_gas_limit(&self.chain_spec, Some(1));
+        if gas_limit > self.settings.max_bundle_execution_gas {
             return Err(GasEstimationError::GasTotalTooLarge(
                 gas_limit,
-                self.settings.max_total_execution_gas,
+                self.settings.max_bundle_execution_gas,
+            ));
+        } else if op_with_gas.calldata_floor_gas_limit() > self.settings.max_bundle_execution_gas {
+            return Err(GasEstimationError::GasTotalTooLarge(
+                op_with_gas.calldata_floor_gas_limit(),
+                self.settings.max_bundle_execution_gas,
             ));
         }
+
+        // if pvg was originally provided, use it, otherwise calculate it using the gas limits from above
+        let pre_verification_gas = if op.pre_verification_gas.is_some_and(|pvg| pvg != 0) {
+            pre_verification_gas
+        } else {
+            rundler_types::increase_required_pvg_with_calldata_floor_gas(
+                &op_with_gas,
+                pre_verification_gas,
+                da_gas,
+                op.max_fill(&self.chain_spec).calldata_floor_gas_limit(),
+                self.settings
+                    .verification_gas_limit_efficiency_reject_threshold,
+            )
+        };
 
         Ok(GasEstimate {
             pre_verification_gas,
@@ -216,6 +237,7 @@ where
             fee_estimator,
             verification_gas_estimator,
             call_gas_estimator,
+            metrics: Metrics::default(),
         }
     }
 }
@@ -249,18 +271,18 @@ where
             }
         }
         if let Some(cl) = optional_op.call_gas_limit {
-            if cl > self.settings.max_call_gas {
+            if cl > self.settings.max_bundle_execution_gas {
                 return Err(GasEstimationError::GasFieldTooLarge(
                     "callGasLimit",
-                    self.settings.max_call_gas,
+                    self.settings.max_bundle_execution_gas,
                 ));
             }
         }
         if let Some(cl) = optional_op.paymaster_post_op_gas_limit {
-            if cl > self.settings.max_call_gas {
+            if cl > self.settings.max_bundle_execution_gas {
                 return Err(GasEstimationError::GasFieldTooLarge(
                     "paymasterPostOpGasLimit",
-                    self.settings.max_call_gas,
+                    self.settings.max_bundle_execution_gas,
                 ));
             }
         }
@@ -284,6 +306,8 @@ where
                 return Ok(vl);
             }
         }
+
+        let _timer = CustomTimerGuard::new(self.metrics.vgl_estimate_ms.clone());
 
         let get_op_with_limit = |op: UserOperation, args: GetOpWithLimitArgs| {
             let GetOpWithLimitArgs { gas, fee } = args;
@@ -335,6 +359,8 @@ where
             }
         }
 
+        let _timer = CustomTimerGuard::new(self.metrics.pvgl_estimate_ms.clone());
+
         let get_op_with_limit = |op: UserOperation, args: GetOpWithLimitArgs| {
             let GetOpWithLimitArgs { gas, fee } = args;
             // set call gas to 0 to avoid simulating the call, keep paymasterPostOpGasLimit as is because it is often checked during verification
@@ -371,19 +397,24 @@ where
         &self,
         optional_op: &UserOperationOptionalGas,
         block_hash: B256,
-    ) -> Result<u128, GasEstimationError> {
+    ) -> Result<(u128, u128), GasEstimationError> {
         if let Some(pvg) = optional_op.pre_verification_gas {
             if pvg != 0 {
-                return Ok(pvg);
+                return Ok((pvg, 0));
             }
         }
+
+        let _timer = CustomTimerGuard::new(self.metrics.pvg_estimate_ms.clone());
 
         // If not using calldata pre-verification gas, return 0
         let gas_price = if !self.chain_spec.da_pre_verification_gas {
             0
         } else {
             // If the user provides fees, use them, otherwise use the current bundle fees
-            let (bundle_fees, base_fee) = self.fee_estimator.required_bundle_fees(None).await?;
+            let (bundle_fees, base_fee) = self
+                .fee_estimator
+                .required_bundle_fees(block_hash, None)
+                .await?;
             if let (Some(max_fee), Some(prio_fee)) = (
                 optional_op.max_fee_per_gas.filter(|fee| *fee != 0),
                 optional_op.max_priority_fee_per_gas.filter(|fee| *fee != 0),
@@ -413,6 +444,7 @@ where
         block_hash: B256,
         state_override: StateOverride,
     ) -> Result<u128, GasEstimationError> {
+        let _timer = CustomTimerGuard::new(self.metrics.cgl_estimate_ms.clone());
         // if set and non-zero, don't estimate
         if let Some(cl) = optional_op.call_gas_limit {
             if cl != 0 {
@@ -432,7 +464,7 @@ where
         // Add a buffer to the call gas limit and clamp
         let call_gas_limit = call_gas_limit
             .add(super::CALL_GAS_BUFFER_VALUE)
-            .clamp(MIN_CALL_GAS_LIMIT, self.settings.max_call_gas);
+            .clamp(MIN_CALL_GAS_LIMIT, self.settings.max_bundle_execution_gas);
 
         Ok(call_gas_limit)
     }
@@ -477,6 +509,7 @@ impl CallGasEstimatorSpecialization for CallGasEstimatorSpecializationV07 {
 
     fn get_op_with_no_call_gas(&self, op: Self::UO) -> Self::UO {
         UserOperationBuilder::from_uo(op, &self.chain_spec)
+            .clear_paymaster()
             .call_gas_limit(0)
             .max_fee_per_gas(0)
             .build()
@@ -535,11 +568,12 @@ mod tests {
 
     use alloy_primitives::{hex, U256};
     use alloy_sol_types::{Revert, SolCall, SolError};
-    use gas::MockFeeEstimator;
     use rundler_contracts::v0_7::{
         CallGasEstimationProxy::TestCallGasResult, IEntryPointSimulations,
     };
-    use rundler_provider::{EvmCall, ExecutionResult, MockEntryPointV0_7, MockEvmProvider};
+    use rundler_provider::{
+        EvmCall, ExecutionResult, MockEntryPointV0_7, MockEvmProvider, MockFeeEstimator,
+    };
     use rundler_types::v0_7::UserOperationOptionalGas;
 
     use super::*;
@@ -615,12 +649,11 @@ mod tests {
     ) -> (GasEstimatorWithMocks, Settings) {
         let settings = Settings {
             max_verification_gas: TEST_MAX_GAS_LIMITS,
-            max_call_gas: TEST_MAX_GAS_LIMITS,
+            max_bundle_execution_gas: TEST_MAX_GAS_LIMITS,
             max_paymaster_verification_gas: TEST_MAX_GAS_LIMITS,
             max_paymaster_post_op_gas: TEST_MAX_GAS_LIMITS,
-            max_total_execution_gas: TEST_MAX_GAS_LIMITS,
-            max_simulate_handle_ops_gas: TEST_MAX_GAS_LIMITS.try_into().unwrap(),
             verification_estimation_gas_fee: 1_000_000_000_000,
+            verification_gas_limit_efficiency_reject_threshold: 0.5,
         };
         let estimator = create_custom_estimator(ChainSpec::default(), provider, entry, settings);
         (estimator, settings)

@@ -44,11 +44,10 @@ use reth_tasks::TaskManager;
 use rpc::RpcCliArgs;
 use rundler_provider::{
     AlloyEntryPointV0_6, AlloyEntryPointV0_7, AlloyEvmProvider, DAGasOracle, DAGasOracleSync,
-    EntryPointProvider, EvmProvider, Providers,
+    EntryPointProvider, EvmProvider, FeeEstimator, Providers,
 };
 use rundler_sim::{
-    EstimationSettings, MempoolConfigs, PrecheckSettings, PriorityFeeMode, SimulationSettings,
-    MIN_CALL_GAS_LIMIT,
+    EstimationSettings, MempoolConfigs, PrecheckSettings, SimulationSettings, MIN_CALL_GAS_LIMIT,
 };
 use rundler_types::{
     chain::{ChainSpec, TryFromWithSpec},
@@ -56,6 +55,7 @@ use rundler_types::{
     hybrid_compute,
     v0_6::UserOperation as UserOperationV0_6,
     v0_7::UserOperation as UserOperationV0_7,
+    PriorityFeeMode,
 };
 
 /// Main entry point for the CLI
@@ -136,7 +136,6 @@ pub async fn run() -> anyhow::Result<()> {
                 opt.common,
                 providers,
                 mempool_configs,
-                entry_point_builders,
             )
             .await?
         }
@@ -250,6 +249,15 @@ pub struct CommonArgs {
     max_verification_gas: u64,
 
     #[arg(
+        long = "max_uo_cost",
+        name = "max_uo_cost",
+        env = "MAX_UO_COST",
+        value_parser = alloy_primitives::utils::parse_ether,
+        global = true
+    )]
+    max_uo_cost: Option<U256>,
+
+    #[arg(
         long = "target_bundle_block_gas_limit_ratio",
         name = "target_bundle_block_gas_limit_ratio",
         default_value = "0.5",
@@ -328,15 +336,6 @@ pub struct CommonArgs {
     user_operation_event_block_distance_fallback: Option<u64>,
 
     #[arg(
-        long = "max_simulate_handle_ops_gas",
-        name = "max_simulate_handle_ops_gas",
-        env = "MAX_SIMULATE_HANDLE_OPS_GAS",
-        default_value = "20000000",
-        global = true
-    )]
-    max_simulate_handle_ops_gas: u64,
-
-    #[arg(
         long = "verification_estimation_gas_fee",
         name = "verification_estimation_gas_fee",
         env = "VERIFICATION_ESTIMATION_GAS_FEE",
@@ -401,6 +400,22 @@ pub struct CommonArgs {
     pre_verification_gas_accept_percent: u32,
 
     #[arg(
+        long = "execution_gas_limit_efficiency_reject_threshold",
+        name = "execution_gas_limit_efficiency_reject_threshold",
+        env = "EXECUTION_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD",
+        default_value = "0.0"
+    )]
+    pub execution_gas_limit_efficiency_reject_threshold: f64,
+
+    #[arg(
+        long = "verification_gas_limit_efficiency_reject_threshold",
+        name = "verification_gas_limit_efficiency_reject_threshold",
+        env = "VERIFICATION_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD",
+        default_value = "0.0"
+    )]
+    pub verification_gas_limit_efficiency_reject_threshold: f64,
+
+    #[arg(
         long = "mempool_config_path",
         name = "mempool_config_path",
         env = "MEMPOOL_CONFIG_PATH",
@@ -445,18 +460,6 @@ pub struct CommonArgs {
     )]
     pub num_builders_v0_6: u64,
 
-    // Ignored if disable_entry_point_v0_6 is true
-    // Ignored if entry_point_builders_path is set
-    // The index offset to apply to the builder index
-    #[arg(
-        long = "builder_index_offset_v0_6",
-        name = "builder_index_offset_v0_6",
-        env = "BUILDER_INDEX_OFFSET_V0_6",
-        default_value = "0",
-        global = true
-    )]
-    pub builder_index_offset_v0_6: u64,
-
     // Ignored if disable_entry_point_v0_7 is true
     // Ignored if entry_point_builders_path is set
     #[arg(
@@ -467,18 +470,6 @@ pub struct CommonArgs {
         global = true
     )]
     pub num_builders_v0_7: u64,
-
-    // Ignored if disable_entry_point_v0_7 is true
-    // Ignored if entry_point_builders_path is set
-    // The index offset to apply to the builder index
-    #[arg(
-        long = "builder_index_offset_v0_7",
-        name = "builder_index_offset_v0_7",
-        env = "BUILDER_INDEX_OFFSET_V0_7",
-        default_value = "0",
-        global = true
-    )]
-    pub builder_index_offset_v0_7: u64,
 
     #[arg(
         long = "da_gas_tracking_enabled",
@@ -566,40 +557,42 @@ fn verify_f64_less_than_one(v: &str) -> Result<f64, String> {
     }
 }
 
-const SIMULATION_GAS_OVERHEAD: u64 = 100_000;
+const SIMULATION_GAS_OVERHEAD: u128 = 100_000;
 
 impl TryFromWithSpec<&CommonArgs> for EstimationSettings {
     type Error = anyhow::Error;
 
     fn try_from_with_spec(value: &CommonArgs, chain_spec: &ChainSpec) -> Result<Self, Self::Error> {
+        let max_bundle_execution_gas =
+            chain_spec.block_gas_limit_mult(value.max_bundle_block_gas_limit_ratio);
+
         if value.max_verification_gas
-            > (value.max_simulate_handle_ops_gas - SIMULATION_GAS_OVERHEAD)
+            > max_bundle_execution_gas.saturating_sub(SIMULATION_GAS_OVERHEAD) as u64
         {
             anyhow::bail!(
                 "max_verification_gas ({}) must be less than max_simulate_handle_ops_gas ({}) by at least {}",
                 value.max_verification_gas,
-                value.max_simulate_handle_ops_gas,
+                max_bundle_execution_gas,
                 SIMULATION_GAS_OVERHEAD
             );
         }
-        let max_call_gas: u128 =
-            (value.max_simulate_handle_ops_gas - value.max_verification_gas) as u128;
-        if max_call_gas < MIN_CALL_GAS_LIMIT {
+
+        if max_bundle_execution_gas < MIN_CALL_GAS_LIMIT {
             anyhow::bail!(
-                "max_simulate_handle_ops_gas ({}) must be greater than max_verification_gas ({}) by at least {MIN_CALL_GAS_LIMIT}",
-                value.max_verification_gas,
-                value.max_simulate_handle_ops_gas,
+                "max_bundle_execution_gas ({}) must be greater than or equal to {}",
+                max_bundle_execution_gas,
+                MIN_CALL_GAS_LIMIT
             );
         }
+
         Ok(Self {
             max_verification_gas: value.max_verification_gas as u128,
-            max_call_gas,
             max_paymaster_verification_gas: value.max_verification_gas as u128,
-            max_paymaster_post_op_gas: max_call_gas,
-            max_total_execution_gas: chain_spec
-                .block_gas_limit_mult(value.max_bundle_block_gas_limit_ratio),
-            max_simulate_handle_ops_gas: value.max_simulate_handle_ops_gas,
+            max_paymaster_post_op_gas: max_bundle_execution_gas,
+            max_bundle_execution_gas,
             verification_estimation_gas_fee: value.verification_estimation_gas_fee,
+            verification_gas_limit_efficiency_reject_threshold: value
+                .verification_gas_limit_efficiency_reject_threshold,
         })
     }
 }
@@ -610,9 +603,9 @@ impl TryFromWithSpec<&CommonArgs> for PrecheckSettings {
     fn try_from_with_spec(value: &CommonArgs, chain_spec: &ChainSpec) -> Result<Self, Self::Error> {
         Ok(Self {
             max_verification_gas: value.max_verification_gas as u128,
-            max_total_execution_gas: chain_spec
+            max_bundle_execution_gas: chain_spec
                 .block_gas_limit_mult(value.max_bundle_block_gas_limit_ratio),
-            bundle_base_fee_overhead_percent: value.bundle_base_fee_overhead_percent,
+            max_uo_cost: value.max_uo_cost.unwrap_or(U256::MAX),
             bundle_priority_fee_overhead_percent: value.bundle_priority_fee_overhead_percent,
             priority_fee_mode: PriorityFeeMode::try_from(
                 value.priority_fee_mode_kind.as_str(),
@@ -620,6 +613,8 @@ impl TryFromWithSpec<&CommonArgs> for PrecheckSettings {
             )?,
             base_fee_accept_percent: value.base_fee_accept_percent,
             pre_verification_gas_accept_percent: value.pre_verification_gas_accept_percent,
+            verification_gas_limit_efficiency_reject_threshold: value
+                .verification_gas_limit_efficiency_reject_threshold,
         })
     }
 }
@@ -765,27 +760,30 @@ pub struct Cli {
 }
 
 #[derive(Clone)]
-pub struct RundlerProviders<P, EP06, EP07, D, DS> {
+pub struct RundlerProviders<P, EP06, EP07, D, DS, F> {
     provider: P,
     ep_v0_6: Option<EP06>,
     ep_v0_7: Option<EP07>,
     da_gas_oracle: D,
     da_gas_oracle_sync: Option<DS>,
+    fee_estimator: F,
 }
 
-impl<P, EP06, EP07, D, DS> Providers for RundlerProviders<P, EP06, EP07, D, DS>
+impl<P, EP06, EP07, D, DS, F> Providers for RundlerProviders<P, EP06, EP07, D, DS, F>
 where
     P: EvmProvider + Clone,
     EP06: EntryPointProvider<UserOperationV0_6> + Clone,
     EP07: EntryPointProvider<UserOperationV0_7> + Clone,
     D: DAGasOracle + Clone,
     DS: DAGasOracleSync + Clone,
+    F: FeeEstimator + Clone,
 {
     type Evm = P;
     type EntryPointV0_6 = EP06;
     type EntryPointV0_7 = EP07;
     type DAGasOracle = D;
     type DAGasOracleSync = DS;
+    type FeeEstimator = F;
 
     fn evm(&self) -> &Self::Evm {
         &self.provider
@@ -806,6 +804,10 @@ where
     fn da_gas_oracle_sync(&self) -> &Option<Self::DAGasOracleSync> {
         &self.da_gas_oracle_sync
     }
+
+    fn fee_estimator(&self) -> &Self::FeeEstimator {
+        &self.fee_estimator
+    }
 }
 
 pub fn construct_providers(
@@ -818,6 +820,12 @@ pub fn construct_providers(
     )?);
     let (da_gas_oracle, da_gas_oracle_sync) =
         rundler_provider::new_alloy_da_gas_oracle(chain_spec, provider.clone());
+    let max_bundle_execution_gas = chain_spec
+        .block_gas_limit_mult(args.max_bundle_block_gas_limit_ratio)
+        .try_into()
+        .expect("max_bundle_execution_gas is too large for u64");
+
+    let evm = AlloyEvmProvider::new(provider.clone());
 
     let ep_v0_6 = if args.disable_entry_point_v0_6 {
         None
@@ -825,8 +833,8 @@ pub fn construct_providers(
         Some(AlloyEntryPointV0_6::new(
             chain_spec.clone(),
             args.max_verification_gas,
-            args.max_simulate_handle_ops_gas,
-            args.max_simulate_handle_ops_gas,
+            max_bundle_execution_gas,
+            max_bundle_execution_gas,
             provider.clone(),
             da_gas_oracle.clone(),
         ))
@@ -838,19 +846,32 @@ pub fn construct_providers(
         Some(AlloyEntryPointV0_7::new(
             chain_spec.clone(),
             args.max_verification_gas,
-            args.max_simulate_handle_ops_gas,
-            args.max_simulate_handle_ops_gas,
+            max_bundle_execution_gas,
+            max_bundle_execution_gas,
             provider.clone(),
             da_gas_oracle.clone(),
         ))
     };
 
+    let priority_fee_mode = PriorityFeeMode::try_from(
+        args.priority_fee_mode_kind.as_str(),
+        args.priority_fee_mode_value,
+    )?;
+    let fee_estimator = Arc::new(rundler_provider::new_fee_estimator(
+        chain_spec,
+        evm.clone(),
+        priority_fee_mode,
+        args.bundle_base_fee_overhead_percent,
+        args.bundle_priority_fee_overhead_percent,
+    ));
+
     Ok(RundlerProviders {
-        provider: AlloyEvmProvider::new(provider),
+        provider: evm,
         ep_v0_6,
         ep_v0_7,
         da_gas_oracle,
         da_gas_oracle_sync,
+        fee_estimator,
     })
 }
 

@@ -173,11 +173,7 @@ impl LocalBuilderServerRunner {
     }
 
     async fn run(mut self, shutdown: GracefulShutdown) {
-        let Ok(mut new_heads) = self
-            .pool
-            .subscribe_new_heads(self.entry_points.clone())
-            .await
-        else {
+        let Ok(mut new_heads) = self.pool.subscribe_new_heads(vec![]).await else {
             tracing::error!("Failed to subscribe to new blocks");
             panic!("failed to subscribe to new blocks");
         };
@@ -192,6 +188,7 @@ impl LocalBuilderServerRunner {
                         tracing::error!("new head stream closed");
                         panic!("new head stream closed");
                     };
+                    tracing::info!("received new head: {:?}", new_head);
 
                     let balances = new_head.address_updates.iter().map(|update| (update.address, update.balance)).collect();
                     self.signer_manager.update_balances(balances);

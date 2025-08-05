@@ -15,7 +15,8 @@ use alloy_primitives::{aliases::U192, Address, Bytes, U256};
 use rundler_types::{
     chain::ChainSpec,
     da::{DAGasBlockData, DAGasData},
-    GasFees, Timestamp, UserOperation, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
+    EntryPointVersion, GasFees, Timestamp, UserOperation, UserOpsPerAggregator, ValidationOutput,
+    ValidationRevert,
 };
 
 use crate::{
@@ -41,7 +42,7 @@ pub enum AggregatorOut {
 }
 
 /// Result of an entry point handle ops call
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HandleOpsOut {
     /// Call succeeded
     Success,
@@ -92,6 +93,9 @@ pub struct ExecutionResult {
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(&, &mut, Rc, Arc, Box)]
 pub trait EntryPoint: Send + Sync {
+    /// Get the version of the entry point contract
+    fn version(&self) -> EntryPointVersion;
+
     /// Get the address of the entry point contract
     fn address(&self) -> &Address;
 
@@ -148,6 +152,7 @@ pub trait BundleHandler: Send + Sync {
         gas_limit: u64,
         gas_fees: GasFees,
         proxy: Option<Address>,
+        validation_only: bool,
     ) -> ProviderResult<HandleOpsOut>;
 
     /// Construct the transaction to send a bundle of operations to the entry point contract
@@ -161,7 +166,8 @@ pub trait BundleHandler: Send + Sync {
     ) -> TransactionRequest;
 
     /// Decode the revert data from a call to `handleOps`
-    fn decode_handle_ops_revert(message: &str, revert_data: &Bytes) -> HandleOpsOut;
+    fn decode_handle_ops_revert(message: &str, revert_data: &Option<Bytes>)
+        -> Option<HandleOpsOut>;
 
     /// Decode user ops from calldata
     fn decode_ops_from_calldata(

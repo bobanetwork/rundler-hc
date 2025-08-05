@@ -14,7 +14,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_network_primitives::TransactionResponse;
@@ -22,7 +22,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolEvent;
 use anyhow::{bail, ensure, Context};
 use futures::future;
-use metrics::{Counter, Gauge};
+use metrics::{Counter, Gauge, Histogram};
 use metrics_derive::Metrics;
 use parking_lot::RwLock;
 use rundler_contracts::{
@@ -244,14 +244,29 @@ impl<P: EvmProvider> Chain<P> {
             .await;
             block_hash = hash;
 
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_millis(0))
+                .as_millis();
+            let block_timestamp_ms = (block.header.timestamp * 1000) as u128;
+            self.metrics
+                .block_discovery_delay_ms
+                .record((now_ms.saturating_sub(block_timestamp_ms)) as f64);
+
             for i in 0..=self.settings.max_sync_retries {
                 if i > 0 {
                     self.metrics.sync_retries.increment(1);
                 }
 
+                let start = Instant::now();
                 let update = self.sync_to_block(block.clone()).await;
                 match update {
-                    Ok(update) => return update,
+                    Ok(update) => {
+                        self.metrics
+                            .block_sync_time_ms
+                            .record(start.elapsed().as_millis() as f64);
+                        return update;
+                    }
                     Err(error) => {
                         warn!("Failed to update chain at block {block_hash:?}: {error:?}");
                     }
@@ -261,10 +276,11 @@ impl<P: EvmProvider> Chain<P> {
             }
 
             warn!(
-                "Failed to update chain at block {:?} after {} retries. Abandoning sync.",
+                "Failed to update chain at block {:?} after {} retries. Abandoning sync and resetting history.",
                 block_hash, self.settings.max_sync_retries
             );
             self.metrics.sync_abandoned.increment(1);
+            self.blocks.clear();
         }
     }
 
@@ -580,18 +596,25 @@ impl<P: EvmProvider> Chain<P> {
     }
 
     async fn load_address_updates(&self, block: &Block) -> anyhow::Result<Vec<AddressUpdate>> {
-        let mut updates = HashMap::new();
+        let mut updates: HashMap<Address, AddressUpdate> =
+            HashMap::from_iter(self.to_track.read().iter().map(|a| {
+                (
+                    *a,
+                    AddressUpdate {
+                        address: *a,
+                        nonce: None,
+                        balance: U256::ZERO,
+                        mined_tx_hashes: vec![],
+                    },
+                )
+            }));
+
         for tx in block.transactions.txns() {
             if self.to_track.read().contains(&tx.from) {
                 let nonce = tx.nonce();
-                let update = updates.entry(tx.from).or_insert(AddressUpdate {
-                    address: tx.from,
-                    nonce,
-                    balance: U256::ZERO, // placeholder
-                    mined_tx_hashes: vec![],
-                });
-                if nonce > update.nonce {
-                    update.nonce = nonce;
+                let update = updates.get_mut(&tx.from).unwrap();
+                if nonce >= update.nonce.unwrap_or(0) {
+                    update.nonce = Some(nonce);
                 }
                 update.mined_tx_hashes.push(tx.inner.tx_hash());
             }
@@ -605,17 +628,14 @@ impl<P: EvmProvider> Chain<P> {
 
         ensure!(
             updates.len() == balances.len(),
-            "updates and balances should have the same length"
+            "tracked addresses and balances should have the same length"
         );
 
-        Ok(updates
-            .into_values()
-            .zip(balances.into_iter())
-            .map(|(mut update, balance)| {
-                update.balance = balance.1;
-                update
-            })
-            .collect())
+        for (address, balance) in balances {
+            updates.get_mut(&address).unwrap().balance = balance;
+        }
+
+        Ok(updates.into_values().collect())
     }
 
     async fn load_events_in_block(
@@ -859,6 +879,10 @@ struct ChainMetrics {
     sync_retries: Counter,
     #[metric(describe = "the count of sync abanded.")]
     sync_abandoned: Counter,
+    #[metric(describe = "the delay in milliseconds between block discovery and its timestamp")]
+    block_discovery_delay_ms: Histogram,
+    #[metric(describe = "the time in milliseconds it takes to sync to a block")]
+    block_sync_time_ms: Histogram,
 }
 
 #[cfg(test)]
@@ -1659,7 +1683,7 @@ mod tests {
                 unmined_entity_balance_updates: vec![],
                 address_updates: vec![AddressUpdate {
                     address: addr(0),
-                    nonce: 0,
+                    nonce: Some(0),
                     balance: U256::from(100),
                     mined_tx_hashes: tx_hashes,
                 }],
@@ -1706,7 +1730,7 @@ mod tests {
                 unmined_entity_balance_updates: vec![],
                 address_updates: vec![AddressUpdate {
                     address: addr(0),
-                    nonce: 1,
+                    nonce: Some(1),
                     balance: U256::from(100),
                     mined_tx_hashes: tx_hashes,
                 }],

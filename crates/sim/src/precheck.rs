@@ -11,27 +11,24 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{cmp, marker::PhantomData, sync::RwLock};
+use std::{cmp, marker::PhantomData};
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use anyhow::Context;
 use arrayvec::ArrayVec;
 #[cfg(feature = "test-utils")]
 use mockall::automock;
-use rundler_provider::{BlockHashOrNumber, DAGasProvider, EntryPoint, EvmProvider};
+use rundler_provider::{DAGasProvider, EntryPoint, EvmProvider, FeeEstimator};
 use rundler_types::{
     chain::ChainSpec,
     da::DAGasData,
     pool::{MempoolError, PrecheckViolation},
-    GasFees, UserOperation, UserOperationPermissions,
+    PriorityFeeMode, UserOperation, UserOperationPermissions,
 };
 use rundler_utils::math;
 use tracing::instrument;
 
-use crate::{
-    gas::{self, FeeEstimator},
-    types::ViolationError,
-};
+use crate::{gas, types::ViolationError};
 
 /// The min cost of a `CALL` with nonzero value, as required by the spec.
 pub const MIN_CALL_GAS_LIMIT: u128 = 9100;
@@ -42,17 +39,6 @@ pub struct PrecheckReturn {
     pub da_gas_data: DAGasData,
     /// The required pre-verification gas for the operation
     pub required_pre_verification_gas: u128,
-}
-
-/// Updated fees from the fee estimator
-#[derive(Copy, Clone, Debug, Default)]
-pub struct FeeUpdate {
-    /// Bundle fees
-    pub bundle_fees: GasFees,
-    /// User operation fees
-    pub uo_fees: GasFees,
-    /// Current base fee
-    pub base_fee: u128,
 }
 
 /// Trait for checking if a user operation is valid before simulation
@@ -68,13 +54,8 @@ pub trait Prechecker: Send + Sync {
         &self,
         op: &Self::UO,
         perms: &UserOperationPermissions,
-        block: BlockHashOrNumber,
+        block_hash: B256,
     ) -> Result<PrecheckReturn, PrecheckError>;
-
-    /// Update and return the bundle fees.
-    ///
-    /// This MUST be called at block boundaries before checking any operations.
-    async fn update_fees(&self) -> anyhow::Result<FeeUpdate>;
 }
 
 /// Precheck error
@@ -105,7 +86,6 @@ pub struct PrecheckerImpl<UO, P, E, F> {
     entry_point: E,
     settings: Settings,
     fee_estimator: F,
-    cache: RwLock<AsyncDataCache>,
     _uo_type: PhantomData<UO>,
 }
 
@@ -114,20 +94,24 @@ pub struct PrecheckerImpl<UO, P, E, F> {
 pub struct Settings {
     /// Maximum verification gas allowed for a user operation
     pub max_verification_gas: u128,
-    /// Maximum total execution gas allowed for a user operation
-    pub max_total_execution_gas: u128,
-    /// The percentage to add to the network pending base fee as a safety margin for fast inclusion.
-    pub bundle_base_fee_overhead_percent: u32,
+    /// Maximum bundle execution gas allowed for a user operation
+    pub max_bundle_execution_gas: u128,
+    /// Maximum cost of a single user operation
+    pub max_uo_cost: U256,
     /// If using a bundle priority fee, the percentage to add to the network/oracle
     /// provided value as a safety margin for fast inclusion.
     pub bundle_priority_fee_overhead_percent: u32,
     /// The priority fee mode to use for calculating required user operation priority fee.
-    pub priority_fee_mode: gas::PriorityFeeMode,
+    pub priority_fee_mode: PriorityFeeMode,
     /// Percentage of the current network base fee that a user operation must have to be accepted into the mempool.
     pub base_fee_accept_percent: u32,
     /// Percentage of the preVerificationGas that a user operation must have to be accepted into the mempool.
     /// Only applied if the chain has dynamic preVerificationGas, else enforced to 100%
     pub pre_verification_gas_accept_percent: u32,
+    /// Reject user operations with gas limit efficiency below this threshold.
+    /// Gas limit efficiency is defined as the ratio of the gas limit to the gas used.
+    /// This applies to all the verification gas limits
+    pub verification_gas_limit_efficiency_reject_threshold: f64,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -135,12 +119,13 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             max_verification_gas: 5_000_000,
-            bundle_base_fee_overhead_percent: 27, // 2 12.5% EIP-1559 increases
+            max_bundle_execution_gas: 10_000_000,
+            max_uo_cost: U256::MAX,
             bundle_priority_fee_overhead_percent: 0,
-            priority_fee_mode: gas::PriorityFeeMode::BaseFeePercent(0),
-            max_total_execution_gas: 10_000_000,
+            priority_fee_mode: PriorityFeeMode::BaseFeePercent(0),
             base_fee_accept_percent: 50,
             pre_verification_gas_accept_percent: 100,
+            verification_gas_limit_efficiency_reject_threshold: 0.5,
         }
     }
 }
@@ -154,11 +139,6 @@ struct AsyncData {
     base_fee: u128,
     min_pre_verification_gas: u128,
     da_gas_data: DAGasData,
-}
-
-#[derive(Copy, Clone, Debug)]
-struct AsyncDataCache {
-    fees: Option<FeeUpdate>,
 }
 
 #[async_trait::async_trait]
@@ -176,9 +156,9 @@ where
         &self,
         op: &Self::UO,
         perms: &UserOperationPermissions,
-        block: BlockHashOrNumber,
+        block_hash: B256,
     ) -> Result<PrecheckReturn, PrecheckError> {
-        let async_data = self.load_async_data(op, block, perms).await?;
+        let async_data = self.load_async_data(op, block_hash, perms).await?;
         let mut violations: Vec<PrecheckViolation> = vec![];
         violations.extend(self.check_init_code(op, &async_data));
         violations.extend(self.check_gas(op, &async_data, perms));
@@ -190,22 +170,6 @@ where
             da_gas_data: async_data.da_gas_data,
             required_pre_verification_gas: async_data.min_pre_verification_gas,
         })
-    }
-
-    #[instrument(skip_all)]
-    async fn update_fees(&self) -> anyhow::Result<FeeUpdate> {
-        let (bundle_fees, base_fee) = self.fee_estimator.required_bundle_fees(None).await?;
-        let uo_fees = self.fee_estimator.required_op_fees(bundle_fees);
-        let fee_update = FeeUpdate {
-            bundle_fees,
-            uo_fees,
-            base_fee,
-        };
-
-        let mut cache = self.cache.write().unwrap();
-        cache.fees = Some(fee_update);
-
-        Ok(fee_update)
     }
 }
 
@@ -230,7 +194,6 @@ where
             entry_point,
             settings,
             fee_estimator,
-            cache: RwLock::new(AsyncDataCache { fees: None }),
             _uo_type: PhantomData,
         }
     }
@@ -276,7 +239,8 @@ where
     ) -> ArrayVec<PrecheckViolation, 6> {
         let Settings {
             max_verification_gas,
-            max_total_execution_gas,
+            max_bundle_execution_gas,
+            max_uo_cost,
             ..
         } = self.settings;
         let AsyncData {
@@ -295,11 +259,16 @@ where
 
         // Compute the worst case total gas limit by assuming the UO is in its own bundle.
         // This is conservative and potentially may invalidate some very large UOs that would otherwise be valid.
-        let gas_limit = op.computation_gas_limit(&self.chain_spec, Some(1));
-        if gas_limit > max_total_execution_gas {
+        let gas_limit = op.bundle_computation_gas_limit(&self.chain_spec, Some(1));
+        if gas_limit > max_bundle_execution_gas {
             violations.push(PrecheckViolation::TotalGasLimitTooHigh(
                 gas_limit,
-                max_total_execution_gas,
+                max_bundle_execution_gas,
+            ))
+        } else if op.calldata_floor_gas_limit() > max_bundle_execution_gas {
+            violations.push(PrecheckViolation::TotalGasLimitTooHigh(
+                op.calldata_floor_gas_limit(),
+                max_bundle_execution_gas,
             ))
         }
         if op.call_gas_limit() < MIN_CALL_GAS_LIMIT {
@@ -315,6 +284,14 @@ where
         }
 
         // NOTE: only fee checks below this short circuit
+
+        // Check if the total gas fee of this op is too high
+        if op.max_gas_cost() > max_uo_cost {
+            violations.push(PrecheckViolation::OverMaxCost(
+                op.max_gas_cost(),
+                max_uo_cost,
+            ));
+        }
 
         // if preVerificationGas is dynamic, then allow for the percentage buffer
         // and check if the preVerificationGas is at least the minimum.
@@ -396,10 +373,10 @@ where
     async fn load_async_data(
         &self,
         op: &UO,
-        block: BlockHashOrNumber,
+        block_hash: B256,
         perms: &UserOperationPermissions,
     ) -> anyhow::Result<AsyncData> {
-        let FeeUpdate { base_fee, .. } = self.get_fees().await?;
+        let base_fee = self.get_base_fee(block_hash).await?;
 
         let (
             factory_exists,
@@ -412,7 +389,7 @@ where
             self.is_contract(Some(op.sender())),
             self.is_contract(op.paymaster()),
             self.get_payer_funds(op),
-            self.get_required_pre_verification_gas(op.clone(), block, base_fee, perms)
+            self.get_required_pre_verification_gas(op.clone(), block_hash, base_fee, perms)
         )?;
         Ok(AsyncData {
             factory_exists,
@@ -470,18 +447,19 @@ where
     }
 
     #[instrument(skip_all)]
-    async fn get_fees(&self) -> anyhow::Result<FeeUpdate> {
-        if let Some(fees) = self.cache.read().unwrap().fees {
-            return Ok(fees);
-        }
-        self.update_fees().await
+    async fn get_base_fee(&self, block_hash: B256) -> anyhow::Result<u128> {
+        let (_, base_fee) = self
+            .fee_estimator
+            .required_bundle_fees(block_hash, None)
+            .await?;
+        Ok(base_fee)
     }
 
     #[instrument(skip_all)]
     async fn get_required_pre_verification_gas(
         &self,
         op: UO,
-        block: BlockHashOrNumber,
+        block_hash: B256,
         base_fee: u128,
         perms: &UserOperationPermissions,
     ) -> anyhow::Result<(u128, DAGasData)> {
@@ -493,8 +471,10 @@ where
             &self.chain_spec,
             &self.entry_point,
             &op,
-            block,
+            block_hash,
             base_fee,
+            self.settings
+                .verification_gas_limit_efficiency_reject_threshold,
         )
         .await
     }
@@ -505,8 +485,7 @@ mod tests {
     use std::sync::Arc;
 
     use alloy_primitives::{address, bytes, Bytes};
-    use gas::MockFeeEstimator;
-    use rundler_provider::{MockEntryPointV0_6, MockEvmProvider};
+    use rundler_provider::{MockEntryPointV0_6, MockEvmProvider, MockFeeEstimator};
     use rundler_types::{
         v0_6::{UserOperationBuilder, UserOperationRequiredFields},
         BundlerSponsorship, UserOperation as _,
@@ -581,12 +560,13 @@ mod tests {
     async fn test_check_gas() {
         let test_settings = Settings {
             max_verification_gas: 5_000_000,
-            max_total_execution_gas: 10_000_000,
-            bundle_base_fee_overhead_percent: 27,
+            max_bundle_execution_gas: 10_000_000,
+            max_uo_cost: U256::MAX,
             bundle_priority_fee_overhead_percent: 0,
-            priority_fee_mode: gas::PriorityFeeMode::BaseFeePercent(100),
+            priority_fee_mode: PriorityFeeMode::BaseFeePercent(100),
             base_fee_accept_percent: 100,
             pre_verification_gas_accept_percent: 100,
+            verification_gas_limit_efficiency_reject_threshold: 0.5,
         };
 
         let (cs, provider, entry_point, fee_estimator) = create_base_config();
@@ -623,7 +603,7 @@ mod tests {
             &UserOperationPermissions::default(),
         );
 
-        let total_gas_limit = op.gas_limit(&cs, Some(1));
+        let total_gas_limit = op.bundle_gas_limit(&cs, Some(1));
 
         assert_eq!(
             res,
@@ -684,7 +664,7 @@ mod tests {
     async fn test_check_fees() {
         let settings = Settings {
             base_fee_accept_percent: 80,
-            priority_fee_mode: gas::PriorityFeeMode::PriorityFeeIncreasePercent(0),
+            priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
             ..Default::default()
         };
 
@@ -723,7 +703,7 @@ mod tests {
     async fn test_check_fees_too_low() {
         let settings = Settings {
             base_fee_accept_percent: 80,
-            priority_fee_mode: gas::PriorityFeeMode::PriorityFeeIncreasePercent(0),
+            priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
             ..Default::default()
         };
 
@@ -762,7 +742,7 @@ mod tests {
     async fn test_check_fees_min() {
         let settings = Settings {
             base_fee_accept_percent: 100,
-            priority_fee_mode: gas::PriorityFeeMode::PriorityFeeIncreasePercent(0),
+            priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
             ..Default::default()
         };
 
@@ -807,7 +787,7 @@ mod tests {
     async fn test_pvg_too_low() {
         let settings = Settings {
             base_fee_accept_percent: 80,
-            priority_fee_mode: gas::PriorityFeeMode::PriorityFeeIncreasePercent(0),
+            priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
             ..Default::default()
         };
 
@@ -849,7 +829,7 @@ mod tests {
     async fn test_check_fees_relaxed() {
         let settings = Settings {
             base_fee_accept_percent: 80,
-            priority_fee_mode: gas::PriorityFeeMode::PriorityFeeIncreasePercent(0),
+            priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
             ..Default::default()
         };
 
@@ -893,7 +873,7 @@ mod tests {
     async fn test_check_fees_relaxed_underpriced() {
         let settings = Settings {
             base_fee_accept_percent: 80,
-            priority_fee_mode: gas::PriorityFeeMode::PriorityFeeIncreasePercent(0),
+            priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
             ..Default::default()
         };
 
@@ -948,7 +928,7 @@ mod tests {
     async fn test_bundler_sponsorship_skip_fee_check() {
         let settings = Settings {
             base_fee_accept_percent: 80,
-            priority_fee_mode: gas::PriorityFeeMode::PriorityFeeIncreasePercent(0),
+            priority_fee_mode: PriorityFeeMode::PriorityFeeIncreasePercent(0),
             ..Default::default()
         };
 
@@ -985,6 +965,81 @@ mod tests {
         };
 
         let res = prechecker.check_gas(&op, &async_data, &perms);
+        assert!(res.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_max_uo_cost_fail() {
+        let settings = Settings {
+            max_uo_cost: U256::from(1_000_000_000), // 1 gwei
+            ..Default::default()
+        };
+
+        let (cs, provider, entry_point, fee_estimator) = create_base_config();
+        let provider = Arc::new(provider);
+        let prechecker =
+            PrecheckerImpl::new(cs.clone(), provider, entry_point, fee_estimator, settings);
+
+        let mut async_data = get_test_async_data();
+        async_data.base_fee = 1_000;
+
+        // Create a UO with a high gas cost that exceeds max_uo_cost
+        let op = UserOperationBuilder::new(
+            &cs,
+            UserOperationRequiredFields {
+                max_fee_per_gas: 1_000,
+                max_priority_fee_per_gas: 100,
+                call_gas_limit: 1_000_000,
+                verification_gas_limit: 1_000_000,
+                pre_verification_gas: 1_000_000,
+                ..Default::default()
+            }, // max gas cost 3 gwei
+        )
+        .build();
+
+        let res = prechecker.check_gas(&op, &async_data, &UserOperationPermissions::default());
+
+        // Calculate expected max gas cost
+        let max_gas_cost = op.max_gas_cost();
+        let mut expected = ArrayVec::<PrecheckViolation, 6>::new();
+        expected.push(PrecheckViolation::OverMaxCost(
+            max_gas_cost,
+            U256::from(1_000_000_000),
+        ));
+
+        assert_eq!(res, expected);
+    }
+
+    #[tokio::test]
+    async fn test_max_uo_cost_pass() {
+        let settings = Settings {
+            max_uo_cost: U256::from(5_000_000_000_u128), // 5 gwei
+            ..Default::default()
+        };
+
+        let (cs, provider, entry_point, fee_estimator) = create_base_config();
+        let provider = Arc::new(provider);
+        let prechecker =
+            PrecheckerImpl::new(cs.clone(), provider, entry_point, fee_estimator, settings);
+
+        let mut async_data = get_test_async_data();
+        async_data.base_fee = 1_000;
+
+        // Create a UO with a high gas cost that exceeds max_uo_cost
+        let op = UserOperationBuilder::new(
+            &cs,
+            UserOperationRequiredFields {
+                max_fee_per_gas: 1_000,
+                max_priority_fee_per_gas: 100,
+                call_gas_limit: 1_000_000,
+                verification_gas_limit: 1_000_000,
+                pre_verification_gas: 1_000_000,
+                ..Default::default()
+            }, // max gas cost 3 gwei
+        )
+        .build();
+
+        let res = prechecker.check_gas(&op, &async_data, &UserOperationPermissions::default());
         assert!(res.is_empty());
     }
 }

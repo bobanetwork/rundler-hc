@@ -12,6 +12,8 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use alloy_primitives::{Address, Bytes};
+use metrics::Histogram;
+use metrics_derive::Metrics;
 #[cfg(feature = "test-utils")]
 use mockall::automock;
 use rundler_provider::{ProviderError, StateOverride};
@@ -91,30 +93,46 @@ pub trait GasEstimator: Send + Sync {
 pub struct Settings {
     /// The maximum amount of gas that can be used for the verification step of a user operation
     pub max_verification_gas: u128,
-    /// The maximum amount of gas that can be used for the call step of a user operation
-    pub max_call_gas: u128,
     /// The maximum amount of gas that can be used for the paymaster verification step of a user operation
     pub max_paymaster_verification_gas: u128,
     /// The maximum amount of gas that can be used for the paymaster post op step of a user operation
     pub max_paymaster_post_op_gas: u128,
-    /// The maximum amount of total execution gas to check after estimation
-    pub max_total_execution_gas: u128,
-    /// The maximum amount of gas that can be used in a call to `simulateHandleOps`
-    pub max_simulate_handle_ops_gas: u64,
+    /// The maximum amount of execution gas in a bundle
+    pub max_bundle_execution_gas: u128,
     /// The gas fee to use during verification gas estimation, required to be held by the fee-payer
     /// during estimation. If using a paymaster, the fee-payer must have 3x this value.
     /// As the gas limit is varied during estimation, the fee is held constant by varying the
     /// gas price.
     /// Clients can use state overrides to set the balance of the fee-payer to at least this value.
     pub verification_estimation_gas_fee: u128,
+    /// The threshold for the verification gas limit efficiency reject
+    pub verification_gas_limit_efficiency_reject_threshold: f64,
 }
 
 impl Settings {
     /// Check if the settings are valid
     pub fn validate(&self) -> Option<String> {
-        if self.max_call_gas < MIN_CALL_GAS_LIMIT {
-            return Some("max_call_gas field cannot be lower than MIN_CALL_GAS_LIMIT".to_string());
+        if self.max_bundle_execution_gas < MIN_CALL_GAS_LIMIT {
+            return Some(
+                "max_bundle_execution_gas field cannot be lower than MIN_CALL_GAS_LIMIT"
+                    .to_string(),
+            );
         }
         None
     }
+}
+
+#[derive(Metrics)]
+#[metrics(scope = "gas_estimator")]
+struct Metrics {
+    #[metric(describe = "the distribution of total gas estimate time.")]
+    total_gas_estimate_ms: Histogram,
+    #[metric(describe = "the distribution of pvg estimate time.")]
+    pvg_estimate_ms: Histogram,
+    #[metric(describe = "the distribution of vgl estimate time.")]
+    vgl_estimate_ms: Histogram,
+    #[metric(describe = "the distribution of cgl estimate time.")]
+    cgl_estimate_ms: Histogram,
+    #[metric(describe = "the distribution of pvgl estimate time.")]
+    pvgl_estimate_ms: Histogram,
 }

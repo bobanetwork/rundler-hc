@@ -94,12 +94,12 @@ pub enum MempoolError {
     /// The operation drop attempt too soon after being added to the pool
     #[error("Operation drop attempt too soon after being added to the pool. Added at {0}, attempted to drop at {1}, must wait {2} blocks.")]
     OperationDropTooSoon(u64, u64, u64),
-    /// Pre-op gas limit efficiency too low
-    #[error("Pre-op gas limit efficiency too low. Required: {0}, Actual: {1}")]
-    PreOpGasLimitEfficiencyTooLow(f32, f32),
+    /// Verification gas limit efficiency too low
+    #[error("Verification gas limit efficiency too low. Required: {0}, Actual: {1}")]
+    VerificationGasLimitEfficiencyTooLow(f64, f64),
     /// Execution gas limit efficiency too low
     #[error("Execution gas limit efficiency too low. Required: {0}, Actual: {1}")]
-    ExecutionGasLimitEfficiencyTooLow(f32, f32),
+    ExecutionGasLimitEfficiencyTooLow(f64, f64),
     /// Too many expected storage slots
     #[error("Too many expected storage slots. Maximum: {0}, Actual: {1}")]
     TooManyExpectedStorageSlots(usize, usize),
@@ -154,6 +154,9 @@ pub enum PrecheckViolation {
     /// The Uo contains both factory and authorization tuple.
     #[display("Factory must be empty when authorization contract is set")]
     FactoryMustBeEmpty(Address),
+    /// The UO's maximum cost is above the max bundle fee
+    #[display("UO's maximum cost is {0} but must be at most {1}")]
+    OverMaxCost(U256, U256),
 }
 
 /// All possible simulation violations

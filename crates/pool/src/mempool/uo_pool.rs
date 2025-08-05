@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{collections::HashSet, sync::Arc};
 
 use alloy_primitives::{utils::format_units, Address, Bytes, B256, U256};
 use anyhow::Context;
@@ -21,17 +21,18 @@ use metrics::{Counter, Gauge, Histogram};
 use metrics_derive::Metrics;
 use parking_lot::RwLock;
 use rundler_provider::{
-    DAGasOracleSync, EvmProvider, ProvidersWithEntryPointT, SimulationProvider, StateOverride,
+    DAGasOracleSync, EvmProvider, FeeEstimator, ProvidersWithEntryPointT, SimulationProvider,
+    StateOverride,
 };
-use rundler_sim::{FeeUpdate, MempoolConfig, Prechecker, Simulator};
+use rundler_sim::{MempoolConfig, Prechecker, Simulator};
 use rundler_types::{
     pool::{
         MempoolError, PaymasterMetadata, PoolOperation, Reputation, ReputationStatus, StakeStatus,
     },
-    Entity, EntityUpdate, EntityUpdateType, EntryPointVersion, UserOperation, UserOperationId,
-    UserOperationPermissions, UserOperationVariant,
+    Entity, EntityUpdate, EntityUpdateType, EntryPointVersion, GasFees, UserOperation,
+    UserOperationId, UserOperationPermissions, UserOperationVariant,
 };
-use rundler_utils::emit::WithEntryPoint;
+use rundler_utils::{emit::WithEntryPoint, guard_timer::CustomTimerGuard};
 use tokio::sync::broadcast;
 use tonic::async_trait;
 use tracing::{info, instrument};
@@ -68,7 +69,9 @@ struct UoPoolState<D> {
     throttled_ops: HashSet<B256>,
     block_number: u64,
     block_hash: B256,
-    gas_fees: FeeUpdate,
+    bundle_fees: GasFees,
+    uo_fees: GasFees,
+    base_fee: u128,
 }
 
 impl<UP, EP> UoPool<UP, EP>
@@ -96,7 +99,9 @@ where
                 throttled_ops: HashSet::new(),
                 block_number: 0,
                 block_hash: B256::ZERO,
-                gas_fees: FeeUpdate::default(),
+                bundle_fees: GasFees::default(),
+                uo_fees: GasFees::default(),
+                base_fee: 0,
             }),
             reputation,
             paymaster,
@@ -159,7 +164,7 @@ where
         block_hash: B256,
     ) -> MempoolResult<()> {
         // Check call gas limit efficiency only if needed
-        if self.config.gas_limit_efficiency_reject_threshold > 0.0 {
+        if self.config.execution_gas_limit_efficiency_reject_threshold > 0.0 {
             // Node clients set base_fee to 0 during eth_call.
             // Geth: https://github.com/ethereum/go-ethereum/blob/a5fe7353cff959d6fcfcdd9593de19056edb9bdb/internal/ethapi/api.go#L1202
             // Reth: https://github.com/paradigmxyz/reth/blob/4d3b35dbd24c3a5c6b1a4f7bd86b1451e8efafcc/crates/rpc/rpc-eth-api/src/helpers/call.rs#L1098
@@ -210,11 +215,12 @@ where
                     let execution_gas_used = total_gas_used - execution_res.pre_op_gas;
 
                     let execution_gas_efficiency =
-                        execution_gas_used as f32 / execution_gas_limit as f32;
-                    if execution_gas_efficiency < self.config.gas_limit_efficiency_reject_threshold
+                        execution_gas_used as f64 / execution_gas_limit as f64;
+                    if execution_gas_efficiency
+                        < self.config.execution_gas_limit_efficiency_reject_threshold
                     {
                         return Err(MempoolError::ExecutionGasLimitEfficiencyTooLow(
-                            self.config.gas_limit_efficiency_reject_threshold,
+                            self.config.execution_gas_limit_efficiency_reject_threshold,
                             execution_gas_efficiency,
                         ));
                     }
@@ -234,6 +240,7 @@ where
 {
     #[instrument(skip_all)]
     async fn on_chain_update(&self, update: &ChainUpdate) {
+        let _timer = CustomTimerGuard::new(self.metrics.update_process_time_ms.clone());
         let deduped_ops = update.deduped_ops();
         let mined_ops = deduped_ops
             .mined_ops
@@ -355,16 +362,25 @@ where
             .increment(unmined_op_count);
 
         // update required bundle fees and update metrics
-        match self.pool_providers.prechecker().update_fees().await {
-            Ok(fees) => {
-                let max_fee = match format_units(fees.bundle_fees.max_fee_per_gas, "gwei") {
+        match self
+            .ep_providers
+            .fee_estimator()
+            .required_bundle_fees(update.latest_block_hash, None)
+            .await
+        {
+            Ok((bundle_fees, base_fee)) => {
+                let uo_fees = self
+                    .ep_providers
+                    .fee_estimator()
+                    .required_op_fees(bundle_fees);
+                let max_fee = match format_units(bundle_fees.max_fee_per_gas, "gwei") {
                     Ok(s) => s.parse::<f64>().unwrap_or_default(),
                     Err(_) => 0.0,
                 };
                 self.metrics.current_max_fee_gwei.set(max_fee);
 
                 let max_priority_fee =
-                    match format_units(fees.bundle_fees.max_priority_fee_per_gas, "gwei") {
+                    match format_units(bundle_fees.max_priority_fee_per_gas, "gwei") {
                         Ok(s) => s.parse::<f64>().unwrap_or_default(),
                         Err(_) => 0.0,
                     };
@@ -372,7 +388,7 @@ where
                     .current_max_priority_fee_gwei
                     .set(max_priority_fee);
 
-                let base_fee_f64 = match format_units(fees.base_fee, "gwei") {
+                let base_fee_f64 = match format_units(base_fee, "gwei") {
                     Ok(s) => s.parse::<f64>().unwrap_or_default(),
                     Err(_) => 0.0,
                 };
@@ -383,7 +399,9 @@ where
                     let mut state = self.state.write();
                     state.block_number = update.latest_block_number;
                     state.block_hash = update.latest_block_hash;
-                    state.gas_fees = fees;
+                    state.bundle_fees = bundle_fees;
+                    state.uo_fees = uo_fees;
+                    state.base_fee = base_fee;
                 }
             }
             Err(e) => {
@@ -413,7 +431,6 @@ where
             None
         };
 
-        let start = Instant::now();
         {
             let mut state = self.state.write();
             state
@@ -448,22 +465,16 @@ where
             }
 
             // pool maintenance
-            let gas_fees = state.gas_fees;
+            let uo_fees = state.uo_fees;
+            let base_fee = state.base_fee;
             state.pool.do_maintenance(
                 update.latest_block_number,
                 update.latest_block_timestamp,
                 da_block_data.as_ref(),
-                gas_fees,
+                uo_fees,
+                base_fee,
             );
         }
-        let maintenance_time = start.elapsed();
-        tracing::debug!(
-            "Pool maintenance took {:?} µs",
-            maintenance_time.as_micros()
-        );
-        self.ep_specific_metrics
-            .maintenance_time
-            .record(maintenance_time.as_micros() as f64);
     }
 
     fn entry_point_version(&self) -> EntryPointVersion {
@@ -580,7 +591,7 @@ where
         let precheck_ret = self
             .pool_providers
             .prechecker()
-            .check(&versioned_op, &perms, block_hash.into())
+            .check(&versioned_op, &perms, block_hash)
             .await?;
 
         // Only let ops with successful simulations through
@@ -610,12 +621,31 @@ where
             .check_associated_storage(&sim_result.associated_addresses, &op)?;
 
         // Check pre op gas limit efficiency
-        let pre_op_gas_efficiency = sim_result.pre_op_gas as f32 / op.pre_op_gas_limit() as f32;
-        if pre_op_gas_efficiency < self.config.gas_limit_efficiency_reject_threshold {
-            return Err(MempoolError::PreOpGasLimitEfficiencyTooLow(
-                self.config.gas_limit_efficiency_reject_threshold,
-                pre_op_gas_efficiency,
-            ));
+        if self
+            .config
+            .verification_gas_limit_efficiency_reject_threshold
+            > 0.0
+        {
+            let verification_gas_used = sim_result
+                .pre_op_gas
+                .saturating_sub(op.pre_verification_gas());
+
+            let verification_gas_efficiency =
+                verification_gas_used as f64 / op.total_verification_gas_limit() as f64;
+
+            let effective_verification_gas_limit_efficiency_reject_threshold = op
+                .effective_verification_gas_limit_efficiency_reject_threshold(
+                    self.config
+                        .verification_gas_limit_efficiency_reject_threshold,
+                );
+            if verification_gas_efficiency
+                < effective_verification_gas_limit_efficiency_reject_threshold
+            {
+                return Err(MempoolError::VerificationGasLimitEfficiencyTooLow(
+                    effective_verification_gas_limit_efficiency_reject_threshold,
+                    verification_gas_efficiency,
+                ));
+            }
         }
 
         let filter_id = self.mempool_config.match_filter(&op);
@@ -678,7 +708,7 @@ where
         // Add op to pool
         let hash = {
             let mut state = self.state.write();
-            let base_fee = state.gas_fees.base_fee;
+            let base_fee = state.base_fee;
             let hash = state.pool.add_operation(
                 pool_op.clone(),
                 base_fee,
@@ -820,33 +850,15 @@ where
     fn best_operations(
         &self,
         max: usize,
-        shard_index: u64,
         filter_id: Option<String>,
     ) -> MempoolResult<Vec<Arc<PoolOperation>>> {
-        let Some(&num_shards) = self
-            .config
-            .num_shards_by_filter_id
-            .get(filter_id.as_ref().unwrap_or(&"".to_string()))
-        else {
-            return Err(anyhow::anyhow!("Invalid filter ID").into());
-        };
-
-        if shard_index >= num_shards {
-            return Err(anyhow::anyhow!("Invalid shard ID").into());
-        }
-
         // get the best operations from the pool
         let state = self.state.read();
         let ordered_ops = state.pool.best_operations();
 
         Ok(ordered_ops
             .into_iter()
-            .filter(|op| {
-                let sender_num = U256::from_be_bytes(op.uo.sender().into_word().into());
-                (filter_id == op.filter_id)
-                    && ((num_shards == 1)
-                        || (sender_num % U256::from(num_shards) == U256::from(shard_index)))
-            })
+            .filter(|op| filter_id == op.filter_id)
             .take(max)
             .collect())
     }
@@ -963,8 +975,6 @@ struct UoPoolMetricsEPSpecific {
     removed_operations: Counter,
     #[metric(describe = "the count of removed entities.")]
     removed_entities: Counter,
-    #[metric(describe = "time to run pool maintenance in µs.")]
-    maintenance_time: Histogram,
 }
 
 #[derive(Metrics)]
@@ -976,6 +986,8 @@ struct UoPoolMetrics {
     current_max_priority_fee_gwei: Gauge,
     #[metric(describe = "the base fee of current block.")]
     current_base_fee: Gauge,
+    #[metric(describe = "the time in milliseconds it takes to process a chain update.")]
+    update_process_time_ms: Histogram,
 }
 
 #[cfg(test)]
@@ -988,7 +1000,7 @@ mod tests {
     use mockall::Sequence;
     use rundler_provider::{
         DepositInfo, ExecutionResult, MockDAGasOracleSync, MockEntryPointV0_6, MockEvmProvider,
-        ProvidersWithEntryPoint,
+        MockFeeEstimator, ProvidersWithEntryPoint,
     };
     use rundler_sim::{
         MockPrechecker, MockSimulator, PrecheckError, PrecheckReturn, PrecheckSettings,
@@ -1026,9 +1038,9 @@ mod tests {
             .add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .unwrap();
-        check_ops(pool.best_operations(1, 0, None).unwrap(), uos);
+        check_ops(pool.best_operations(1, None).unwrap(), uos);
         pool.remove_operations(&[hash]);
-        assert_eq!(pool.best_operations(1, 0, None).unwrap(), vec![]);
+        assert_eq!(pool.best_operations(1, None).unwrap(), vec![]);
     }
 
     #[tokio::test]
@@ -1049,9 +1061,9 @@ mod tests {
                 .unwrap();
             hashes.push(hash);
         }
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos);
+        check_ops(pool.best_operations(3, None).unwrap(), uos);
         pool.remove_operations(&hashes);
-        assert_eq!(pool.best_operations(3, 0, None).unwrap(), vec![]);
+        assert_eq!(pool.best_operations(3, None).unwrap(), vec![]);
     }
 
     #[tokio::test]
@@ -1070,9 +1082,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos);
+        check_ops(pool.best_operations(3, None).unwrap(), uos);
         pool.clear_state(true, true, true);
-        assert_eq!(pool.best_operations(3, 0, None).unwrap(), vec![]);
+        assert_eq!(pool.best_operations(3, None).unwrap(), vec![]);
     }
 
     #[tokio::test]
@@ -1117,7 +1129,7 @@ mod tests {
             entrypoint,
         )
         .await;
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos.clone());
+        check_ops(pool.best_operations(3, None).unwrap(), uos.clone());
 
         pool.on_chain_update(&ChainUpdate {
             latest_block_number: 1,
@@ -1151,7 +1163,7 @@ mod tests {
         })
         .await;
 
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos[1..].to_vec());
+        check_ops(pool.best_operations(3, None).unwrap(), uos[1..].to_vec());
 
         let paymaster_balance = pool.paymaster.paymaster_balance(paymaster).await.unwrap();
         assert_eq!(paymaster_balance.confirmed_balance, U256::from(1110));
@@ -1215,7 +1227,7 @@ mod tests {
         let metadata = pool.paymaster.paymaster_balance(paymaster).await.unwrap();
 
         assert_eq!(metadata.pending_balance, U256::from(850));
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos.clone());
+        check_ops(pool.best_operations(3, None).unwrap(), uos.clone());
 
         // mine the first op with actual gas cost of 10
         pool.on_chain_update(&ChainUpdate {
@@ -1251,7 +1263,7 @@ mod tests {
         .await;
 
         check_ops(
-            pool.best_operations(3, 0, None).unwrap(),
+            pool.best_operations(3, None).unwrap(),
             uos.clone()[1..].to_vec(),
         );
 
@@ -1285,7 +1297,7 @@ mod tests {
         })
         .await;
 
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos);
+        check_ops(pool.best_operations(3, None).unwrap(), uos);
 
         let metadata = pool.paymaster.paymaster_balance(paymaster).await.unwrap();
         assert_eq!(metadata.pending_balance, U256::from(840));
@@ -1299,7 +1311,7 @@ mod tests {
             create_op(Address::random(), 0, 1, None),
         ])
         .await;
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos.clone());
+        check_ops(pool.best_operations(3, None).unwrap(), uos.clone());
 
         pool.on_chain_update(&ChainUpdate {
             latest_block_number: 1,
@@ -1323,7 +1335,7 @@ mod tests {
         })
         .await;
 
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos);
+        check_ops(pool.best_operations(3, None).unwrap(), uos);
     }
 
     #[tokio::test]
@@ -1336,10 +1348,7 @@ mod tests {
         ])
         .await;
         // staked, so include all ops
-        check_ops(
-            pool.best_operations(3, 0, None).unwrap(),
-            uos[0..2].to_vec(),
-        );
+        check_ops(pool.best_operations(3, None).unwrap(), uos[0..2].to_vec());
 
         let rep = pool.dump_reputation();
         assert_eq!(rep.len(), 1);
@@ -1400,7 +1409,7 @@ mod tests {
         }
 
         check_ops(
-            pool.best_operations(4, 0, None).unwrap(),
+            pool.best_operations(4, None).unwrap(),
             vec![
                 uos[0].clone(),
                 uos[1].clone(),
@@ -1451,7 +1460,7 @@ mod tests {
             .await
             .unwrap();
         check_ops(
-            pool.best_operations(4, 0, None).unwrap(),
+            pool.best_operations(4, None).unwrap(),
             vec![
                 uos[1].clone(),
                 uos[2].clone(),
@@ -1541,7 +1550,7 @@ mod tests {
             )) => {}
             _ => panic!("Expected InitCodeTooShort error"),
         }
-        assert_eq!(pool.best_operations(1, 0, None).unwrap(), vec![]);
+        assert_eq!(pool.best_operations(1, None).unwrap(), vec![]);
     }
 
     #[tokio::test]
@@ -1564,7 +1573,7 @@ mod tests {
             Err(MempoolError::SimulationViolation(SimulationViolation::DidNotRevert)) => {}
             _ => panic!("Expected DidNotRevert error"),
         }
-        assert_eq!(pool.best_operations(1, 0, None).unwrap(), vec![]);
+        assert_eq!(pool.best_operations(1, None).unwrap(), vec![]);
     }
 
     #[tokio::test]
@@ -1583,7 +1592,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, MempoolError::OperationAlreadyKnown));
 
-        check_ops(pool.best_operations(1, 0, None).unwrap(), vec![op.op]);
+        check_ops(pool.best_operations(1, None).unwrap(), vec![op.op]);
     }
 
     #[tokio::test]
@@ -1608,7 +1617,7 @@ mod tests {
 
         assert!(matches!(err, MempoolError::ReplacementUnderpriced(_, _)));
 
-        check_ops(pool.best_operations(1, 0, None).unwrap(), vec![op.op]);
+        check_ops(pool.best_operations(1, None).unwrap(), vec![op.op]);
     }
 
     #[tokio::test]
@@ -1669,7 +1678,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_ops(pool.best_operations(1, 0, None).unwrap(), vec![replacement]);
+        check_ops(pool.best_operations(1, None).unwrap(), vec![replacement]);
 
         let paymaster_balance = pool.paymaster.paymaster_balance(paymaster).await.unwrap();
         assert_eq!(paymaster_balance.pending_balance, U256::from(900));
@@ -1694,10 +1703,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_ops(
-            pool.best_operations(1, 0, None).unwrap(),
-            vec![op.op.clone()],
-        );
+        check_ops(pool.best_operations(1, None).unwrap(), vec![op.op.clone()]);
 
         pool.on_chain_update(&ChainUpdate {
             latest_block_timestamp: 11.into(),
@@ -1705,7 +1711,7 @@ mod tests {
         })
         .await;
 
-        check_ops(pool.best_operations(1, 0, None).unwrap(), vec![]);
+        check_ops(pool.best_operations(1, None).unwrap(), vec![]);
     }
 
     #[tokio::test]
@@ -1736,7 +1742,7 @@ mod tests {
             pool.remove_op_by_id(&op.op.id()),
             Err(MempoolError::OperationDropTooSoon(_, _, _))
         ));
-        check_ops(pool.best_operations(1, 0, None).unwrap(), vec![op.op]);
+        check_ops(pool.best_operations(1, None).unwrap(), vec![op.op]);
     }
 
     #[tokio::test]
@@ -1756,7 +1762,7 @@ mod tests {
             }),
             Ok(None)
         ));
-        check_ops(pool.best_operations(1, 0, None).unwrap(), vec![op.op]);
+        check_ops(pool.best_operations(1, None).unwrap(), vec![op.op]);
     }
 
     #[tokio::test]
@@ -1777,7 +1783,7 @@ mod tests {
         .await;
 
         assert_eq!(pool.remove_op_by_id(&op.op.id()).unwrap().unwrap(), hash);
-        check_ops(pool.best_operations(1, 0, None).unwrap(), vec![]);
+        check_ops(pool.best_operations(1, None).unwrap(), vec![]);
     }
 
     #[tokio::test]
@@ -1851,17 +1857,17 @@ mod tests {
         ])
         .await;
         // staked, so include all ops
-        check_ops(pool.best_operations(3, 0, None).unwrap(), uos);
+        check_ops(pool.best_operations(3, None).unwrap(), uos);
     }
 
     #[tokio::test]
-    async fn test_pre_op_gas_limit_reject() {
+    async fn test_verification_gas_limit_reject() {
         let mut config = default_config();
-        config.gas_limit_efficiency_reject_threshold = 0.25;
+        config.verification_gas_limit_efficiency_reject_threshold = 0.25;
 
         let op = create_op_from_op_v0_6(UserOperationRequiredFields {
             call_gas_limit: 10_000,
-            verification_gas_limit: 500_000, // used 100K of 550K
+            verification_gas_limit: 500_000,
             pre_verification_gas: 50_000,
             max_fee_per_gas: 1,
             max_priority_fee_per_gas: 1,
@@ -1871,7 +1877,7 @@ mod tests {
         let mut ep = MockEntryPointV0_6::new();
         ep.expect_simulate_handle_op().returning(|_, _, _, _, _| {
             Ok(Ok(ExecutionResult {
-                pre_op_gas: 100_000,
+                pre_op_gas: 100_000, // used 50K of 500K verification gas (used 50K PVG)
                 paid: uint!(110_000_U256),
                 target_success: true,
                 ..Default::default()
@@ -1887,21 +1893,21 @@ mod tests {
         let ret = pool
             .add_operation(OperationOrigin::Local, op.op, default_perms())
             .await;
-        let actual_eff = 100_000_f32 / 550_000_f32;
+        let actual_eff = 50_000_f64 / 500_000_f64;
 
         match ret.err().unwrap() {
-            MempoolError::PreOpGasLimitEfficiencyTooLow(eff, actual) => {
+            MempoolError::VerificationGasLimitEfficiencyTooLow(eff, actual) => {
                 assert_eq!(eff, 0.25);
                 assert_eq!(actual, actual_eff);
             }
-            _ => panic!("Expected PreOpGasLimitEfficiencyTooLow error"),
+            _ => panic!("Expected VerificationGasLimitEfficiencyTooLow error"),
         }
     }
 
     #[tokio::test]
     async fn test_call_gas_limit_reject() {
         let mut config = default_config();
-        config.gas_limit_efficiency_reject_threshold = 0.25;
+        config.execution_gas_limit_efficiency_reject_threshold = 0.25;
 
         let op = create_op_from_op_v0_6(UserOperationRequiredFields {
             call_gas_limit: 50_000,
@@ -1929,7 +1935,7 @@ mod tests {
         let ret = pool
             .add_operation(OperationOrigin::Local, op.op, default_perms())
             .await;
-        let actual_eff = 10_000_f32 / 50_000_f32;
+        let actual_eff = 10_000_f64 / 50_000_f64;
 
         match ret.err().unwrap() {
             MempoolError::ExecutionGasLimitEfficiencyTooLow(eff, actual) => {
@@ -1943,7 +1949,7 @@ mod tests {
     #[tokio::test]
     async fn test_gas_price_zero_fail_open() {
         let mut config = default_config();
-        config.gas_limit_efficiency_reject_threshold = 0.25;
+        config.execution_gas_limit_efficiency_reject_threshold = 0.25;
 
         let op = create_op_from_op_v0_6(UserOperationRequiredFields {
             call_gas_limit: 50_000,
@@ -2048,7 +2054,7 @@ mod tests {
             .await
             .unwrap();
 
-        let best = pool.best_operations(10000, 0, None).unwrap();
+        let best = pool.best_operations(10000, None).unwrap();
         assert_eq!(best.len(), 0);
     }
 
@@ -2184,7 +2190,7 @@ mod tests {
             .await
             .unwrap();
 
-        let best = pool.best_operations(10000, 0, None).unwrap();
+        let best = pool.best_operations(10000, None).unwrap();
         assert_eq!(best.len(), 0);
     }
 
@@ -2206,7 +2212,6 @@ mod tests {
         config
             .chain_spec
             .set_signature_aggregators(Arc::new(registry));
-        config.num_shards_by_filter_id = HashMap::from([(filter_id.clone(), 1)]);
 
         let mempool_config = r#"{
             "entryPoint": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
@@ -2229,7 +2234,7 @@ mod tests {
             .await
             .unwrap();
 
-        let best = pool.best_operations(10000, 0, Some(filter_id)).unwrap();
+        let best = pool.best_operations(10000, Some(filter_id)).unwrap();
         assert_eq!(best.len(), 1);
     }
 
@@ -2299,7 +2304,6 @@ mod tests {
             precheck_settings: PrecheckSettings::default(),
             sim_settings: SimulationSettings::default(),
             mempool_channel_configs: HashMap::new(),
-            num_shards_by_filter_id: HashMap::from([("".to_string(), 1)]),
             same_sender_mempool_count: 4,
             throttled_entity_mempool_count: 4,
             throttled_entity_live_blocks: 10,
@@ -2308,7 +2312,8 @@ mod tests {
             paymaster_cache_length: 100,
             reputation_tracking_enabled: true,
             drop_min_num_blocks: 10,
-            gas_limit_efficiency_reject_threshold: 0.0,
+            execution_gas_limit_efficiency_reject_threshold: 0.0,
+            verification_gas_limit_efficiency_reject_threshold: 0.0,
             max_time_in_pool: None,
             max_expected_storage_slots: usize::MAX,
             support_7702: false,
@@ -2363,6 +2368,7 @@ mod tests {
 
         let mut simulator = MockSimulator::new();
         let mut prechecker = MockPrechecker::new();
+        let mut fee_estimator = MockFeeEstimator::new();
         let entry_point = Arc::new(entrypoint);
 
         let paymaster = PaymasterTracker::new(
@@ -2381,9 +2387,15 @@ mod tests {
             args.allowlist.clone().unwrap_or_default(),
         ));
 
-        prechecker
-            .expect_update_fees()
-            .returning(|| Ok(FeeUpdate::default()));
+        fee_estimator
+            .expect_required_bundle_fees()
+            .returning(move |_, _| Ok((GasFees::default(), 0)));
+        fee_estimator
+            .expect_required_op_fees()
+            .returning(move |fees| GasFees {
+                max_fee_per_gas: fees.max_fee_per_gas,
+                max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+            });
 
         for op in ops {
             prechecker.expect_check().returning(move |_, _, _| {
@@ -2429,7 +2441,12 @@ mod tests {
 
         UoPool::new(
             args,
-            ProvidersWithEntryPoint::new(Arc::new(evm), entry_point, Some(da_oracle)),
+            ProvidersWithEntryPoint::new(
+                Arc::new(evm),
+                entry_point,
+                Some(da_oracle),
+                Arc::new(fee_estimator),
+            ),
             UoPoolProviders::new(simulator, prechecker),
             event_sender,
             paymaster,

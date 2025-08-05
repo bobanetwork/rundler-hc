@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::Context;
 use futures_util::FutureExt;
@@ -23,14 +23,11 @@ use jsonrpsee::{
     server::{middleware::http::ProxyGetRequestLayer, RpcServiceBuilder, ServerBuilder},
     RpcModule,
 };
-use rundler_provider::Providers as ProvidersT;
-use rundler_sim::{
-    gas::{self, FeeEstimatorImpl, FeeOracle},
-    EstimationSettings, FeeEstimator, GasEstimatorV0_6, GasEstimatorV0_7, PrecheckSettings,
-};
+use rundler_provider::{FeeEstimator, Providers as ProvidersT};
+use rundler_sim::{EstimationSettings, GasEstimatorV0_6, GasEstimatorV0_7, PrecheckSettings};
 use rundler_task::{
     server::{format_socket_addr, HealthCheck},
-    TaskSpawner,
+    TaskSpawnerExt,
 };
 use rundler_types::{builder::Builder as BuilderT, chain::ChainSpec, pool::Pool as PoolT};
 //use tokio_util::sync::CancellationToken;
@@ -46,7 +43,7 @@ use crate::{
     },
     health::{HealthChecker, SystemApiServer},
     rpc_metrics::{HttpMetricMiddlewareLayer, RpcMetricsMiddlewareLayer},
-    rundler::{RundlerApi, RundlerApiServer, Settings as RundlerApiSettings},
+    rundler::{RundlerApi, RundlerApiServer},
     types::ApiNamespace,
 };
 
@@ -69,8 +66,6 @@ pub struct Args {
     pub precheck_settings: PrecheckSettings,
     /// eth_ API settings.
     pub eth_api_settings: EthApiSettings,
-    /// rundler_ API settings.
-    pub rundler_api_settings: RundlerApiSettings,
     /// Estimation settings.
     pub estimation_settings: EstimationSettings,
     /// RPC timeout.
@@ -113,24 +108,14 @@ where
     Providers: ProvidersT + 'static,
 {
     /// Spawns the RPC server task on the given task spawner.
-    pub async fn spawn<T: TaskSpawner>(self, task_spawner: T) -> anyhow::Result<()> {
+    pub async fn spawn<T>(self, task_spawner: T) -> anyhow::Result<()>
+    where
+        T: TaskSpawnerExt,
+    {
         let addr: SocketAddr = format_socket_addr(&self.args.host, self.args.port).parse()?;
         tracing::info!("Starting rpc server on {}", addr);
 
         let mut router_builder = EntryPointRouterBuilder::default();
-        let fee_oracle = Arc::<dyn FeeOracle>::from(gas::get_fee_oracle(
-            &self.args.chain_spec,
-            self.providers.evm().clone(),
-        ));
-        let fee_estimator = FeeEstimatorImpl::new(
-            self.providers.evm().clone(),
-            fee_oracle,
-            self.args.precheck_settings.priority_fee_mode,
-            self.args.precheck_settings.bundle_base_fee_overhead_percent,
-            self.args
-                .precheck_settings
-                .bundle_priority_fee_overhead_percent,
-        );
 
         if self.args.entry_point_v0_6_enabled {
             let ep = self
@@ -146,7 +131,7 @@ where
                     self.providers.evm().clone(),
                     ep.clone(),
                     self.args.estimation_settings,
-                    fee_estimator.clone(),
+                    self.providers.fee_estimator().clone(),
                 ),
                 UserOperationEventProviderV0_6::new(
                     self.args.chain_spec.clone(),
@@ -175,7 +160,7 @@ where
                     self.providers.evm().clone(),
                     ep.clone(),
                     self.args.estimation_settings,
-                    fee_estimator.clone(),
+                    self.providers.fee_estimator().clone(),
                 ),
                 UserOperationEventProviderV0_7::new(
                     self.args.chain_spec.clone(),
@@ -197,7 +182,7 @@ where
         self.attach_namespaces(
             self.args.eth_api_settings.permissions_enabled,
             router,
-            fee_estimator,
+            self.providers.fee_estimator().clone(),
             &mut module,
         )?;
 

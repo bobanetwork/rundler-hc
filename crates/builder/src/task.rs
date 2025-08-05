@@ -11,16 +11,20 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy_primitives::{Address, B256};
 use anyhow::Context;
 use rundler_provider::{EntryPoint, Providers as ProvidersT, ProvidersWithEntryPointT};
 use rundler_signer::{SignerManager, SigningScheme};
 use rundler_sim::{
-    gas::{self, FeeEstimatorImpl},
     simulation::{self, UnsafeSimulator},
-    MempoolConfig, PriorityFeeMode, SimulationSettings, Simulator,
+    MempoolConfig, SimulationSettings, Simulator,
 };
 use rundler_task::TaskSpawnerExt;
 use rundler_types::{
@@ -32,6 +36,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 
 use crate::{
+    assigner::Assigner,
     bundle_proposer::{self, BundleProposerImpl, BundleProposerProviders},
     bundle_sender::{self, BundleSender, BundleSenderAction, BundleSenderImpl},
     emit::BuilderEvent,
@@ -39,6 +44,8 @@ use crate::{
     server::{self, LocalBuilderBuilder},
     transaction_tracker::{self, TransactionTrackerImpl},
 };
+
+const MAX_POOL_OPS_PER_REQUEST: u64 = 1024;
 
 /// Builder task arguments
 #[derive(Debug)]
@@ -59,12 +66,6 @@ pub struct Args {
     pub target_bundle_gas: u128,
     /// Maximum bundle size in gas
     pub max_bundle_gas: u128,
-    /// Percentage to add to the network pending base fee for the bundle base fee
-    pub bundle_base_fee_overhead_percent: u32,
-    /// Percentage to add to the network priority fee for the bundle priority fee
-    pub bundle_priority_fee_overhead_percent: u32,
-    /// Priority fee mode to use for operation priority fee minimums
-    pub priority_fee_mode: PriorityFeeMode,
     /// Sender to be used by the builder
     pub sender_args: TransactionSenderArgs,
     /// Operation simulation settings
@@ -87,13 +88,13 @@ pub struct Args {
     pub provider_client_timeout_seconds: u64,
     /// Maximum number of expected storage slots in a bundle
     pub max_expected_storage_slots: usize,
+    /// Rejects user operations with a verification gas limit efficiency below this threshold.
+    pub verification_gas_limit_efficiency_reject_threshold: f64,
 }
 
 /// Builder settings
 #[derive(Debug, Clone)]
 pub struct BuilderSettings {
-    /// Index of this builder
-    pub index: u64,
     /// Optional submission proxy to use for this builder
     pub submission_proxy: Option<Address>,
     /// Optional filter id to apply to this builder
@@ -102,12 +103,12 @@ pub struct BuilderSettings {
 
 impl BuilderSettings {
     /// Unique string tag for this builder
-    pub fn tag(&self, entry_point_address: &Address) -> String {
+    pub fn tag(&self, entry_point_address: &Address, builder_address: &Address) -> String {
         format!(
             "{}:{}:{}",
             entry_point_address,
             self.filter_id.as_ref().map_or("any", |v| v),
-            self.index
+            builder_address
         )
     }
 }
@@ -163,7 +164,10 @@ where
     Providers: ProvidersT + 'static,
 {
     /// Spawn the builder task on the given task spawner
-    pub async fn spawn<T: TaskSpawnerExt>(self, task_spawner: T) -> anyhow::Result<()> {
+    pub async fn spawn<T>(self, task_spawner: T) -> anyhow::Result<()>
+    where
+        T: TaskSpawnerExt,
+    {
         let mut bundle_sender_actions = vec![];
 
         let num_required_signers: usize = self
@@ -192,19 +196,38 @@ where
             }
         }
 
+        let assigner = Arc::new(Assigner::new(
+            Box::new(self.pool.clone()),
+            MAX_POOL_OPS_PER_REQUEST,
+            self.args.max_bundle_size,
+        ));
+
+        let mut supported_entry_points = HashSet::new();
         for ep in &self.args.entry_points {
             match ep.version {
                 EntryPointVersion::V0_6 => {
                     let actions = self
-                        .create_builders_v0_6(&task_spawner, ep, &self.signer_manager)
+                        .create_builders_v0_6(
+                            &task_spawner,
+                            ep,
+                            &self.signer_manager,
+                            assigner.clone(),
+                        )
                         .await?;
                     bundle_sender_actions.extend(actions);
+                    supported_entry_points.insert(self.args.chain_spec.entry_point_address_v0_6);
                 }
                 EntryPointVersion::V0_7 => {
                     let actions = self
-                        .create_builders_v0_7(&task_spawner, ep, &self.signer_manager)
+                        .create_builders_v0_7(
+                            &task_spawner,
+                            ep,
+                            &self.signer_manager,
+                            assigner.clone(),
+                        )
                         .await?;
                     bundle_sender_actions.extend(actions);
+                    supported_entry_points.insert(self.args.chain_spec.entry_point_address_v0_7);
                 }
                 EntryPointVersion::Unspecified => {
                     panic!("Unspecified entry point version")
@@ -219,7 +242,7 @@ where
             |shutdown| {
                 self.builder_builder.run(
                     bundle_sender_actions,
-                    vec![self.args.chain_spec.entry_point_address_v0_6],
+                    supported_entry_points.into_iter().collect(),
                     shutdown,
                 )
             },
@@ -248,6 +271,7 @@ where
         task_spawner: &T,
         ep: &EntryPointBuilderSettings,
         signer_manager: &Arc<dyn SignerManager>,
+        assigner: Arc<Assigner>,
     ) -> anyhow::Result<Vec<mpsc::Sender<BundleSenderAction>>>
     where
         T: TaskSpawnerExt,
@@ -270,6 +294,7 @@ where
                         self.args.sim_settings.clone(),
                     ),
                     signer_manager,
+                    assigner.clone(),
                 )
                 .await?
             } else {
@@ -284,6 +309,7 @@ where
                         ep.mempool_configs.clone(),
                     ),
                     signer_manager,
+                    assigner.clone(),
                 )
                 .await?
             };
@@ -297,6 +323,7 @@ where
         task_spawner: &T,
         ep: &EntryPointBuilderSettings,
         signer_manager: &Arc<dyn SignerManager>,
+        assigner: Arc<Assigner>,
     ) -> anyhow::Result<Vec<mpsc::Sender<BundleSenderAction>>>
     where
         T: TaskSpawnerExt,
@@ -319,6 +346,7 @@ where
                         self.args.sim_settings.clone(),
                     ),
                     signer_manager,
+                    assigner.clone(),
                 )
                 .await?
             } else {
@@ -333,6 +361,7 @@ where
                         ep.mempool_configs.clone(),
                     ),
                     signer_manager,
+                    assigner.clone(),
                 )
                 .await?
             };
@@ -348,6 +377,7 @@ where
         ep_providers: EP,
         simulator: S,
         signer_manager: &Arc<dyn SignerManager>,
+        assigner: Arc<Assigner>,
     ) -> anyhow::Result<mpsc::Sender<BundleSenderAction>>
     where
         T: TaskSpawnerExt,
@@ -379,13 +409,14 @@ where
 
         let proposer_settings = bundle_proposer::Settings {
             chain_spec: self.args.chain_spec.clone(),
-            max_bundle_size: self.args.max_bundle_size,
             target_bundle_gas: self.args.target_bundle_gas,
             max_bundle_gas: self.args.max_bundle_gas,
             sender_eoa,
-            priority_fee_mode: self.args.priority_fee_mode,
             da_gas_tracking_enabled: self.args.da_gas_tracking_enabled,
             max_expected_storage_slots: self.args.max_expected_storage_slots,
+            verification_gas_limit_efficiency_reject_threshold: self
+                .args
+                .verification_gas_limit_efficiency_reject_threshold,
             submission_proxy: submission_proxy.cloned(),
         };
 
@@ -403,7 +434,7 @@ where
             transaction_sender,
             signer,
             tracker_settings,
-            builder_settings.tag(ep_providers.entry_point().address()),
+            builder_settings.tag(ep_providers.entry_point().address(), &sender_eoa),
         )
         .await?;
 
@@ -413,27 +444,16 @@ where
             max_blocks_to_wait_for_mine: self.args.max_blocks_to_wait_for_mine,
         };
 
-        let fee_oracle = gas::get_fee_oracle(&self.args.chain_spec, ep_providers.evm().clone());
-        let fee_estimator = FeeEstimatorImpl::new(
-            ep_providers.evm().clone(),
-            fee_oracle,
-            proposer_settings.priority_fee_mode,
-            self.args.bundle_base_fee_overhead_percent,
-            self.args.bundle_priority_fee_overhead_percent,
-        );
-
         let proposer = BundleProposerImpl::new(
-            builder_settings.index,
-            builder_settings.tag(ep_providers.entry_point().address()),
+            builder_settings.tag(ep_providers.entry_point().address(), &sender_eoa),
             ep_providers.clone(),
-            BundleProposerProviders::new(self.pool.clone(), simulator, fee_estimator),
+            BundleProposerProviders::new(simulator),
             proposer_settings,
             self.event_sender.clone(),
-            builder_settings.filter_id.clone(),
         );
 
         let builder = BundleSenderImpl::new(
-            builder_settings.tag(ep_providers.entry_point().address()),
+            builder_settings.clone(),
             send_bundle_rx,
             self.args.chain_spec.clone(),
             sender_eoa,
@@ -441,6 +461,7 @@ where
             proposer,
             ep_providers.clone(),
             transaction_tracker,
+            assigner,
             self.pool.clone(),
             sender_settings,
             self.event_sender.clone(),

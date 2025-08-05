@@ -11,10 +11,10 @@ ERC-4337 bundler implementation
 publish = false
 
 [dependencies]
-rundler-contracts.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-network.workspace = true
+rundler-contracts.workspace = true
 
 alloy-primitives.workspace = true
 anyhow.workspace = true

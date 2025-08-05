@@ -89,7 +89,6 @@ pub(crate) trait Mempool: Send + Sync {
     fn best_operations(
         &self,
         max: usize,
-        shard_index: u64,
         filter_id: Option<String>,
     ) -> MempoolResult<Vec<Arc<PoolOperation>>>;
 
@@ -151,11 +150,6 @@ pub struct PoolConfig {
     pub sim_settings: SimulationSettings,
     /// Configuration for the mempool channels, by channel ID
     pub mempool_channel_configs: HashMap<B256, MempoolConfig>,
-    /// Number of mempool shards to use by filter ID. A mempool shard is a disjoint subset of the mempool
-    /// that is used to ensure that two bundle builders don't attempt to but bundle the same
-    /// operations. The mempool is divided into shards by taking the hash of the operation
-    /// and modding it by the number of shards.
-    pub num_shards_by_filter_id: HashMap<String, u64>,
     /// the maximum number of user operations with a throttled entity that can stay in the mempool
     pub throttled_entity_mempool_count: u64,
     /// The maximum number of blocks a user operation with a throttled entity can stay in the mempool
@@ -172,8 +166,12 @@ pub struct PoolConfig {
     pub drop_min_num_blocks: u64,
     /// Reject user operations with gas limit efficiency below this threshold.
     /// Gas limit efficiency is defined as the ratio of the gas limit to the gas used.
-    /// This applies to all the verification, call, and paymaster gas limits.
-    pub gas_limit_efficiency_reject_threshold: f32,
+    /// This applies to the execution gas limit.
+    pub execution_gas_limit_efficiency_reject_threshold: f64,
+    /// Reject user operations with gas limit efficiency below this threshold.
+    /// Gas limit efficiency is defined as the ratio of the gas limit to the gas used.
+    /// This applies to the verification gas limit.
+    pub verification_gas_limit_efficiency_reject_threshold: f64,
     /// Maximum time a UO is allowed in the pool before being dropped
     pub max_time_in_pool: Option<Duration>,
     /// The maximum number of storage slots that can be expected to be used by a user operation during validation

@@ -44,8 +44,9 @@ use rundler_types::{
     authorization::Eip7702Auth,
     chain::ChainSpec,
     da::{DAGasBlockData, DAGasData},
-    v0_7::{UserOperation, UserOperationBuilder},
-    GasFees, UserOperation as _, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
+    v0_7::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
+    EntryPointVersion, GasFees, UserOperation as _, UserOpsPerAggregator, ValidationOutput,
+    ValidationRevert,
 };
 use rundler_utils::authorization_utils;
 use tracing::instrument;
@@ -103,6 +104,10 @@ where
     AP: AlloyProvider<T>,
     D: Send + Sync,
 {
+    fn version(&self) -> EntryPointVersion {
+        EntryPointVersion::V0_7
+    }
+
     fn address(&self) -> &Address {
         self.i_entry_point.address()
     }
@@ -261,12 +266,47 @@ where
     #[instrument(skip_all)]
     async fn call_handle_ops(
         &self,
-        ops_per_aggregator: Vec<UserOpsPerAggregator<UserOperation>>,
+        mut ops_per_aggregator: Vec<UserOpsPerAggregator<UserOperation>>,
         sender_eoa: Address,
         gas_limit: u64,
         gas_fees: GasFees,
         proxy: Option<Address>,
+        validation_only: bool,
     ) -> ProviderResult<HandleOpsOut> {
+        let mut expected_failure_index: Option<usize> = None;
+        if validation_only && proxy.is_none() {
+            expected_failure_index = Some(
+                ops_per_aggregator
+                    .iter()
+                    .map(|agg| agg.user_ops.len())
+                    .sum::<usize>(),
+            );
+
+            let Some(last_agg) = ops_per_aggregator.last_mut() else {
+                return Err(anyhow::anyhow!("bundle must have at least one aggregator").into());
+            };
+
+            last_agg.user_ops.push(
+                // Trigger an AA10 error
+                UserOperationBuilder::new(
+                    &self.chain_spec,
+                    UserOperationRequiredFields {
+                        sender: self.chain_spec.entry_point_address_v0_7,
+                        nonce: U256::ZERO,
+                        call_data: Bytes::new(),
+                        call_gas_limit: 0,
+                        verification_gas_limit: 0,
+                        pre_verification_gas: 0,
+                        max_fee_per_gas: 0,
+                        max_priority_fee_per_gas: 0,
+                        signature: Bytes::new(),
+                    },
+                )
+                .factory(self.chain_spec.entry_point_address_v0_7, Bytes::new())
+                .build(),
+            );
+        }
+
         let tx = get_handle_ops_call(
             &self.i_entry_point,
             ops_per_aggregator,
@@ -282,11 +322,34 @@ where
         match res {
             Ok(_) => return Ok(HandleOpsOut::Success),
             Err(TransportError::ErrorResp(resp)) => {
-                if let Some(revert_data) = resp.as_revert_data() {
-                    Ok(Self::decode_handle_ops_revert(&resp.message, &revert_data))
-                } else {
-                    tracing::error!("handle_ops failed with request: {:?}", tx);
-                    Err(TransportError::ErrorResp(resp).into())
+                let ret = Self::decode_handle_ops_revert(&resp.message, &resp.as_revert_data())
+                    .ok_or_else(|| {
+                        tracing::error!("handle_ops failed with request: {:?}", tx);
+                        TransportError::ErrorResp(resp)
+                    })?;
+
+                let Some(expected_failure_index) = expected_failure_index else {
+                    return Ok(ret);
+                };
+
+                match ret {
+                    HandleOpsOut::Success => {
+                        tracing::error!(
+                            "v0.7 bundle validation should always fail due to injected op"
+                        );
+                        Err(anyhow::anyhow!(
+                            "v0.7 bundle validation should always fail due to injected op"
+                        )
+                        .into())
+                    }
+                    HandleOpsOut::FailedOp(index, message) => {
+                        if index == expected_failure_index {
+                            Ok(HandleOpsOut::Success)
+                        } else {
+                            Ok(HandleOpsOut::FailedOp(index, message))
+                        }
+                    }
+                    _ => Ok(ret),
                 }
             }
             Err(error) => {
@@ -315,9 +378,16 @@ where
         )
     }
 
-    fn decode_handle_ops_revert(_message: &str, revert_data: &Bytes) -> HandleOpsOut {
+    fn decode_handle_ops_revert(
+        _message: &str,
+        revert_data: &Option<Bytes>,
+    ) -> Option<HandleOpsOut> {
+        let Some(revert_data) = revert_data else {
+            return None;
+        };
+
         if let Ok(err) = IEntryPointErrors::abi_decode(revert_data, false) {
-            match err {
+            let ret = match err {
                 IEntryPointErrors::FailedOp(FailedOp { opIndex, reason }) => {
                     HandleOpsOut::FailedOp(opIndex.try_into().unwrap_or(usize::MAX), reason)
                 }
@@ -332,9 +402,10 @@ where
                 IEntryPointErrors::SignatureValidationFailed(failure) => {
                     HandleOpsOut::SignatureValidationFailed(failure.aggregator)
                 }
-            }
+            };
+            Some(ret)
         } else {
-            HandleOpsOut::Revert(revert_data.clone())
+            Some(HandleOpsOut::Revert(revert_data.clone()))
         }
     }
 

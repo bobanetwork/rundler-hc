@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{aggregator::SignatureAggregator, da::DAGasOracleType, proxy::SubmissionProxy};
 
-const ENTRY_POINT_ADDRESS_V6_0: &str = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
-const ENTRY_POINT_ADDRESS_V7_0: &str = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+const ENTRY_POINT_ADDRESS_V0_6: &str = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
+const ENTRY_POINT_ADDRESS_V0_7: &str = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 /// Chain specification for Rundler
@@ -66,6 +66,10 @@ pub struct ChainSpec {
     pub calldata_zero_byte_gas: u64,
     /// Gas cost for a non-zero byte in calldata
     pub calldata_non_zero_byte_gas: u64,
+    /// Gas cost for a zero byte in calldata for the floor operation
+    pub calldata_floor_zero_byte_gas: u64,
+    /// Gas cost for a non-zero byte in calldata for the floor operation
+    pub calldata_floor_non_zero_byte_gas: u64,
 
     /*
      * Gas estimation
@@ -155,8 +159,8 @@ impl Default for ChainSpec {
             name: "Unknown".to_string(),
             id: 0,
             block_gas_limit: 30_000_000,
-            entry_point_address_v0_6: Address::from_str(ENTRY_POINT_ADDRESS_V6_0).unwrap(),
-            entry_point_address_v0_7: Address::from_str(ENTRY_POINT_ADDRESS_V7_0).unwrap(),
+            entry_point_address_v0_6: Address::from_str(ENTRY_POINT_ADDRESS_V0_6).unwrap(),
+            entry_point_address_v0_7: Address::from_str(ENTRY_POINT_ADDRESS_V0_7).unwrap(),
             multicall3_address: Address::from_str(MULTICALL3_ADDRESS).unwrap(),
             deposit_transfer_overhead: 30_000,
             transaction_intrinsic_gas: 21_000,
@@ -166,6 +170,8 @@ impl Default for ChainSpec {
             per_user_op_word_gas: 4,
             calldata_zero_byte_gas: 4,
             calldata_non_zero_byte_gas: 16,
+            calldata_floor_zero_byte_gas: 0,
+            calldata_floor_non_zero_byte_gas: 0,
             eip1559_enabled: true,
             da_pre_verification_gas: false,
             da_gas_oracle_type: DAGasOracleType::default(),
@@ -176,7 +182,7 @@ impl Default for ChainSpec {
             max_max_priority_fee_per_gas: u64::MAX,
             congestion_trigger_usage_ratio_threshold: 0.75,
             max_transaction_size_bytes: 131072, // 128 KiB
-            bundle_max_send_interval_millis: u64::MAX,
+            bundle_max_send_interval_millis: 1000,
             flashbots_enabled: false,
             flashbots_relay_url: None,
             bloxroute_enabled: false,
@@ -231,6 +237,16 @@ impl ChainSpec {
     /// Get the calldata non zero byte gas
     pub fn calldata_non_zero_byte_gas(&self) -> u128 {
         self.calldata_non_zero_byte_gas as u128
+    }
+
+    /// Get the calldata floor zero byte gas
+    pub fn calldata_floor_zero_byte_gas(&self) -> u128 {
+        self.calldata_floor_zero_byte_gas as u128
+    }
+
+    /// Get the calldata floor non zero byte gas
+    pub fn calldata_floor_non_zero_byte_gas(&self) -> u128 {
+        self.calldata_floor_non_zero_byte_gas as u128
     }
 
     /// Get the per user operation deploy overhead gas
