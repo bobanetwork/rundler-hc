@@ -825,6 +825,14 @@ impl UserOperationOptionalGas {
             ),
         }
     }
+
+    /// Returns the EIP-7702 auth address
+    pub fn eip7702_auth_address(&self) -> Option<Address> {
+        match self {
+            UserOperationOptionalGas::V0_6(op) => op.eip7702_auth_address,
+            UserOperationOptionalGas::V0_7(op) => op.eip7702_auth_address,
+        }
+    }
 }
 
 /// Gas estimate

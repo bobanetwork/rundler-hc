@@ -98,6 +98,9 @@ pub(crate) trait Mempool: Send + Sync {
     /// Looks up a user operation by hash, returns None if not found
     fn get_user_operation_by_hash(&self, hash: B256) -> Option<Arc<PoolOperation>>;
 
+    /// Looks up a user operation by id, returns None if not found
+    fn get_op_by_id(&self, id: &UserOperationId) -> Option<Arc<PoolOperation>>;
+
     /// Debug methods
     /// Clears the mempool of UOs or reputation of all addresses
     fn clear_state(&self, clear_mempool: bool, clear_paymaster: bool, clear_reputation: bool);
@@ -176,8 +179,6 @@ pub struct PoolConfig {
     pub max_time_in_pool: Option<Duration>,
     /// The maximum number of storage slots that can be expected to be used by a user operation during validation
     pub max_expected_storage_slots: usize,
-    /// Whether to enable UO with 7702 auth
-    pub support_7702: bool,
 }
 
 /// Origin of an operation.

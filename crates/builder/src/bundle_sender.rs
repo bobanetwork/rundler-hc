@@ -549,7 +549,9 @@ where
                     gas_price,
                     ..
                 } => {
-                    let fee = gas_used.zip(gas_price).map(|(used, price)| used * price);
+                    let fee = gas_used
+                        .zip(gas_price)
+                        .map(|(used, price)| used as u128 * price);
                     info!("Cancellation transaction mined. Price (wei) {fee:?}");
                     self.metrics.cancellation_txns_mined.increment(1);
                     if let Some(fee) = fee {
@@ -1481,7 +1483,7 @@ impl BuilderMetric {
     fn process_bundle_txn_mined(
         &self,
         gas_limit: Option<u64>,
-        gas_used: Option<u128>,
+        gas_used: Option<u64>,
         is_success: bool,
     ) {
         if is_success {
@@ -1494,8 +1496,7 @@ impl BuilderMetric {
             self.bundle_gas_limit.increment(limit);
         }
         if let Some(used) = gas_used {
-            self.bundle_gas_used
-                .increment(used.try_into().unwrap_or(u64::MAX));
+            self.bundle_gas_used.increment(used);
         }
     }
 }

@@ -66,10 +66,6 @@ pub struct ChainSpec {
     pub calldata_zero_byte_gas: u64,
     /// Gas cost for a non-zero byte in calldata
     pub calldata_non_zero_byte_gas: u64,
-    /// Gas cost for a zero byte in calldata for the floor operation
-    pub calldata_floor_zero_byte_gas: u64,
-    /// Gas cost for a non-zero byte in calldata for the floor operation
-    pub calldata_floor_non_zero_byte_gas: u64,
 
     /*
      * Gas estimation
@@ -86,10 +82,22 @@ pub struct ChainSpec {
     pub include_da_gas_in_gas_limit: bool,
 
     /*
-     * Fee estimation
+     * EIPS
      */
     /// true if eip1559 is enabled, and thus priority fees are used
     pub eip1559_enabled: bool,
+    /// true if eip7702 is enabled, and thus the 7702 priority fee mechanism is used
+    pub eip7702_enabled: bool,
+    /// true if eip7623 is enabled, and thus the 7623 calldata floor mechanism is used
+    pub eip7623_enabled: bool,
+    /// Gas cost for a zero byte in calldata for the floor operation
+    pub eip7623_calldata_floor_zero_byte_gas: u64,
+    /// Gas cost for a non-zero byte in calldata for the floor operation
+    pub eip7623_calldata_floor_non_zero_byte_gas: u64,
+
+    /*
+     * Fee estimation
+     */
     /// Type of oracle for estimating priority fees
     pub priority_fee_oracle_type: PriorityFeeOracleType,
     /// Minimum max priority fee per gas for the network
@@ -170,9 +178,11 @@ impl Default for ChainSpec {
             per_user_op_word_gas: 4,
             calldata_zero_byte_gas: 4,
             calldata_non_zero_byte_gas: 16,
-            calldata_floor_zero_byte_gas: 0,
-            calldata_floor_non_zero_byte_gas: 0,
             eip1559_enabled: true,
+            eip7702_enabled: false,
+            eip7623_enabled: false,
+            eip7623_calldata_floor_zero_byte_gas: 10,
+            eip7623_calldata_floor_non_zero_byte_gas: 40,
             da_pre_verification_gas: false,
             da_gas_oracle_type: DAGasOracleType::default(),
             da_gas_oracle_contract_address: Address::ZERO,
@@ -241,12 +251,20 @@ impl ChainSpec {
 
     /// Get the calldata floor zero byte gas
     pub fn calldata_floor_zero_byte_gas(&self) -> u128 {
-        self.calldata_floor_zero_byte_gas as u128
+        if self.eip7623_enabled {
+            self.eip7623_calldata_floor_zero_byte_gas as u128
+        } else {
+            0
+        }
     }
 
     /// Get the calldata floor non zero byte gas
     pub fn calldata_floor_non_zero_byte_gas(&self) -> u128 {
-        self.calldata_floor_non_zero_byte_gas as u128
+        if self.eip7623_enabled {
+            self.eip7623_calldata_floor_non_zero_byte_gas as u128
+        } else {
+            0
+        }
     }
 
     /// Get the per user operation deploy overhead gas
@@ -291,6 +309,11 @@ impl ChainSpec {
     /// Get all known proxy addresses
     pub fn known_proxy_addresses(&self) -> impl Iterator<Item = &Address> {
         self.submission_proxies.contracts.keys()
+    }
+
+    /// Check if the chain supports EIP-7702
+    pub fn supports_eip7702(&self, entry_point: Address) -> bool {
+        self.eip7702_enabled || entry_point == self.entry_point_address_v0_7
     }
 }
 

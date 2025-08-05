@@ -66,6 +66,14 @@ See [chain spec](./architecture/chain_spec.md) for a detailed description of cha
   - env: *EXECUTION_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD*
 - `--verification_gas_limit_efficiency_reject_threshold`: The ratio of verification gas used to gas limit under which to reject UOs upon entry to the mempool (default: `0.0` disabled)
   - env: *VERIFICATION_GAS_LIMIT_EFFICIENCY_REJECT_THRESHOLD*
+- `--verification_gas_allowed_error_pct`: The allowed error percentage during verification gas estimation. (default: 15)
+  - env: *VERIFICATION_GAS_ALLOWED_ERROR_PCT*
+- `--call_gas_allowed_error_pct`: The allowed error percentage during call gas estimation. (default: 15)
+  - env: *CALL_GAS_ALLOWED_ERROR_PCT*
+- `--max_gas_estimation_gas`: The gas limit to use during the call to the gas estimation binary search helper functions. (default: 550M)
+  - env: *MAX_GAS_ESTIMATION_GAS*
+- `--max_gas_estimation_rounds`: The maximum amount of remote RPC calls to make during gas estimation while attempting to converge to the error percentage. (default: 3)
+  - env: *MAX_GAS_ESTIMATION_ROUNDS*
 - `--aws_region`: AWS region. (default: `us-east-1`).
   - env: *AWS_REGION*
   - (*Only required if using other AWS features*)
@@ -238,11 +246,9 @@ List of command line options for configuring the Builder.
 - `--signer.aws_kms_key_ids`: AWS KMS key IDs to use for signing transactions, separated by `,`. 
   - env: *SIGNER_AWS_KMS_KEY_IDS*
   - To enable signer locking see `SIGNER_ENABLE_KMS_LOCKING`.
-- `--signer.aws_kms_key_groups`: AWS KMS key ids grouped to keys in `aws_kms_key_ids`. Groups are separated by `:` and entries are separated by `,`. These are never locked, but are used if the associated key id is locked.
-  - env: *SIGNER_AWS_KMS_KEY_GROUPS*
-- `--signer.enable_kms_funding`:
-  - env: *SIGNER_ENABLE_KMS_FUNDING*
-- `--signer.enable_kms_locking`:
+- `--signer.aws_kms_grouped_keys`: AWS KMS key ids grouped to keys in `aws_kms_key_ids` Separated by `,`. Groups are made based on the number of signers required. There must be enough signers to make a full group for every entry in `aws_kms_key_ids`.
+  - env: *SIGNER_AWS_KMS_GROUPED_KEYS*
+- `--signer.enable_kms_locking`: True if keys should be locked before use. Only applies to keys in `aws_kms_key_ids`.
   - env: *SIGNER_ENABLE_KMS_LOCKING*
 - `--signer.redis_uri`: Redis URI to use for KMS leasing (default: `""`)
   - env: *SIGNER_REDIS_URI*
@@ -284,7 +290,7 @@ Locking uses Redis and thus a Redis URL must be provided to Rundler for key leas
 
 If `--signer.enable_kms_funding` is set this scheme will be enabled. It will look for subkeys in the following precedence order:
 
-1. `aws_kms_key_groups`: If set it must have the same number of groups as keys in `aws_kms_key_ids`. 
+1. `aws_kms_grouped_keys`: Must have enough signers to make a full group for each `aws_kms_key_ids`. Group size is based on number of signers requested.
     - If locking is enabled, once a funding KMS key is locked, the corresponding group is used for all subkeys.
     - Else, the first group is always used
 2. `private_keys`: Private keys for the subkeys. The same list applies regardless of which KMS key is locked.

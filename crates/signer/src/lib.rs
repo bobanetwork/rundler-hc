@@ -26,6 +26,7 @@ use anyhow::Context;
 use rundler_provider::{DAGasOracle, EvmProvider};
 use rundler_task::TaskSpawner;
 use rundler_types::chain::ChainSpec;
+use secrecy::SecretString;
 
 mod aws;
 use aws::LockingKmsSigner;
@@ -86,12 +87,12 @@ pub enum SigningScheme {
     /// List of private keys
     PrivateKeys {
         /// Private keys
-        private_keys: Vec<String>,
+        private_keys: Vec<SecretString>,
     },
     /// Mnemonic
     Mnemonic {
         /// Mnemonic
-        mnemonic: String,
+        mnemonic: SecretString,
         /// Number of keys to create
         num_keys: usize,
     },
@@ -206,7 +207,7 @@ pub async fn new_signer_manager<
 fn new_private_keys_signer_manager<P: EvmProvider + 'static, T: TaskSpawner>(
     task_spawner: &T,
     provider: P,
-    private_keys: &[String],
+    private_keys: &[SecretString],
     chain_spec: &ChainSpec,
 ) -> Result<Arc<dyn SignerManager>> {
     let wallet = local::construct_local_wallet_from_private_keys(private_keys, chain_spec.id)?;
@@ -223,7 +224,7 @@ fn new_private_keys_signer_manager<P: EvmProvider + 'static, T: TaskSpawner>(
 fn new_mnemonic_signer_manager<P: EvmProvider + 'static, T: TaskSpawner>(
     task_spawner: &T,
     provider: P,
-    mnemonic: String,
+    mnemonic: SecretString,
     num_keys: usize,
     chain_spec: &ChainSpec,
 ) -> Result<Arc<dyn SignerManager>> {
@@ -364,7 +365,13 @@ async fn init_balances<P: EvmProvider>(
     manager: &Arc<dyn SignerManager>,
     provider: &P,
 ) -> Result<()> {
-    let balances = provider.get_balances(manager.addresses()).await?;
+    let balances = match provider.get_balances(manager.addresses()).await {
+        Ok(balances) => balances,
+        Err(e) => {
+            tracing::warn!("Error initializing balances for signer manager: {e}");
+            return Ok(());
+        }
+    };
     manager.update_balances(balances);
     Ok(())
 }

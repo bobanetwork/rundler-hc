@@ -122,6 +122,13 @@ where
                 ));
         }
 
+        if op.authorization_tuple().is_some() && !self.chain_spec.supports_eip7702(entry_point) {
+            return Err(EthRpcError::InvalidParams(format!(
+                "EIP-7702 is not supported on entry point {:?}",
+                entry_point
+            )));
+        }
+
         self.router.check_and_get_route(&entry_point, &op)?;
 
         self.pool
@@ -258,7 +265,7 @@ where
                 "Failed to look up HybridAccount owner"
             )));
         }
-        let ha_owner = ha_result.unwrap()._0;
+        let ha_owner = ha_result.unwrap();
 
         // This version parameter tells the offchain RPC which version of the
         // AA contracts are being used. This affects the hashing algorithm needed
@@ -562,6 +569,13 @@ where
             )));
         }
 
+        if op.eip7702_auth_address().is_some() && !self.chain_spec.supports_eip7702(entry_point) {
+            return Err(EthRpcError::InvalidParams(format!(
+                "EIP-7702 is not supported on entry point {:?}",
+                entry_point
+            )));
+        }
+
         let mut result = self
             .router
             .estimate_gas(&entry_point, op.clone(), state_override.clone(), None)
@@ -710,12 +724,15 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use alloy_consensus::{Signed, TxEip1559, TxEnvelope::Eip1559};
-    use alloy_primitives::{Log as PrimitiveLog, LogData, PrimitiveSignature, TxKind, U256};
+    use alloy_consensus::{transaction::Recovered, Signed, TxEip1559};
+    use alloy_primitives::{Log as PrimitiveLog, LogData, Signature, TxKind, U256};
+    use alloy_rpc_types_eth::Transaction as AlloyTransaction;
     use alloy_sol_types::SolInterface;
     use mockall::predicate::eq;
     use rundler_contracts::v0_6::IEntryPoint::{handleOpsCall, IEntryPointCalls};
-    use rundler_provider::{AnyTxEnvelope, Log, MockEntryPointV0_6, MockEvmProvider, Transaction};
+    use rundler_provider::{
+        AnyTxEnvelope, Log, MockEntryPointV0_6, MockEvmProvider, Transaction, WithOtherFields,
+    };
     use rundler_sim::MockGasEstimator;
     use rundler_types::{
         pool::{MockPool, PoolOperation},
@@ -816,22 +833,19 @@ mod tests {
             ..Default::default()
         };
 
-        let inner = Eip1559(Signed::new_unchecked(
-            inner_txn,
-            PrimitiveSignature::test_signature(),
-            hash,
-        ));
+        let inner: alloy_consensus::EthereumTxEnvelope<alloy_consensus::TxEip4844Variant> =
+            Signed::new_unchecked(inner_txn, Signature::test_signature(), hash).into();
         let tx_hash = *inner.tx_hash();
         let inner = AnyTxEnvelope::Ethereum(inner);
 
-        let tx = Transaction {
-            inner,
+        let tx: Transaction = WithOtherFields::new(AlloyTransaction {
+            inner: Recovered::new_unchecked(inner, Address::ZERO),
             block_hash: Some(block_hash),
             block_number: Some(block_number),
             transaction_index: None,
             effective_gas_price: None,
-            from: Address::default(),
-        };
+        })
+        .into();
 
         let log = Log {
             inner: PrimitiveLog {

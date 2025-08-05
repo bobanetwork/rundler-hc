@@ -20,9 +20,9 @@ use std::{
 
 //use alloy_sol_types::SolType;
 use alloy_primitives::map::FbBuildHasher;
-use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, Signature, B256, U256};
 use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
-use alloy_signer::{Signature /*, SignerSync*/, Signer};
+use alloy_signer::{/* Signature / *, SignerSync,*/ Signer};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use alloy_sol_types::{/*SolCall, SolStruct,*/ SolValue};
 use once_cell::sync::Lazy;
@@ -372,7 +372,7 @@ pub async fn external_op(
         message: "".to_string(),
     };
 
-    let s2: PrimitiveSignature = check_sig;
+    let s2: Signature = check_sig;
 
     // let sig_bytes = Bytes::from_str(&sig_hex)
     // let test_sig = PrimitiveSignature::decode_rlp_vrs(
@@ -644,10 +644,10 @@ pub fn get_hc_op_payload(key: B256) -> Bytes {
     let op = HC_MAP.lock().unwrap().get(&key).cloned().unwrap();
     let cd1 = &op.call_data[4..];
 
-    let ddd = <(Address, B256, Bytes)>::abi_decode_sequence(cd1, true).unwrap();
+    let ddd = <(Address, B256, Bytes)>::abi_decode_sequence(cd1).unwrap();
     let db2: Bytes = ddd.2;
 
-    let dec2 = <(B256, Bytes)>::abi_decode_sequence(&db2.slice(4..), true).unwrap();
+    let dec2 = <(B256, Bytes)>::abi_decode_sequence(&db2.slice(4..)).unwrap();
     dec2.1
 }
 

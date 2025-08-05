@@ -17,6 +17,7 @@ use alloy_primitives::U256;
 use anyhow::{bail, Context};
 use clap::Args;
 use rundler_signer::{FundingSettings, KmsLockingSettings, SigningScheme};
+use secrecy::SecretString;
 
 #[derive(Args, Debug)]
 #[command(next_help_heading = "SIGNER")]
@@ -26,17 +27,19 @@ pub struct SignerArgs {
         long = "signer.private_keys",
         name = "signer.private_keys",
         env = "SIGNER_PRIVATE_KEYS",
-        value_delimiter = ','
+        value_delimiter = ',',
+        value_parser = super::parse_secret
     )]
-    pub private_keys: Vec<String>,
+    pub private_keys: Vec<SecretString>,
 
     /// Mnemonic to use for signing transactions
     #[arg(
         long = "signer.mnemonic",
         name = "signer.mnemonic",
-        env = "SIGNER_MNEMONIC"
+        env = "SIGNER_MNEMONIC",
+        value_parser = super::parse_secret
     )]
-    pub mnemonic: Option<String>,
+    pub mnemonic: Option<SecretString>,
 
     /// Custom KMS server
     #[arg(
@@ -65,19 +68,13 @@ pub struct SignerArgs {
     )]
     pub aws_kms_key_ids: Vec<String>,
 
-    /// AWS KMS key groups to use for signing transactions
-    ///
-    /// Each group is separated by a semicolon. Group entries are separated by commas.
-    ///
-    /// Groups are associated 1:1 with entries in `signer.aws_kms_key_ids`
     #[arg(
-        long = "signer.aws_kms_key_groups",
-        name = "signer.aws_kms_key_groups",
-        env = "SIGNER_AWS_KMS_KEY_GROUPS",
-        value_parser = parse_aws_kms_key_groups,
-        value_delimiter = ':'
+        long = "signer.aws_kms_grouped_keys",
+        name = "signer.aws_kms_grouped_keys",
+        env = "SIGNER_AWS_KMS_GROUPED_KEYS",
+        value_delimiter = ','
     )]
-    pub aws_kms_key_groups: Vec<Vec<String>>,
+    pub aws_kms_grouped_keys: Vec<String>,
 
     /// Whether to enable KMS funding
     #[arg(
@@ -170,11 +167,6 @@ pub struct SignerArgs {
     pub funding_txn_base_fee_multiplier: f64,
 }
 
-fn parse_aws_kms_key_groups(s: &str) -> Result<Vec<String>, String> {
-    let groups = s.split(',').map(|s| s.to_string()).collect();
-    Ok(groups)
-}
-
 impl SignerArgs {
     pub fn signing_scheme(&self, num_signers: Option<usize>) -> anyhow::Result<SigningScheme> {
         if self.enable_kms_funding {
@@ -245,19 +237,26 @@ impl SignerArgs {
             None
         };
 
-        let subkeys_by_key_id = if !self.aws_kms_key_groups.is_empty() {
-            if self.aws_kms_key_groups.len() != self.aws_kms_key_ids.len() {
-                bail!("Number of AWS KMS key groups ({}) does not match number of AWS KMS key IDs ({}).", self.aws_kms_key_groups.len(), self.aws_kms_key_ids.len());
+        let subkeys_by_key_id = if !self.aws_kms_grouped_keys.is_empty() {
+            let num_signers =
+                num_signers.context("Num signers must be set when using AWS KMS grouped keys")?;
+            if num_signers == 0 {
+                bail!("Number of signers must be greater than 0");
             }
-            for group in self.aws_kms_key_groups.iter() {
-                if num_signers.is_some_and(|num_signers| num_signers > group.len()) {
-                    bail!("Number of AWS KMS key IDs in group is less than the number of builders. Need {} keys, found {}", num_signers.unwrap(), group.len());
-                }
+
+            if self.aws_kms_grouped_keys.len() / num_signers < self.aws_kms_key_ids.len() {
+                bail!("Number of AWS KMS key groups ({} / {}) is less than the number of AWS KMS key IDs ({}).", self.aws_kms_grouped_keys.len(), num_signers, self.aws_kms_key_ids.len());
             }
+
+            let aws_kms_key_groups = self
+                .aws_kms_grouped_keys
+                .chunks_exact(num_signers)
+                .map(|group| group.to_vec())
+                .collect::<Vec<_>>();
 
             self.aws_kms_key_ids
                 .iter()
-                .zip(self.aws_kms_key_groups.iter())
+                .zip(aws_kms_key_groups.iter())
                 .map(|(key_id, group)| {
                     (
                         key_id.to_string(),

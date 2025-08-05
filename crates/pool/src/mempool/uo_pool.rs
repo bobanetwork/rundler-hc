@@ -778,6 +778,10 @@ where
         self.ep_specific_metrics.removed_operations.increment(count);
     }
 
+    fn get_op_by_id(&self, id: &UserOperationId) -> Option<Arc<PoolOperation>> {
+        self.state.read().pool.get_operation_by_id(id)
+    }
+
     fn remove_op_by_id(&self, id: &UserOperationId) -> MempoolResult<Option<B256>> {
         // Check for the operation in the pool and its age
         let po = {
@@ -1984,7 +1988,7 @@ mod tests {
                 .is_err());
         }
         {
-            config.support_7702 = true;
+            config.chain_spec.eip7702_enabled = true;
             let pool = create_pool_with_config(config.clone(), vec![op.clone()]);
             assert!(pool
                 .add_operation(OperationOrigin::Local, op.clone().op, default_perms())
@@ -1992,11 +1996,11 @@ mod tests {
                 .is_err());
         }
         {
-            config.support_7702 = true;
+            config.chain_spec.eip7702_enabled = true;
             let private_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
             let signer: PrivateKeySigner = PrivateKeySigner::from_str(private_key).unwrap();
             let authorization = alloy_eips::eip7702::Authorization {
-                chain_id: 11011,
+                chain_id: U256::from(11011),
                 address: Address::from_str("0x1234123412341234123412341234123412341234").unwrap(),
                 nonce: 1,
             };
@@ -2016,7 +2020,7 @@ mod tests {
                 },
                 Eip7702Auth {
                     address: signed_authorization.address,
-                    chain_id: signed_authorization.chain_id,
+                    chain_id: signed_authorization.chain_id.try_into().unwrap(),
                     nonce: signed_authorization.nonce,
                     y_parity: signed_authorization.y_parity(),
                     r: signed_authorization.r(),
@@ -2316,7 +2320,6 @@ mod tests {
             verification_gas_limit_efficiency_reject_threshold: 0.0,
             max_time_in_pool: None,
             max_expected_storage_slots: usize::MAX,
-            support_7702: false,
         }
     }
 

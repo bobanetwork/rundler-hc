@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_json_rpc::{RpcParam, RpcReturn};
+//use alloy_json_rpc::{RpcParam, RpcReturn};
 use alloy_primitives::{aliases::U192, Address, Bytes, TxHash, B256, U256};
 use alloy_rpc_types_eth::{
     state::StateOverride, BlockId, BlockNumberOrTag, FeeHistory, Filter, Log,
@@ -31,7 +31,7 @@ use super::error::ProviderResult;
 use crate::{
     AggregatorOut, Block, BlockHashOrNumber, BundleHandler, DAGasOracle, DAGasOracleSync,
     DAGasProvider, DepositInfo, EntryPoint, EntryPointProvider, EvmCall,
-    EvmProvider as EvmProviderTrait, ExecutionResult, FeeEstimator, HandleOpsOut,
+    EvmProvider as EvmProviderTrait, ExecutionResult, FeeEstimator, HandleOpsOut, RpcRecv, RpcSend,
     SignatureAggregator, SimulationProvider, Transaction, TransactionReceipt, TransactionRequest,
 };
 
@@ -42,8 +42,8 @@ mockall::mock! {
     impl EvmProviderTrait for EvmProvider {
         async fn request<P, R>(&self, method: &'static str, params: P) -> ProviderResult<R>
         where
-            P: RpcParam + 'static,
-            R: RpcReturn;
+            P: RpcSend + 'static,
+            R: RpcRecv;
 
         async fn fee_history(
             &self,
@@ -54,9 +54,9 @@ mockall::mock! {
 
         async fn call(
             &self,
-            tx: &TransactionRequest,
+            tx: TransactionRequest,
             block: Option<BlockId>,
-            state_overrides: &StateOverride,
+            state_overrides: Option<StateOverride>,
         ) -> ProviderResult<Bytes>;
 
         async fn send_raw_transaction(&self, tx: Bytes) -> ProviderResult<TxHash>;
@@ -169,12 +169,15 @@ mockall::mock! {
             user_op: v0_6::UserOperation,
             block_id: Option<BlockId>
         ) -> ProviderResult<Result<ValidationOutput, ValidationRevert>>;
-        fn get_simulate_handle_op_call(
+        async fn simulate_handle_op(
             &self,
             op: v0_6::UserOperation,
+            target: Address,
+            target_call_data: Bytes,
+            block_id: BlockId,
             state_override: StateOverride,
-        ) -> crate::EvmCall;
-        async fn simulate_handle_op(
+        ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>>;
+        async fn simulate_handle_op_estimate_gas(
             &self,
             op: v0_6::UserOperation,
             target: Address,
@@ -273,12 +276,15 @@ mockall::mock! {
             user_op: v0_7::UserOperation,
             block_id: Option<BlockId>
         ) -> ProviderResult<Result<ValidationOutput, ValidationRevert>>;
-        fn get_simulate_handle_op_call(
+        async fn simulate_handle_op(
             &self,
             op: v0_7::UserOperation,
+            target: Address,
+            target_call_data: Bytes,
+            block_id: BlockId,
             state_override: StateOverride,
-        ) -> crate::EvmCall;
-        async fn simulate_handle_op(
+        ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>>;
+        async fn simulate_handle_op_estimate_gas(
             &self,
             op: v0_7::UserOperation,
             target: Address,

@@ -57,6 +57,7 @@ use rundler_types::{
     v0_7::UserOperation as UserOperationV0_7,
     PriorityFeeMode,
 };
+use secrecy::SecretString;
 
 /// Main entry point for the CLI
 ///
@@ -102,8 +103,7 @@ pub async fn run() -> anyhow::Result<()> {
         .ResponseSlot()
         .call()
         .await
-        .expect("Failed to get ResponseSlot")
-        ._0;
+        .expect("Failed to get ResponseSlot");
 
     hybrid_compute::init(
         opt.common.hc_helper_addr,
@@ -158,7 +158,7 @@ pub async fn run() -> anyhow::Result<()> {
             tracing::info!("Received ctrl-c, shutting down");
         },
         e = &mut task_manager => {
-            tracing::error!("Task manager panicked, shutting down: {e}");
+            tracing::error!("Task manager panicked, shutting down: {e:?}");
         },
     }
 
@@ -416,6 +416,42 @@ pub struct CommonArgs {
     pub verification_gas_limit_efficiency_reject_threshold: f64,
 
     #[arg(
+        long = "verification_gas_allowed_error_pct",
+        name = "verification_gas_allowed_error_pct",
+        env = "VERIFICATION_GAS_ALLOWED_ERROR_PCT",
+        default_value = "15",
+        global = true
+    )]
+    pub verification_gas_allowed_error_pct: u128,
+
+    #[arg(
+        long = "call_gas_allowed_error_pct",
+        name = "call_gas_allowed_error_pct",
+        env = "CALL_GAS_ALLOWED_ERROR_PCT",
+        default_value = "15",
+        global = true
+    )]
+    pub call_gas_allowed_error_pct: u128,
+
+    #[arg(
+        long = "max_gas_estimation_gas",
+        name = "max_gas_estimation_gas",
+        env = "MAX_GAS_ESTIMATION_GAS",
+        default_value = "550000000",
+        global = true
+    )]
+    pub max_gas_estimation_gas: u64,
+
+    #[arg(
+        long = "max_gas_estimation_rounds",
+        name = "max_gas_estimation_rounds",
+        env = "MAX_GAS_ESTIMATION_ROUNDS",
+        default_value = "3",
+        global = true
+    )]
+    pub max_gas_estimation_rounds: u32,
+
+    #[arg(
         long = "mempool_config_path",
         name = "mempool_config_path",
         env = "MEMPOOL_CONFIG_PATH",
@@ -539,6 +575,11 @@ pub struct CommonArgs {
     pub aggregator_options: Vec<(String, String)>,
 }
 
+/// Converts a &str into a SecretString
+pub(crate) fn parse_secret(s: &str) -> Result<SecretString, String> {
+    Ok(s.into())
+}
+
 fn parse_key_val(s: &str) -> Result<(String, String), anyhow::Error> {
     let pos = s
         .find('=')
@@ -570,7 +611,7 @@ impl TryFromWithSpec<&CommonArgs> for EstimationSettings {
             > max_bundle_execution_gas.saturating_sub(SIMULATION_GAS_OVERHEAD) as u64
         {
             anyhow::bail!(
-                "max_verification_gas ({}) must be less than max_simulate_handle_ops_gas ({}) by at least {}",
+                "max_verification_gas ({}) must be less than max_bundle_execution_gas ({}) by at least {}",
                 value.max_verification_gas,
                 max_bundle_execution_gas,
                 SIMULATION_GAS_OVERHEAD
@@ -590,9 +631,13 @@ impl TryFromWithSpec<&CommonArgs> for EstimationSettings {
             max_paymaster_verification_gas: value.max_verification_gas as u128,
             max_paymaster_post_op_gas: max_bundle_execution_gas,
             max_bundle_execution_gas,
+            max_gas_estimation_gas: value.max_gas_estimation_gas,
             verification_estimation_gas_fee: value.verification_estimation_gas_fee,
             verification_gas_limit_efficiency_reject_threshold: value
                 .verification_gas_limit_efficiency_reject_threshold,
+            verification_gas_allowed_error_pct: value.verification_gas_allowed_error_pct,
+            call_gas_allowed_error_pct: value.call_gas_allowed_error_pct,
+            max_gas_estimation_rounds: value.max_gas_estimation_rounds,
         })
     }
 }
@@ -834,6 +879,7 @@ pub fn construct_providers(
             chain_spec.clone(),
             args.max_verification_gas,
             max_bundle_execution_gas,
+            args.max_gas_estimation_gas,
             max_bundle_execution_gas,
             provider.clone(),
             da_gas_oracle.clone(),
@@ -847,6 +893,7 @@ pub fn construct_providers(
             chain_spec.clone(),
             args.max_verification_gas,
             max_bundle_execution_gas,
+            args.max_gas_estimation_gas,
             max_bundle_execution_gas,
             provider.clone(),
             da_gas_oracle.clone(),
