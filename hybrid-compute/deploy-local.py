@@ -276,13 +276,15 @@ def deploy_account(factory, owner):
     return acct_addr
 
 def deploy_forge(script, cmd_env):
-    args = ["forge", "script", "--json", "--broadcast", "--via-ir"]
+    args = ["forge", "script", "--json", "--broadcast", "--via-ir", "--root", "v0_7"]
     args.append("--rpc-url=http://127.0.0.1:" + str(l2_rpc_port))
     args.append("--contracts")
     if ep7:
-        args.append("src/hc0_7")
+        args.append("hc_src")
         args.append("--remappings")
-        args.append("@openzeppelin/=lib/openzeppelin-contracts-versions/v5_0")
+        args.append("@account-abstraction/=lib/account-abstraction/contracts")
+        args.append("--remappings")
+        args.append("@openzeppelin/=lib/openzeppelin-contracts")
     else:
         args.append("src/hc0_6")
         args.append("--remappings")

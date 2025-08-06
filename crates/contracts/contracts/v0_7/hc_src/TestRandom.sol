@@ -2,7 +2,7 @@
 pragma solidity ^0.8.23;
 
 import "./HybridAccount.sol";
-import "../../lib/chainlink/VRF.sol";
+import "../lib/chainlink/VRF.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/proxy/utils/Initializable.sol";

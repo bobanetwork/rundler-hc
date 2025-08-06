@@ -9,9 +9,9 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
-import "account-abstraction/v0_7/core/BaseAccount.sol";
-import "account-abstraction/v0_7/core/Helpers.sol";
-import "account-abstraction/v0_7/samples/callback/TokenCallbackHandler.sol";
+import "@account-abstraction/core/BaseAccount.sol";
+import "@account-abstraction/core/Helpers.sol";
+import "@account-abstraction/samples/callback/TokenCallbackHandler.sol";
 
 interface IHCHelper {
   function TryCallOffchain(bytes32, bytes memory) external returns (uint32, bytes memory);

@@ -6,9 +6,9 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
-import "account-abstraction/v0_7/interfaces/IEntryPoint.sol";
-import "account-abstraction/v0_7/core/BasePaymaster.sol";
-import "account-abstraction/v0_7/core/Helpers.sol";
+import "@account-abstraction/interfaces/IEntryPoint.sol";
+import "@account-abstraction/core/BasePaymaster.sol";
+import "@account-abstraction/core/Helpers.sol";
 
 /// @title Simple dev/test ERC-20 Token Paymaster for ERC-4337
 /// Adapted from AA "TokenPaymaster.sol" - this version stubs out the requirement for an oracle and trading pool,

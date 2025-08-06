@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.23;
 
-import "forge-std/Script.sol";
-import "lib/account-abstraction-versions/v0_7/contracts/core/EntryPoint.sol";
-import "src/hc0_7/HCHelper.sol";
-import "src/hc0_7/HybridAccountFactory.sol";
-import "src/hc0_7/SimplePaymaster.sol";
-import "lib/account-abstraction-versions/v0_7/contracts/samples/SimpleAccountFactory.sol";
+import "../common/lib/forge-std/src/Script.sol";
+import "@account-abstraction/core/EntryPoint.sol";
+import "hc_src/HCHelper.sol";
+import "hc_src/HybridAccountFactory.sol";
+import "hc_src/SimplePaymaster.sol";
+import "@account-abstraction/samples/SimpleAccountFactory.sol";
 import "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 contract LocalDeploy is Script {

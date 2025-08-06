@@ -175,7 +175,7 @@ impl Assigner {
             }
             // FIXME - local devnet OC_HYBRID_ACCOUNT
             if *confirmed_sender
-                == "0x4383A4961E39475F9b094A73ED4dEAfC45fE78fb"
+                == "0x2818D15174EAAaf123D6e86D3D4008c08c9b06c8"
                     .parse::<Address>()
                     .unwrap()
             {
