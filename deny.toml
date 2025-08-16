@@ -37,6 +37,7 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
+    "CDLA-Permissive-2.0"
 ]
 
 exceptions = [

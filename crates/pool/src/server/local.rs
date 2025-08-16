@@ -11,13 +11,21 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use alloy_primitives::{Address, B256};
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::future::{self, BoxFuture};
 use futures_util::Stream;
+use metrics::Histogram;
+use metrics_derive::Metrics;
 use rundler_task::{
     server::{HealthCheck, ServerStatus},
     GracefulShutdown, TaskSpawner,
@@ -38,18 +46,25 @@ use crate::{
     mempool::{Mempool, OperationOrigin},
 };
 
+#[derive(Metrics, Clone)]
+#[metrics(scope = "op_pool_internal")]
+struct LocalPoolMetrics {
+    #[metric(describe = "the duration in milliseconds of send call")]
+    send_duration: Histogram,
+}
+
 /// Local pool server builder
 #[derive(Debug)]
 pub struct LocalPoolBuilder {
-    req_sender: mpsc::Sender<ServerRequest>,
-    req_receiver: mpsc::Receiver<ServerRequest>,
+    req_sender: mpsc::UnboundedSender<ServerRequest>,
+    req_receiver: mpsc::UnboundedReceiver<ServerRequest>,
     block_sender: broadcast::Sender<NewHead>,
 }
 
 impl LocalPoolBuilder {
     /// Create a new local pool server builder
-    pub fn new(request_capacity: usize, block_capacity: usize) -> Self {
-        let (req_sender, req_receiver) = mpsc::channel(request_capacity);
+    pub fn new(block_capacity: usize) -> Self {
+        let (req_sender, req_receiver) = mpsc::unbounded_channel();
         let (block_sender, _) = broadcast::channel(block_capacity);
         Self {
             req_sender,
@@ -62,6 +77,7 @@ impl LocalPoolBuilder {
     pub fn get_handle(&self) -> LocalPoolHandle {
         LocalPoolHandle {
             req_sender: self.req_sender.clone(),
+            metric: LocalPoolMetrics::default(),
         }
     }
 
@@ -89,11 +105,12 @@ impl LocalPoolBuilder {
 /// Used to make requests to the local pool server
 #[derive(Debug, Clone)]
 pub struct LocalPoolHandle {
-    req_sender: mpsc::Sender<ServerRequest>,
+    req_sender: mpsc::UnboundedSender<ServerRequest>,
+    metric: LocalPoolMetrics,
 }
 
 struct LocalPoolServerRunner {
-    req_receiver: mpsc::Receiver<ServerRequest>,
+    req_receiver: mpsc::UnboundedReceiver<ServerRequest>,
     block_sender: broadcast::Sender<NewHead>,
     mempools: HashMap<Address, Arc<dyn Mempool>>,
     chain_subscriber: ChainSubscriber,
@@ -103,20 +120,33 @@ struct LocalPoolServerRunner {
 impl LocalPoolHandle {
     async fn send(&self, request: ServerRequestKind) -> PoolResult<ServerResponse> {
         let (send, recv) = oneshot::channel();
+        let begin_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_millis(0))
+            .as_millis();
+
         self.req_sender
             .send(ServerRequest {
                 request,
                 response: send,
             })
-            .await
             .map_err(|_| {
                 error!("LocalPoolServer sender closed");
                 PoolError::UnexpectedResponse
             })?;
-        recv.await.map_err(|_| {
+        let response = recv.await.map_err(|_| {
             error!("LocalPoolServer receiver closed");
             PoolError::UnexpectedResponse
-        })?
+        })?;
+        let end_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_millis(0))
+            .as_millis();
+        self.metric
+            .send_duration
+            .record((end_ms.saturating_sub(begin_ms)) as f64);
+
+        response
     }
 }
 
@@ -404,17 +434,24 @@ impl HealthCheck for LocalPoolHandle {
     }
 
     async fn status(&self) -> ServerStatus {
-        if self.get_supported_entry_points().await.is_ok() {
-            ServerStatus::Serving
-        } else {
-            ServerStatus::NotServing
+        match tokio::time::timeout(Duration::from_secs(1), self.get_supported_entry_points()).await
+        {
+            Ok(Ok(_)) => ServerStatus::Serving,
+            Ok(Err(e)) => {
+                tracing::error!("Healthcheck: failed to get supported entry points in pool: {e:?}");
+                ServerStatus::NotServing
+            }
+            _ => {
+                tracing::error!("Healthcheck: timed out getting supported entry points in pool");
+                ServerStatus::NotServing
+            }
         }
     }
 }
 
 impl LocalPoolServerRunner {
     fn new(
-        req_receiver: mpsc::Receiver<ServerRequest>,
+        req_receiver: mpsc::UnboundedReceiver<ServerRequest>,
         block_sender: broadcast::Sender<NewHead>,
         mempools: HashMap<Address, Arc<dyn Mempool>>,
         chain_subscriber: ChainSubscriber,
@@ -1081,7 +1118,7 @@ mod tests {
     }
 
     fn setup(pools: HashMap<Address, Arc<dyn Mempool>>) -> State {
-        let builder = LocalPoolBuilder::new(10, 10);
+        let builder = LocalPoolBuilder::new(10);
         let handle = builder.get_handle();
         let (tx, _) = broadcast::channel(10);
         let tx = Arc::new(tx);
