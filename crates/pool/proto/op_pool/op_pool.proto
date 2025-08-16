@@ -204,6 +204,8 @@ message PoolOperationSummary {
   bytes entry_point = 2;
   // The sender of the UserOperation
   bytes sender = 3;
+  // Hybrid Compute extension
+  bytes hc_hash = 4;
 }
 
 // Data associated with a user operation for DA gas calculations

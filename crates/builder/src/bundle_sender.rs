@@ -1566,6 +1566,7 @@ mod tests {
                     hash: B256::ZERO,
                     sender: Address::ZERO,
                     entry_point: ENTRY_POINT_ADDRESS_V0_6,
+                    hc_hash: B256::ZERO,
                 }])
             });
         mock_pool
@@ -1632,6 +1633,7 @@ mod tests {
                     hash: B256::ZERO,
                     sender: Address::ZERO,
                     entry_point: ENTRY_POINT_ADDRESS_V0_6,
+                    hc_hash: B256::ZERO,
                 }])
             });
         mock_pool
@@ -1854,6 +1856,7 @@ mod tests {
                     hash: B256::ZERO,
                     sender: Address::ZERO,
                     entry_point: ENTRY_POINT_ADDRESS_V0_6,
+                    hc_hash: B256::ZERO,
                 }])
             });
         mock_pool
@@ -2030,6 +2033,7 @@ mod tests {
                     hash: B256::ZERO,
                     sender: Address::ZERO,
                     entry_point: ENTRY_POINT_ADDRESS_V0_6,
+                    hc_hash: B256::ZERO,
                 }])
             });
         mock_pool

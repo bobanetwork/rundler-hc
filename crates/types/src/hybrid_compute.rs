@@ -147,6 +147,14 @@ pub fn init(
     cfg.slot_idx = slot_idx;
 }
 
+/// Extract the sender field of a cached entry
+pub fn get_hc_sender(ent: HcEntry) -> Address {
+    let op7 = ent
+        .user_op
+        .into_variant(&HC_CONFIG.lock().unwrap().chain_spec);
+    op7.sender()
+}
+
 /// Set the EOA address which the bundler is using. Erigon, but not geth, needs this for tx simulation
 pub fn set_signer(from_addr: Address) {
     let mut cfg = HC_CONFIG.lock().unwrap();

@@ -36,6 +36,8 @@ pub struct PoolOperationSummary {
     pub hash: B256,
     /// Sender of the operation
     pub sender: Address,
+    /// Hybrid Compute hash
+    pub hc_hash: B256,
 }
 
 /// Pool server trait
@@ -165,6 +167,7 @@ impl From<&PoolOperation> for PoolOperationSummary {
             entry_point: op.entry_point,
             hash: op.uo.hash(),
             sender: op.uo.sender(),
+            hc_hash: op.uo.hc_hash(),
         }
     }
 }

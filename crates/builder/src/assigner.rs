@@ -38,6 +38,7 @@ pub(crate) struct Assigner {
 #[derive(Default)]
 struct State {
     uo_sender_to_builder_state: HashMap<Address, (Address, LockState)>,
+    hc_extra_senders: HashMap<Address, Address>,
     builder_to_uo_senders: HashMap<Address, HashSet<Address>>,
 }
 
@@ -88,6 +89,17 @@ impl Assigner {
         {
             let mut state = self.state.lock().unwrap();
             for op in ops {
+                if let Some(hc_ent) = hybrid_compute::get_hc_ent(op.hc_hash) {
+                    println!(
+                        "HC assigner.rs pair {:?} to {:?}",
+                        hybrid_compute::get_hc_sender(hc_ent.clone()),
+                        op.sender
+                    );
+                    state
+                        .hc_extra_senders
+                        .insert(hybrid_compute::get_hc_sender(hc_ent), op.sender);
+                }
+
                 let (locked_builder_address, _) = state
                     .uo_sender_to_builder_state
                     .entry(op.sender)
@@ -161,25 +173,37 @@ impl Assigner {
         confirmed_senders: impl IntoIterator<Item = &'a Address>,
     ) {
         let mut state = self.state.lock().unwrap();
+        let hc_cfg: hybrid_compute::HcCfg = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
+
         let per_builder_metrics =
             PerBuilderMetrics::new_with_labels(&[("builder_address", builder_address.to_string())]);
 
         // Confirm all of the senders in state
         for confirmed_sender in confirmed_senders.into_iter() {
-            // FIXME
-            let cfg = hybrid_compute::HC_CONFIG.lock().unwrap().clone();
-            println!("HC check confirmed_sender {:?}", confirmed_sender);
-            if *confirmed_sender == cfg.sys_account {
-                println!("HC WARN skipping confirm_sender for cfg.sys_account");
+            if let Some(hc_check) = state.hc_extra_senders.get(confirmed_sender) {
+                println!(
+                    "HC assigner.rs {:?} is hc_sender for {:?}",
+                    confirmed_sender, hc_check
+                );
+
+                // Confirm that the matching UO will be found later, but don't process it here.
+                let (locked_builder_address, lock_state) = state
+                    .uo_sender_to_builder_state
+                    .get(hc_check)
+                    .expect("BUG: confirmed_sender not found in state, lock contract broken (HC)");
+                if *locked_builder_address != builder_address {
+                    panic!("BUG: confirmed_sender {:?} is assigned to another builder expected: {:?} found: {:?}, lock contract broken", confirmed_sender, builder_address, locked_builder_address);
+                }
+                if *lock_state != LockState::Assigned {
+                    panic!(
+                        "BUG: confirmed_sender {:?} not confirmed to builder {:?} (HC)",
+                        hc_check, builder_address
+                    );
+                }
+
+                state.hc_extra_senders.remove(confirmed_sender);
                 continue;
-            }
-            // FIXME - local devnet OC_HYBRID_ACCOUNT
-            if *confirmed_sender
-                == "0x2818D15174EAAaf123D6e86D3D4008c08c9b06c8"
-                    .parse::<Address>()
-                    .unwrap()
-            {
-                println!("HC WARN skipping confirm_sender for cfg.sys_account");
+            } else if *confirmed_sender == hc_cfg.sys_account {
                 continue;
             }
 
