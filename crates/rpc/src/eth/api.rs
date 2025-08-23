@@ -270,12 +270,16 @@ where
         // This version parameter tells the offchain RPC which version of the
         // AA contracts are being used. This affects the hashing algorithm needed
         // to generate an offchain signature.
-        const REQ_VERSION_V6: &str = "0.2";
+        // V6 EP -> 0.2 REQ_VERSION was removed; only V7 is presently supported.
         const REQ_VERSION_V7: &str = "0.3";
 
-        let is_v7 = match self.router.get_ep_version(&entry_point)? {
+        let _is_v7 = match self.router.get_ep_version(&entry_point)? {
             rundler_types::EntryPointVersion::V0_7 => true,
-            rundler_types::EntryPointVersion::V0_6 => false,
+            rundler_types::EntryPointVersion::V0_6 => {
+                return Err(EthRpcError::Internal(anyhow::anyhow!(
+                    "HC04: EntryPoint version 0.6 is not supported"
+                )))
+            }
             rundler_types::EntryPointVersion::Unspecified => {
                 return Err(EthRpcError::Internal(anyhow::anyhow!(
                     "HC04: Unknown EntryPoint version"
@@ -284,14 +288,7 @@ where
         };
 
         let mut params = ObjectParams::new();
-        let _ = params.insert(
-            "ver",
-            if is_v7 {
-                REQ_VERSION_V7
-            } else {
-                REQ_VERSION_V6
-            },
-        );
+        let _ = params.insert("ver", REQ_VERSION_V7);
         let _ = params.insert("sk", sk_hex);
         let _ = params.insert("src_addr", src_addr);
         let _ = params.insert("src_nonce", src_n);
@@ -332,7 +329,6 @@ where
                         &self.hc,
                         ha_owner,
                         err_nonce,
-                        is_v7,
                     )
                     .await;
                 } else {
@@ -401,7 +397,6 @@ where
                 err_nonce,
                 map_key,
                 &self.hc,
-                is_v7,
             )
             .await;
         }
@@ -480,8 +475,7 @@ where
                 .await
                 .unwrap();
             let cleanup_op =
-                hybrid_compute::rr_op(&self.hc, entry_point, c_nonce, cleanup_keys.clone(), is_v7)
-                    .await;
+                hybrid_compute::rr_op(&self.hc, entry_point, c_nonce, cleanup_keys.clone()).await;
 
             println!("HC cleanup_op {:?} {:?}", cleanup_op, cleanup_keys);
             let r4a = self

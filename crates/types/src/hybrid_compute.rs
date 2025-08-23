@@ -156,6 +156,7 @@ pub fn get_hc_sender(ent: HcEntry) -> Address {
 }
 
 /// Set the EOA address which the bundler is using. Erigon, but not geth, needs this for tx simulation
+/// Boba is deprecating Erigon so this will be removed
 pub fn set_signer(from_addr: Address) {
     let mut cfg = HC_CONFIG.lock().unwrap();
     cfg.from_addr = from_addr;
@@ -165,7 +166,6 @@ pub fn set_signer(from_addr: Address) {
 pub fn make_op_calldata(sender: Address, map_key: B256, payload: Bytes) -> Bytes {
     let mut put_data = [0xdfu8, 0xc9, 0x8a, 0xe8].to_vec(); // helper "PutResponse(bytes32,bytes)" selector
 
-    //put_data.extend(AbiEncode::encode((map_key, payload)));
     let p1_enc = Bytes((map_key, payload).abi_encode().into()).slice(32..);
     put_data.extend(p1_enc);
 
@@ -271,7 +271,6 @@ fn make_external_op(
     sig_hex: String,
     oo_nonce: U256,
     cfg: &HcCfg,
-    is_v7: bool,
 ) -> (UserOperationOptionalGas, Bytes) {
     let tmp_bytes: Bytes = Bytes::from(response_payload.to_vec());
 
@@ -291,7 +290,7 @@ fn make_external_op(
         call_gas,
         call_data
     );
-    if is_v7 {
+    if true {
         let mut new_op = UserOperationOptionalGasV0_7 {
             sender: ha_addr,
             nonce: oo_nonce,
@@ -354,7 +353,6 @@ pub async fn external_op(
     cfg: &HcCfg,
     ha_owner: Address,
     nn: U256,
-    is_v7: bool,
 ) -> HcErr {
     let (mut new_op, mut new_cd) = make_external_op(
         src_addr,
@@ -366,7 +364,6 @@ pub async fn external_op(
         sig_hex.clone(),
         oo_nonce,
         cfg,
-        is_v7,
     );
 
     let check_hash = new_op
@@ -407,7 +404,6 @@ pub async fn external_op(
             cfg,
             entry_point,
             wallet,
-            is_v7,
         )
         .await;
     }
@@ -420,7 +416,7 @@ pub async fn external_op(
         ts: SystemTime::now(),
         oc_gas: 0,
         needed_pvg: 0,
-        is_v7,
+        is_v7: true,
     };
     HC_MAP.lock().unwrap().insert(op_key, ent);
 
@@ -437,7 +433,6 @@ async fn make_err_op(
     cfg: &HcCfg,
     _entry_point: Address,
     wallet: PrivateKeySigner,
-    is_v7: bool,
 ) -> (UserOperationOptionalGas, Bytes) {
     //    let response_payload: Bytes =
     //        AbiEncode::encode((src_addr, nn, err_hc.code, err_hc.message)).into();
@@ -455,7 +450,7 @@ async fn make_err_op(
         Bytes::from(response_payload.to_vec()),
     );
 
-    if is_v7 {
+    if true {
         let mut new_op = UserOperationOptionalGasV0_7 {
             sender: cfg.sys_account,
             nonce: oo_nonce,
@@ -524,7 +519,6 @@ pub async fn err_op(
     oo_nonce: U256,
     map_key: B256,
     cfg: &HcCfg,
-    is_v7: bool,
 ) {
     println!(
         "HC hybrid_compute err_op op_key {:?} err_str {:?}",
@@ -543,7 +537,6 @@ pub async fn err_op(
         cfg,
         entry_point,
         wallet,
-        is_v7,
     )
     .await;
 
@@ -555,7 +548,7 @@ pub async fn err_op(
         ts: SystemTime::now(),
         oc_gas: 0,
         needed_pvg: 0,
-        is_v7,
+        is_v7: true,
     };
     HC_MAP.lock().unwrap().insert(op_key, ent);
 }
@@ -566,12 +559,11 @@ pub async fn rr_op(
     _entry_point: Address,
     oo_nonce: U256,
     keys: Vec<B256>,
-    is_v7: bool,
 ) -> UserOperationOptionalGas {
     let call_data = make_rr_calldata(keys);
     println!("HC rr_op call_data {:?}", call_data);
 
-    if is_v7 {
+    if true {
         let mut new_op = UserOperationOptionalGasV0_7 {
             sender: cfg.sys_account,
             nonce: oo_nonce,
@@ -857,7 +849,6 @@ mod test {
             "0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c".to_string(),
             U256::from(222),
             &cfg,
-            true,
         );
 
         let e_calldata = "0xb61d27f60000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000124dfc98ae82222222222222222222222222222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000010000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();
@@ -929,7 +920,6 @@ mod test {
                 .parse::<Address>()
                 .unwrap(),
             wallet,
-            true,
         );
 
         let e_calldata = "0xb61d27f60000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000124fde89b642222222222222222222222222222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000020000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000009756e69742074657374000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse::<Bytes>().unwrap();

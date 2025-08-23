@@ -958,9 +958,9 @@ where
                 .get_nonce(cfg.sys_account, U192::ZERO)
                 .await
                 .unwrap();
-            let is_v7 = *entry_point.address() == self.settings.chain_spec.entry_point_address_v0_7;
+            //let is_v7 = *entry_point.address() == self.settings.chain_spec.entry_point_address_v0_7;
             let cleanup_op: UserOperationVariant =
-                hybrid_compute::rr_op(&cfg, *entry_point.address(), c_nonce, cleanup_keys, is_v7)
+                hybrid_compute::rr_op(&cfg, *entry_point.address(), c_nonce, cleanup_keys)
                     .await
                     .into_variant(&self.settings.chain_spec);
             let (block_hash, _) = self
