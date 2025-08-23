@@ -17,6 +17,9 @@ pub(crate) use api::EthApi;
 mod router;
 pub(crate) use router::*;
 
+mod hc;
+pub(crate) use hc::*;
+
 mod error;
 pub(crate) use error::{EthResult, EthRpcError};
 mod events;
