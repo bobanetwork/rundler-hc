@@ -166,18 +166,6 @@ impl<EP, BP> BundleProposer for BundleProposerImpl<EP, BP>
 where
     EP: ProvidersWithEntryPointT,
     BP: BundleProposerProvidersT,
-    /*
-        UO: UserOperation + From<UserOperationVariant>,
-        UserOperationVariant: AsRef<UO>,
-        S: Simulator<UO = UO>,
-        E: EntryPoint
-            + SignatureAggregator<UO = UO>
-            + BundleHandler<UO = UO>
-            + L1GasProvider<UO = UO>
-            + SimulationProvider<UO = UO>,
-        P: Provider,
-        M: Pool,
-    */
 {
     type UO = EP::UO;
 
@@ -369,21 +357,6 @@ impl<EP, BP> BundleProposerImpl<EP, BP>
 where
     EP: ProvidersWithEntryPointT,
     BP: BundleProposerProvidersT,
-    /*
-    use rundler_provider::SimulationProvider;
-    impl<UO, S, E, P, M> BundleProposerImpl<UO, S, E, P, M>
-    where
-        UO: UserOperation + From<UserOperationVariant>,
-        UserOperationVariant: AsRef<UO>,
-        S: Simulator<UO = UO>,
-        E: EntryPoint
-            + SignatureAggregator<UO = UO>
-            + BundleHandler<UO = UO>
-            + L1GasProvider<UO = UO>
-            + SimulationProvider<UO = UO>,
-        P: Provider,
-        M: Pool,
-    */
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -563,22 +536,21 @@ where
                     },
                 ));
                 return None;
-            } else {
-                self.emit(BuilderEvent::skipped_op(
-                    self.builder_tag.clone(),
-                    op_hash,
-                    SkipReason::InsufficientPreVerificationGas {
-                        base_fee,
-                        op_fees: GasFees {
-                            max_fee_per_gas: op.uo.max_fee_per_gas(),
-                            max_priority_fee_per_gas: op.uo.max_priority_fee_per_gas(),
-                        },
-                        required_pvg,
-                        actual_pvg: op.uo.pre_verification_gas(),
-                    },
-                ));
-                return None;
             }
+            self.emit(BuilderEvent::skipped_op(
+                self.builder_tag.clone(),
+                op_hash,
+                SkipReason::InsufficientPreVerificationGas {
+                    base_fee,
+                    op_fees: GasFees {
+                        max_fee_per_gas: op.uo.max_fee_per_gas(),
+                        max_priority_fee_per_gas: op.uo.max_priority_fee_per_gas(),
+                    },
+                    required_pvg,
+                    actual_pvg: op.uo.pre_verification_gas(),
+                },
+            ));
+            return None;
         }
 
         // Check total gas cost and time for bundler sponsorship
@@ -687,9 +659,8 @@ where
         let mut context = ProposalContext::<<Self as BundleProposer>::UO>::new();
         let mut paymasters_to_reject = Vec::<EntityInfo>::new();
 
-        let mut gas_spent = rundler_types::bundle_shared_gas(&self.settings.chain_spec);
-        let mut cleanup_keys: Vec<B256> = Vec::new();
         let mut passed_target = false;
+        let mut cleanup_keys: Vec<B256> = Vec::new();
 
         for (po, simulation) in ops_with_simulations {
             // first process any possible rejections
@@ -774,7 +745,7 @@ where
                 });
 
             // Limit by max bundle computation gas (excluding DA gas)
-            let bundle_computation_gas_limit =
+            let mut bundle_computation_gas_limit =
                 context_with_op.get_bundle_computation_gas_limit(&self.settings.chain_spec);
             if bundle_computation_gas_limit > self.settings.max_bundle_gas {
                 self.emit(BuilderEvent::skipped_op(
@@ -811,25 +782,23 @@ where
                 continue;
             }
 
-            // Skip this op if the bundle does not have enough remaining gas to execute it.
-            let mut required_gas =
-                gas_spent + op.bundle_computation_gas_limit(&self.settings.chain_spec, None);
-
+            // Account for the gas which will be added by an offchain HC operation
             let hc_hash = op.hc_hash();
             let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
             if hc_ent.is_some() {
-                required_gas += hc_ent.clone().unwrap().oc_gas;
+                let offchain_gas = hc_ent.clone().unwrap().oc_gas;
+                bundle_computation_gas_limit += offchain_gas;
                 println!(
                     "HC bundle_properer found hc_ent {:?} op_hash {:?} required_gas {:?}",
-                    hc_ent, hc_hash, required_gas
+                    hc_ent, hc_hash, offchain_gas
                 );
             }
 
-            if required_gas > self.settings.max_bundle_gas {
+            if bundle_computation_gas_limit > self.settings.max_bundle_gas {
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
                     op.hash(),
-                    SkipReason::MaxGasLimit, //FIXME
+                    SkipReason::MaxGasLimit,
                 ));
                 continue;
             }
@@ -887,11 +856,7 @@ where
                 }
             }
 
-            // FIXME // Update the running gas that would need to be be spent to execute the bundle so far.
-            // gas_spent += op.computation_gas_limit(&self.settings.chain_spec, None);
-            // Update the running totals
-            //gas_spent = gas_spent.saturating_add(op_computation_gas_limit);
-
+            // Insert the HC operation, if applicable
             if hc_ent.is_some() {
                 let (block_hash, _) = self
                     .ep_providers
@@ -900,7 +865,6 @@ where
                     .await
                     .expect("get block_hash for hc");
 
-                gas_spent += hc_ent.clone().unwrap().oc_gas;
                 println!("HC insert, hc_ent {:?}", hc_ent);
                 let u_op2: UserOperationVariant = hc_ent
                     .clone()
