@@ -1,6 +1,8 @@
 #!/bin/sh
 
-# Configuration parameters are now taken from environment variables
+# Configuration parameters are now taken from environment variables.
+# Changes here should be synced with ../docker-wrapper.sh
+
 RUST_BACKTRACE=1 ETH_POLL_INTERVAL_MILLIS=5000 \
   ../target/debug/rundler node \
   --rpc.port 3300 \

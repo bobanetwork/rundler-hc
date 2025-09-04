@@ -92,12 +92,16 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.connect(("192.0.2.0", 1))
 local_ip = s.getsockname()[0]
 s.close()
+if False:
+    local_url_prefix = "http://127.0.0.1:"
+else:
+    local_url_prefix = "http://" + str(local_ip) + ":"
 
-l1 = Web3(Web3.HTTPProvider("http://127.0.0.1:" + str(l1_rpc_port)))
+l1 = Web3(Web3.HTTPProvider(local_url_prefix + str(l1_rpc_port)))
 assert l1.is_connected
 l1.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:" + str(l2_rpc_port)))
+w3 = Web3(Web3.HTTPProvider(local_url_prefix + str(l2_rpc_port)))
 assert w3.is_connected
 
 l1_util = eth_utils(l1)
@@ -272,7 +276,7 @@ def deploy_account(factory, owner):
 
 def deploy_forge(script, cmd_env):
     args = ["forge", "script", "--json", "--broadcast", "--via-ir", "--root", "v0_7"]
-    args.append("--rpc-url=http://127.0.0.1:" + str(l2_rpc_port))
+    args.append("--rpc-url=" + local_url_prefix + str(l2_rpc_port))
     args.append("--contracts")
 
     args.append("hc_src")
@@ -498,7 +502,7 @@ env_vars['TEST_RANDOM'] = TEST_RANDOM.address
 # Other
 env_vars['BOBA_TOKEN'] = boba_token
 env_vars['SIMPLE_PM'] = pm_addr
-env_vars['NODE_HTTP'] = "http://127.0.0.1:" + str(l2_rpc_port)
+env_vars['NODE_HTTP'] = local_url_prefix + str(l2_rpc_port)
 env_vars['OC_NODE_HTTP'] = env_vars['NODE_HTTP']
 env_vars['CHAIN_ID'] = chain_id
 

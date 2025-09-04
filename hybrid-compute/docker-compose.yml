@@ -24,15 +24,14 @@ services:
       HC_SYS_ACCOUNT:  ${HC_SYS_ACCOUNT}  # Deployed contract address
       HC_SYS_OWNER:    ${HC_SYS_OWNER}    # Owner/Signer for HC_SYS_ACCOUNT
       HC_SYS_PRIVKEY:  ${HC_SYS_PRIVKEY}  # Owner/Signer for HC_SYS_ACCOUNT
-      BUILDER_PRIVATE_KEY: ${BUILDER_PRIVKEY} # Key for bundler EOA
+      SIGNER_PRIVATE_KEYS: ${SIGNER_PRIVATE_KEYS} # Keys for bundler EOA
       NODE_HTTP:       ${NODE_HTTP}       # Replica/Sequencer URL
       CHAIN_ID:        ${CHAIN_ID}        # Chain ID
       RPC_PORT:        3300               # RPC port to submit into Bundler
     ports:
       - 3300:3300
-    command: >
-      node
-      --disable_entry_point_v0_6
+#    command: >
+#      --disable_entry_point_v0_6
 
   offchain-rpc:
     build:
@@ -47,5 +46,9 @@ services:
       OC_HYBRID_ACCOUNT: ${OC_HYBRID_ACCOUNT}  # Deployed contract address
       OC_OWNER:          ${OC_OWNER}           # Owner/Signer for OC_HYBRID_ACCOUNT
       OC_PRIVKEY:        ${OC_PRIVKEY}         # Owner/Signer for OC_HYBRID_ACCOUNT
+      OC_NODE_HTTP:      ${OC_NODE_HTTP}       # RPC node for VRF
+      OC_RANDOM_SECRET:  ${OC_RANDOM_SECRET}   # VRF secret
+      OC_RANDOM_KEYHASH: ${OC_RANDOM_KEYHASH}  # VRV public keyhash
+
     ports:
       - 1234:1234
