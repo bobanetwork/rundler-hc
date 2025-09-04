@@ -187,18 +187,12 @@ impl Assigner {
                 );
 
                 // Confirm that the matching UO will be found later, but don't process it here.
-                let (locked_builder_address, lock_state) = state
+                let (locked_builder_address, _) = state
                     .uo_sender_to_builder_state
                     .get(hc_check)
                     .expect("BUG: confirmed_sender not found in state, lock contract broken (HC)");
                 if *locked_builder_address != builder_address {
                     panic!("BUG: confirmed_sender {:?} is assigned to another builder expected: {:?} found: {:?}, lock contract broken", confirmed_sender, builder_address, locked_builder_address);
-                }
-                if *lock_state != LockState::Assigned {
-                    panic!(
-                        "BUG: confirmed_sender {:?} not confirmed to builder {:?} (HC)",
-                        hc_check, builder_address
-                    );
                 }
 
                 state.hc_extra_senders.remove(confirmed_sender);
