@@ -2,7 +2,8 @@ import os
 from web3 import Web3
 from jsonrpclib.SimpleJSONRPCServer import SimpleJSONRPCServer, SimpleJSONRPCRequestHandler
 
-from add_sub_2.add_sub_2_offchain import offchain_addsub2,offchain_random
+from add_sub_2.add_sub_2_offchain import offchain_addsub2
+from vrf.vrf_offchain import offchain_random
 from ramble.ramble_offchain import offchain_ramble
 from check_kyc.check_kyc_offchain import offchain_checkkyc
 from get_token_price.get_token_price_offchain import offchain_getprice

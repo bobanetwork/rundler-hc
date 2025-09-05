@@ -2,7 +2,8 @@ from random import *
 from jsonrpcclient import request
 from get_token_price.get_token_price_test import TestTokenPrice
 from check_kyc.check_kyc_test import TestKyc
-from add_sub_2.add_sub_2_test import TestAddSub2,TestRandomRequest
+from add_sub_2.add_sub_2_test import TestAddSub2
+from vrf.vrf_test import TestRandomRequest
 from ramble.ramble_test import TestWordGuess
 #from verify_captcha.captcha_test import TestCaptcha
 from auction_system.auction_system_test import TestAuction
