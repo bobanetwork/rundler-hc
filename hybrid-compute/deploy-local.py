@@ -1,10 +1,11 @@
-import os
+import argparse
+import base64
 import json
-import time
+import os
 import re
 import subprocess
 import socket
-import argparse
+import time
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_abi import abi as ethabi
@@ -19,6 +20,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--boba-path", required=True, help="Path to your local Boba/Optimism repository")
 parser.add_argument("--deploy-salt", required=False, help="Salt value for contract deployment", default="0")
 parser.add_argument("--ep-version", required=False, help="EntryPoint contract version (0.6|0.7)", default="0.7")
+parser.add_argument("--kms-port", required=False, help="Optional KMS server port (on localhost)", default=0)
 
 cli_args = parser.parse_args()
 
@@ -38,8 +40,53 @@ with open("local.env", "r", encoding="ascii") as f:
     for line in f.readlines():
         if line.startswith('#'):
             continue
+        if cli_args.kms_port:
+            # Override the hardcoded keys
+            if line.startswith("SIGNER_PRIVATE_KEY") or line.startswith("BUNDLER_ADDR"):
+                continue
         k,v = line.strip().split('=')
         env_vars[k] = v
+
+def make_kms_key():
+    """Generate a key on the local KMS server and find its address"""
+    # Expects to find "aws" cli in $PATH
+    args = ["aws", "--endpoint", "http://127.0.0.1:4566", "kms", "create-key",  "--key-usage", "SIGN_VERIFY", "--key-spec", "ECC_SECG_P256K1"]
+    sys_env = os.environ.copy()
+
+    out = subprocess.run(args, cwd="../crates/contracts/contracts", env=sys_env,
+    capture_output=True, check=True)
+    assert out.returncode == 0
+    jstr = out.stdout.decode('ascii')
+    key_json = json.loads(jstr)
+
+    key_id = key_json['KeyMetadata']['KeyId']
+
+    args = ["aws", "--endpoint", "http://127.0.0.1:4566", "kms", "get-public-key",  "--key-id", key_id]
+    out = subprocess.run(args, cwd="../crates/contracts/contracts", env=sys_env,
+    capture_output=True, check=True)
+    assert out.returncode == 0
+    jstr = out.stdout.decode('ascii')
+    key_json = json.loads(jstr)
+
+    key_pub = key_json['PublicKey']
+    key_asn = base64.b64decode(key_pub)
+
+    # Assume fixed offsets rather than parsing ASN.1
+    assert len(key_asn) == 88
+    key_bytes = key_asn[24:]
+    addr_bytes = Web3.keccak(key_bytes)[12:]
+
+    key_addr = Web3.to_checksum_address(Web3.to_hex(addr_bytes))
+    print("    ", key_id, key_addr)
+    return key_id, key_addr
+
+if cli_args.kms_port:
+    print("Generating local KMS keys")
+    k1, a1 = make_kms_key()
+    k2, a2 = make_kms_key()
+    env_vars['BUNDLER_ADDR'] = a1
+    env_vars['BUNDLER_ADDR_V6'] = a2
+    env_vars['SIGNER_AWS_KMS_KEY_IDS'] = k1 + "," + k2
 
 #For old devnet
 #with open(cli_args.boba_path + "/.devnet/addresses.json", "r", encoding="ascii") as f:
@@ -73,17 +120,6 @@ print("  BOBA L1", boba_l1_addr)
 print("  Bridge", bridge_addr)
 print("  BOBA L2", boba_token)
 
-# local.env contains fixed configuration for the local devnet. Additional env variables are
-# generated dynamically when contracts are deployed. Do not use any of the local addr/privkey
-# accounts on public networks.
-print("Reading local.env")
-with open("local.env", "r", encoding="ascii") as f:
-    for line in f.readlines():
-        if line.startswith('#'):
-            continue
-        k,v = line.strip().split('=')
-        env_vars[k] = v
-
 deploy_addr = env_vars['DEPLOY_ADDR']
 deploy_key = env_vars['DEPLOY_PRIVKEY']
 
@@ -93,15 +129,15 @@ s.connect(("192.0.2.0", 1))
 local_ip = s.getsockname()[0]
 s.close()
 if False:
-    local_url_prefix = "http://127.0.0.1:"
+    LOCAL_URL_PREFIX = "http://127.0.0.1:"
 else:
-    local_url_prefix = "http://" + str(local_ip) + ":"
+    LOCAL_URL_PREFIX = "http://" + str(local_ip) + ":"
 
-l1 = Web3(Web3.HTTPProvider(local_url_prefix + str(l1_rpc_port)))
+l1 = Web3(Web3.HTTPProvider(LOCAL_URL_PREFIX + str(l1_rpc_port)))
 assert l1.is_connected
 l1.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-w3 = Web3(Web3.HTTPProvider(local_url_prefix + str(l2_rpc_port)))
+w3 = Web3(Web3.HTTPProvider(LOCAL_URL_PREFIX + str(l2_rpc_port)))
 assert w3.is_connected
 
 l1_util = eth_utils(l1)
@@ -172,17 +208,17 @@ def submit_as_v7_op(addr, calldata, signer_key):
        have a Bundler to run gas estimation so the values are hard-coded. It might be
        necessary to change these values e.g. if simulating different L1 prices on the local devnet"""
 
-    gasLimits = "0x00000000000000000000000000016ed900000000000000000000000000053652"
-    gasFees   = "0x00000000000000000000000039d106800000000000000000000000025b9c274c"
+    gas_limits = "0x00000000000000000000000000016ed900000000000000000000000000053652"
+    gas_fees   = "0x00000000000000000000000039d106800000000000000000000000025b9c274c"
 
     op = {
         'sender':addr,
         'nonce': aa.aa_nonce(addr, 1235),
         'initCode':"0x",
         'callData': Web3.to_hex(calldata),
-        'accountGasLimits': gasLimits,
+        'accountGasLimits': gas_limits,
         'preVerificationGas': "0xF0000",
-        'gasFees': gasFees,
+        'gasFees': gas_fees,
         'paymasterAndData':"0x",
         'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
     }
@@ -275,8 +311,9 @@ def deploy_account(factory, owner):
     return acct_addr
 
 def deploy_forge(script, cmd_env):
+    """Construct parameters and then call 'forge script' to deploy contracts"""
     args = ["forge", "script", "--json", "--broadcast", "--via-ir", "--root", "v0_7"]
-    args.append("--rpc-url=" + local_url_prefix + str(l2_rpc_port))
+    args.append("--rpc-url=" + LOCAL_URL_PREFIX + str(l2_rpc_port))
     args.append("--contracts")
 
     args.append("hc_src")
@@ -305,7 +342,7 @@ def deploy_forge(script, cmd_env):
     # Subprocess will fail if contracts were previously deployed but those addresses were
     # not passed in as env variables. Retry on a cleanly deployed devnet or change deploy_salt.
     if out.returncode != 0:
-      print(out)
+        print(out)
     assert out.returncode == 0
 
     jstr = out.stdout.split(b'\n')[0].decode('ascii')
@@ -330,6 +367,7 @@ def deploy_base():
     return addrs.split(',')
 
 def deploy_examples(hybrid_acct_addr):
+    """Deploy example contracts"""
     cmd_env = {}
     cmd_env['OC_HYBRID_ACCOUNT'] = hybrid_acct_addr
     cmd_env['BOBA_TOKEN'] = boba_token
@@ -502,7 +540,7 @@ env_vars['TEST_RANDOM'] = TEST_RANDOM.address
 # Other
 env_vars['BOBA_TOKEN'] = boba_token
 env_vars['SIMPLE_PM'] = pm_addr
-env_vars['NODE_HTTP'] = local_url_prefix + str(l2_rpc_port)
+env_vars['NODE_HTTP'] = LOCAL_URL_PREFIX + str(l2_rpc_port)
 env_vars['OC_NODE_HTTP'] = env_vars['NODE_HTTP']
 env_vars['CHAIN_ID'] = chain_id
 

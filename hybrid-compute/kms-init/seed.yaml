@@ -1,0 +1,11 @@
+Keys:
+  Symmetric:
+    Aes:
+      - Metadata:
+          KeyId: 6bbdb3c0-17f3-4f4c-be12-26f5492cd407
+        BackingKeys:
+          - 5cdaead27fe7da2de47945d73cd6d79e36494e73802f3cd3869f1d2cb0b5d7a9
+  Asymmetric:
+    Ecc:
+      # Importing secp256k1 is broken as golang's x509 implementation
+      # does not support this curve type.
