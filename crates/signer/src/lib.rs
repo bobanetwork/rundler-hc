@@ -53,6 +53,11 @@ pub struct KmsLockingSettings {
     pub redis_uri: String,
     /// TTL in milliseconds
     pub ttl_millis: u64,
+}
+
+/// Settings for a local KMS server
+#[derive(Debug, Clone)]
+pub struct LocalKmsSettings {
     /// Optional private KMS URL
     pub kms_url: String,
     /// Optional KMS region
@@ -104,11 +109,15 @@ pub enum SigningScheme {
         to_lock: usize,
         /// Settings
         settings: KmsLockingSettings,
+        /// Local KMS settings
+        lk_settings: LocalKmsSettings,
     },
     /// KMS without locking
     AwsKms {
         /// Key IDs
         key_ids: Vec<String>,
+        /// Local KMS settings
+        lk_settings: LocalKmsSettings,
     },
     /// KMS funding key and associated keys
     KmsFunding {
@@ -118,6 +127,8 @@ pub enum SigningScheme {
         lock_settings: Option<KmsLockingSettings>,
         /// Funding settings
         funding_settings: FundingSettings,
+        /// Local KMS settings
+        lk_settings: LocalKmsSettings,
     },
 }
 
@@ -159,6 +170,7 @@ pub async fn new_signer_manager<
             key_ids,
             to_lock,
             settings,
+            lk_settings,
         } => {
             new_kms_signer_manager(
                 task_spawner,
@@ -166,17 +178,22 @@ pub async fn new_signer_manager<
                 key_ids.clone(),
                 *to_lock,
                 Some(settings),
+                lk_settings,
                 chain_spec,
             )
             .await
         }
-        SigningScheme::AwsKms { key_ids } => {
+        SigningScheme::AwsKms {
+            key_ids,
+            lk_settings,
+        } => {
             new_kms_signer_manager(
                 task_spawner,
                 provider.clone(),
                 key_ids.clone(),
                 key_ids.len(),
                 None,
+                lk_settings,
                 chain_spec,
             )
             .await
@@ -185,6 +202,7 @@ pub async fn new_signer_manager<
             subkeys_by_key_id,
             lock_settings,
             funding_settings,
+            lk_settings,
         } => {
             new_kms_funding_signer_manager(
                 task_spawner,
@@ -193,6 +211,7 @@ pub async fn new_signer_manager<
                 subkeys_by_key_id,
                 funding_settings,
                 lock_settings.as_ref(),
+                lk_settings,
                 chain_spec,
                 auto_fund,
             )
@@ -245,6 +264,7 @@ async fn new_kms_signer_manager<P: EvmProvider + 'static, T: TaskSpawner>(
     key_ids: Vec<String>,
     count: usize,
     settings: Option<&KmsLockingSettings>,
+    lk_settings: &LocalKmsSettings,
     chain_spec: &ChainSpec,
 ) -> Result<Arc<dyn SignerManager>> {
     let wallet = if let Some(settings) = settings {
@@ -256,15 +276,21 @@ async fn new_kms_signer_manager<P: EvmProvider + 'static, T: TaskSpawner>(
                 key_ids.to_vec(),
                 settings.redis_uri.clone(),
                 settings.ttl_millis,
-                settings.kms_url.clone(),
-                settings.kms_region.clone(),
+                lk_settings.kms_url.clone(),
+                lk_settings.kms_region.clone(),
             )
             .await?;
             wallet.register_signer(signer);
         }
         wallet
     } else {
-        aws::create_wallet_from_key_ids(key_ids, chain_spec.id).await?
+        aws::create_wallet_from_key_ids(
+            key_ids,
+            chain_spec.id,
+            lk_settings.kms_url.clone(),
+            lk_settings.kms_region.clone(),
+        )
+        .await?
     };
 
     Ok(Arc::new(FundingSignerManager::new(
@@ -289,6 +315,7 @@ async fn new_kms_funding_signer_manager<
     subkeys_by_key_id: &HashMap<String, SigningScheme>,
     settings: &FundingSettings,
     lock_settings: Option<&KmsLockingSettings>,
+    lk_settings: &LocalKmsSettings,
     chain_spec: &ChainSpec,
     auto_fund: bool,
 ) -> Result<Arc<dyn SignerManager>> {
@@ -302,8 +329,8 @@ async fn new_kms_funding_signer_manager<
                 key_ids,
                 lock_settings.redis_uri.clone(),
                 lock_settings.ttl_millis,
-                lock_settings.kms_url.clone(),
-                lock_settings.kms_region.clone(),
+                lk_settings.kms_url.clone(),
+                lk_settings.kms_region.clone(),
             )
             .await?;
             let key_id = signer.key_id().to_string();
@@ -327,8 +354,17 @@ async fn new_kms_funding_signer_manager<
         SigningScheme::PrivateKeys { private_keys } => {
             local::construct_local_wallet_from_private_keys(private_keys, chain_spec.id)?
         }
-        SigningScheme::AwsKms { key_ids } => {
-            aws::create_wallet_from_key_ids(key_ids.clone(), chain_spec.id).await?
+        SigningScheme::AwsKms {
+            key_ids,
+            lk_settings,
+        } => {
+            aws::create_wallet_from_key_ids(
+                key_ids.clone(),
+                chain_spec.id,
+                lk_settings.kms_url.clone(),
+                lk_settings.kms_region.clone(),
+            )
+            .await?
         }
         SigningScheme::Mnemonic { mnemonic, num_keys } => {
             local::construct_local_wallet_from_mnemonic(mnemonic.clone(), chain_spec.id, *num_keys)?

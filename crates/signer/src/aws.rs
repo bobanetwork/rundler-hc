@@ -26,12 +26,31 @@ use tokio::{sync::oneshot, time::sleep};
 
 use crate::Result;
 
+async fn kms_config(kms_url: String, kms_region: String) -> aws_config::SdkConfig {
+    let mut builder = aws_config::load_defaults(BehaviorVersion::v2025_01_17())
+        .await
+        .into_builder();
+    if !kms_region.is_empty() {
+        builder.set_region(Region::new(kms_region));
+    }
+    if !kms_url.is_empty() {
+        let http_client = HyperClientBuilder::new().build_https();
+        builder
+            .set_endpoint_url(Some(kms_url))
+            .set_http_client(Some(http_client));
+    }
+
+    builder.build()
+}
+
 pub(crate) async fn create_wallet_from_key_ids(
     key_ids: Vec<String>,
     chain_id: u64,
+    kms_url: String,
+    kms_region: String,
 ) -> Result<EthereumWallet> {
     let mut wallet = EthereumWallet::default();
-    let config = aws_config::load_defaults(BehaviorVersion::v2025_01_17()).await;
+    let config = kms_config(kms_url, kms_region).await; // aws_config::load_defaults(BehaviorVersion::v2025_01_17()).await;
     let client = aws_sdk_kms::Client::new(&config);
 
     for key_id in key_ids {

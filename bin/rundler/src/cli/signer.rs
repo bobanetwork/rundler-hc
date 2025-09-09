@@ -16,7 +16,7 @@ use std::time::Duration;
 use alloy_primitives::U256;
 use anyhow::{bail, Context};
 use clap::Args;
-use rundler_signer::{FundingSettings, KmsLockingSettings, SigningScheme};
+use rundler_signer::{FundingSettings, KmsLockingSettings, LocalKmsSettings, SigningScheme};
 use secrecy::SecretString;
 
 #[derive(Args, Debug)]
@@ -208,6 +208,8 @@ impl SignerArgs {
                     settings: KmsLockingSettings {
                         redis_uri: self.redis_uri.clone(),
                         ttl_millis: self.redis_lock_ttl_millis,
+                    },
+                    lk_settings: LocalKmsSettings {
                         kms_url: self.kms_url.clone(),
                         kms_region: self.kms_region.clone(),
                     },
@@ -215,6 +217,10 @@ impl SignerArgs {
             } else {
                 return Ok(SigningScheme::AwsKms {
                     key_ids: self.aws_kms_key_ids.clone(),
+                    lk_settings: LocalKmsSettings {
+                        kms_url: self.kms_url.clone(),
+                        kms_region: self.kms_region.clone(),
+                    },
                 });
             }
         }
@@ -230,8 +236,6 @@ impl SignerArgs {
             Some(KmsLockingSettings {
                 redis_uri: self.redis_uri.clone(),
                 ttl_millis: self.redis_lock_ttl_millis,
-                kms_url: self.kms_url.clone(),
-                kms_region: self.kms_region.clone(),
             })
         } else {
             None
@@ -262,6 +266,10 @@ impl SignerArgs {
                         key_id.to_string(),
                         SigningScheme::AwsKms {
                             key_ids: group.clone(),
+                            lk_settings: LocalKmsSettings {
+                                kms_url: self.kms_url.clone(),
+                                kms_region: self.kms_region.clone(),
+                            },
                         },
                     )
                 })
@@ -306,6 +314,10 @@ impl SignerArgs {
                 poll_max_retries: self.funding_txn_poll_max_retries,
                 priority_fee_multiplier: self.funding_txn_priority_fee_multiplier,
                 base_fee_multiplier: self.funding_txn_base_fee_multiplier,
+            },
+            lk_settings: LocalKmsSettings {
+                kms_url: self.kms_url.clone(),
+                kms_region: self.kms_region.clone(),
             },
         })
     }
