@@ -61,7 +61,7 @@ services:
       - 1234:1234
   kms:
     deploy:
-      replicas: 1  # Disabled by default, set 1 to enable
+      replicas: 0  # Disabled by default, set 1 to enable
     image: nsmithuk/local-kms  # https://github.com/nsmithuk/local-kms
     environment:
       KMS_REGION: us-east-1
