@@ -6,11 +6,13 @@ Additional information may be found at https://docs.boba.network/hc and https://
 
 # Changelog
 
-* hc0.3.0
+* hc0.4.0
 
 Merges upstream 0.9.0. Code refactoring. Switches HC to use v0.7 entrypoint.
 Note that eth_estimateUserOperationGas() now returns a paymaster_verification_gas_limit field.
 Some params/envs renamed from BUILDER_ to SIGNER_ namespace.
+
+* (0.3.x were not deployed or were rolled back)
 
 * hc0.2.3
 
