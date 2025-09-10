@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{aggregator::SignatureAggregator, da::DAGasOracleType, proxy::SubmissionProxy};
 
-const ENTRY_POINT_ADDRESS_V6_0: &str = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
-const ENTRY_POINT_ADDRESS_V7_0: &str = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+const ENTRY_POINT_ADDRESS_V0_6: &str = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
+const ENTRY_POINT_ADDRESS_V0_7: &str = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 /// Chain specification for Rundler
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -37,6 +38,9 @@ pub struct ChainSpec {
     pub entry_point_address_v0_6: Address,
     /// entry point address for v0_7
     pub entry_point_address_v0_7: Address,
+    /// address of the multicall3 contract
+    pub multicall3_address: Address,
+
     /// Overhead when preforming gas estimation to account for the deposit storage
     /// and transfer overhead.
     ///
@@ -45,6 +49,8 @@ pub struct ChainSpec {
     pub deposit_transfer_overhead: u64,
     /// The maximum size of a transaction in bytes
     pub max_transaction_size_bytes: usize,
+    /// the block gas limit
+    pub block_gas_limit: u64,
     /// Intrinsic gas cost for a transaction
     pub transaction_intrinsic_gas: u64,
     /// Per user operation gas cost for v0.6
@@ -76,10 +82,22 @@ pub struct ChainSpec {
     pub include_da_gas_in_gas_limit: bool,
 
     /*
-     * Fee estimation
+     * EIPS
      */
     /// true if eip1559 is enabled, and thus priority fees are used
     pub eip1559_enabled: bool,
+    /// true if eip7702 is enabled, and thus the 7702 priority fee mechanism is used
+    pub eip7702_enabled: bool,
+    /// true if eip7623 is enabled, and thus the 7623 calldata floor mechanism is used
+    pub eip7623_enabled: bool,
+    /// Gas cost for a zero byte in calldata for the floor operation
+    pub eip7623_calldata_floor_zero_byte_gas: u64,
+    /// Gas cost for a non-zero byte in calldata for the floor operation
+    pub eip7623_calldata_floor_non_zero_byte_gas: u64,
+
+    /*
+     * Fee estimation
+     */
     /// Type of oracle for estimating priority fees
     pub priority_fee_oracle_type: PriorityFeeOracleType,
     /// Minimum max priority fee per gas for the network
@@ -108,8 +126,6 @@ pub struct ChainSpec {
     pub flashbots_enabled: bool,
     /// URL for the flashbots relay, must be set if flashbots is enabled
     pub flashbots_relay_url: Option<String>,
-    /// URL for the flashbots status, must be set if flashbots is enabled
-    pub flashbots_status_url: Option<String>,
     /// True if the bloxroute sender is enabled on this chain
     pub bloxroute_enabled: bool,
 
@@ -150,8 +166,10 @@ impl Default for ChainSpec {
         Self {
             name: "Unknown".to_string(),
             id: 0,
-            entry_point_address_v0_6: Address::from_str(ENTRY_POINT_ADDRESS_V6_0).unwrap(),
-            entry_point_address_v0_7: Address::from_str(ENTRY_POINT_ADDRESS_V7_0).unwrap(),
+            block_gas_limit: 30_000_000,
+            entry_point_address_v0_6: Address::from_str(ENTRY_POINT_ADDRESS_V0_6).unwrap(),
+            entry_point_address_v0_7: Address::from_str(ENTRY_POINT_ADDRESS_V0_7).unwrap(),
+            multicall3_address: Address::from_str(MULTICALL3_ADDRESS).unwrap(),
             deposit_transfer_overhead: 30_000,
             transaction_intrinsic_gas: 21_000,
             per_user_op_v0_6_gas: 18_300,
@@ -161,6 +179,10 @@ impl Default for ChainSpec {
             calldata_zero_byte_gas: 4,
             calldata_non_zero_byte_gas: 16,
             eip1559_enabled: true,
+            eip7702_enabled: false,
+            eip7623_enabled: false,
+            eip7623_calldata_floor_zero_byte_gas: 10,
+            eip7623_calldata_floor_non_zero_byte_gas: 40,
             da_pre_verification_gas: false,
             da_gas_oracle_type: DAGasOracleType::default(),
             da_gas_oracle_contract_address: Address::ZERO,
@@ -170,10 +192,9 @@ impl Default for ChainSpec {
             max_max_priority_fee_per_gas: u64::MAX,
             congestion_trigger_usage_ratio_threshold: 0.75,
             max_transaction_size_bytes: 131072, // 128 KiB
-            bundle_max_send_interval_millis: u64::MAX,
+            bundle_max_send_interval_millis: 1000,
             flashbots_enabled: false,
             flashbots_relay_url: None,
-            flashbots_status_url: None,
             bloxroute_enabled: false,
             chain_history_size: 64,
             signature_aggregators: Arc::new(ContractRegistry::default()),
@@ -228,9 +249,32 @@ impl ChainSpec {
         self.calldata_non_zero_byte_gas as u128
     }
 
+    /// Get the calldata floor zero byte gas
+    pub fn calldata_floor_zero_byte_gas(&self) -> u128 {
+        if self.eip7623_enabled {
+            self.eip7623_calldata_floor_zero_byte_gas as u128
+        } else {
+            0
+        }
+    }
+
+    /// Get the calldata floor non zero byte gas
+    pub fn calldata_floor_non_zero_byte_gas(&self) -> u128 {
+        if self.eip7623_enabled {
+            self.eip7623_calldata_floor_non_zero_byte_gas as u128
+        } else {
+            0
+        }
+    }
+
     /// Get the per user operation deploy overhead gas
     pub fn per_user_op_deploy_overhead_gas(&self) -> u128 {
         self.per_user_op_deploy_overhead_gas as u128
+    }
+
+    /// Calculate a multiple of the block limit
+    pub fn block_gas_limit_mult(&self, mult: f64) -> u128 {
+        (self.block_gas_limit as f64 * mult) as u128
     }
 
     /// Set signature aggregators
@@ -266,6 +310,11 @@ impl ChainSpec {
     pub fn known_proxy_addresses(&self) -> impl Iterator<Item = &Address> {
         self.submission_proxies.contracts.keys()
     }
+
+    /// Check if the chain supports EIP-7702
+    pub fn supports_eip7702(&self, entry_point: Address) -> bool {
+        self.eip7702_enabled || entry_point == self.entry_point_address_v0_7
+    }
 }
 
 /// Registry of contracts
@@ -291,5 +340,54 @@ impl<T> Default for ContractRegistry<T> {
         Self {
             contracts: HashMap::new(),
         }
+    }
+}
+
+/// Fallibly convert types with the help of the chain spec
+pub trait TryFromWithSpec<T>: Sized {
+    /// Convert error
+    type Error;
+
+    /// Fallibly convert types with the help of the chain spec
+    fn try_from_with_spec(value: T, chain_spec: &ChainSpec) -> Result<Self, Self::Error>;
+}
+
+/// Fallibly convert types with the help of the chain spec
+pub trait TryIntoWithSpec<T>: Sized {
+    /// Convert error
+    type Error;
+
+    /// Fallibly convert types with the help of the chain spec
+    fn try_into_with_spec(self, chain_spec: &ChainSpec) -> Result<T, Self::Error>;
+}
+
+impl<T, U> TryIntoWithSpec<U> for T
+where
+    U: TryFromWithSpec<T>,
+{
+    type Error = U::Error;
+    fn try_into_with_spec(self, chain_spec: &ChainSpec) -> Result<U, U::Error> {
+        U::try_from_with_spec(self, chain_spec)
+    }
+}
+
+/// Convert types with the help of the chain spec
+pub trait FromWithSpec<T>: Sized {
+    /// Convert types with the help of the chain spec
+    fn from_with_spec(value: T, chain_spec: &ChainSpec) -> Self;
+}
+
+/// Convert types with the help of the chain spec
+pub trait IntoWithSpec<T>: Sized {
+    /// Convert types with the help of the chain spec
+    fn into_with_spec(self, chain_spec: &ChainSpec) -> T;
+}
+
+impl<T, U> IntoWithSpec<U> for T
+where
+    U: FromWithSpec<T>,
+{
+    fn into_with_spec(self, chain_spec: &ChainSpec) -> U {
+        U::from_with_spec(self, chain_spec)
     }
 }

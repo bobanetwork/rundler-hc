@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.23;
 
-import "forge-std/Script.sol";
-import "src/hc0_7/HybridAccount.sol";
-import "src/hc0_7/TestAuctionSystem.sol";
-import "src/hc0_7/TestCaptcha.sol";
-import "src/hc0_7/TestHybrid.sol";
-import "src/hc0_7/TestRainfallInsurance.sol";
-import "src/hc0_7/TestSportsBetting.sol";
-import "src/hc0_7/TestKyc.sol";
-import "src/hc0_7/TestTokenPrice.sol";
-import "src/hc0_7/TestRandom.sol";
+import "../common/lib/forge-std/src/Script.sol";
+import "hc_src/HybridAccount.sol";
+import "hc_src/TestAuctionSystem.sol";
+import "hc_src/TestCaptcha.sol";
+import "hc_src/TestHybrid.sol";
+import "hc_src/TestRainfallInsurance.sol";
+import "hc_src/TestSportsBetting.sol";
+import "hc_src/TestKyc.sol";
+import "hc_src/TestTokenPrice.sol";
+import "hc_src/TestRandom.sol";
 import "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 contract LocalDeploy is Script {

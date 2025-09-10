@@ -11,11 +11,10 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_json_rpc::{RpcParam, RpcReturn};
+//use alloy_json_rpc::{RpcParam, RpcReturn};
 use alloy_primitives::{aliases::U192, Address, Bytes, TxHash, B256, U256};
 use alloy_rpc_types_eth::{
-    state::StateOverride, Block, BlockId, BlockNumberOrTag, FeeHistory, Filter, Log, Transaction,
-    TransactionReceipt, TransactionRequest,
+    state::StateOverride, BlockId, BlockNumberOrTag, FeeHistory, Filter, Log,
 };
 use alloy_rpc_types_trace::geth::{
     GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace,
@@ -23,15 +22,17 @@ use alloy_rpc_types_trace::geth::{
 use rundler_contracts::utils::GetGasUsed::GasUsedResult;
 use rundler_types::{
     chain::ChainSpec,
-    da::{DAGasBlockData, DAGasUOData},
-    v0_6, v0_7, GasFees, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
+    da::{DAGasBlockData, DAGasData},
+    v0_6, v0_7, EntryPointVersion, ExpectedStorage, GasFees, UserOpsPerAggregator,
+    ValidationOutput, ValidationRevert,
 };
 
 use super::error::ProviderResult;
 use crate::{
-    AggregatorOut, BlockHashOrNumber, BundleHandler, DAGasOracle, DAGasOracleSync, DAGasProvider,
-    DepositInfo, EntryPoint, EntryPointProvider, EvmCall, EvmProvider as EvmProviderTrait,
-    ExecutionResult, HandleOpsOut, SignatureAggregator, SimulationProvider,
+    AggregatorOut, Block, BlockHashOrNumber, BundleHandler, DAGasOracle, DAGasOracleSync,
+    DAGasProvider, DepositInfo, EntryPoint, EntryPointProvider, EvmCall,
+    EvmProvider as EvmProviderTrait, ExecutionResult, FeeEstimator, HandleOpsOut, RpcRecv, RpcSend,
+    SignatureAggregator, SimulationProvider, Transaction, TransactionReceipt, TransactionRequest,
 };
 
 mockall::mock! {
@@ -41,8 +42,8 @@ mockall::mock! {
     impl EvmProviderTrait for EvmProvider {
         async fn request<P, R>(&self, method: &'static str, params: P) -> ProviderResult<R>
         where
-            P: RpcParam + 'static,
-            R: RpcReturn;
+            P: RpcSend + 'static,
+            R: RpcRecv;
 
         async fn fee_history(
             &self,
@@ -53,14 +54,24 @@ mockall::mock! {
 
         async fn call(
             &self,
-            tx: &TransactionRequest,
+            tx: TransactionRequest,
             block: Option<BlockId>,
-            state_overrides: &StateOverride,
+            state_overrides: Option<StateOverride>,
         ) -> ProviderResult<Bytes>;
+
+        async fn send_raw_transaction(&self, tx: Bytes) -> ProviderResult<TxHash>;
+
+        async fn send_raw_transaction_conditional(
+            &self,
+            tx: Bytes,
+            expected_storage: &ExpectedStorage,
+        ) -> ProviderResult<TxHash>;
 
         async fn get_block_number(&self) -> ProviderResult<u64>;
 
         async fn get_block(&self, block_id: BlockId) -> ProviderResult<Option<Block>>;
+
+        async fn get_full_block(&self, block_id: BlockId) -> ProviderResult<Option<Block>>;
 
         async fn get_balance(&self, address: Address, block: Option<BlockId>) -> ProviderResult<U256>;
 
@@ -109,6 +120,11 @@ mockall::mock! {
             addresses: Vec<Address>,
             block: Option<BlockId>,
         ) -> ProviderResult<B256>;
+
+        async fn get_balances(
+            &self,
+            addresses: Vec<Address>,
+        ) -> ProviderResult<Vec<(Address, U256)>>;
     }
 }
 
@@ -117,6 +133,7 @@ mockall::mock! {
 
     #[async_trait::async_trait]
     impl EntryPoint for EntryPointV0_6 {
+        fn version(&self) -> EntryPointVersion;
         fn address(&self) -> &Address;
         async fn balance_of(&self, address: Address, block_id: Option<BlockId>)
             -> ProviderResult<U256>;
@@ -152,12 +169,15 @@ mockall::mock! {
             user_op: v0_6::UserOperation,
             block_id: Option<BlockId>
         ) -> ProviderResult<Result<ValidationOutput, ValidationRevert>>;
-        fn get_simulate_handle_op_call(
+        async fn simulate_handle_op(
             &self,
             op: v0_6::UserOperation,
+            target: Address,
+            target_call_data: Bytes,
+            block_id: BlockId,
             state_override: StateOverride,
-        ) -> crate::EvmCall;
-        async fn simulate_handle_op(
+        ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>>;
+        async fn simulate_handle_op_estimate_gas(
             &self,
             op: v0_6::UserOperation,
             target: Address,
@@ -182,7 +202,7 @@ mockall::mock! {
             block: BlockHashOrNumber,
             gas_price: u128,
             bundle_size: usize,
-        ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
+        ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)>;
     }
 
     #[async_trait::async_trait]
@@ -195,6 +215,7 @@ mockall::mock! {
             gas_limit: u64,
             gas_fees: GasFees,
             proxy: Option<Address>,
+            validation_only: bool,
         ) -> ProviderResult<HandleOpsOut>;
         fn get_send_bundle_transaction(
             &self,
@@ -204,7 +225,7 @@ mockall::mock! {
             gas_fees: GasFees,
             proxy: Option<Address>,
         ) -> TransactionRequest;
-        fn decode_handle_ops_revert(message: &str, revert_data: &Bytes) -> HandleOpsOut;
+        fn decode_handle_ops_revert(message: &str, revert_data: &Option<Bytes>) -> Option<HandleOpsOut>;
         fn decode_ops_from_calldata(
             chain_spec: &ChainSpec,
             calldata: &Bytes,
@@ -219,6 +240,7 @@ mockall::mock! {
 
     #[async_trait::async_trait]
     impl EntryPoint for EntryPointV0_7 {
+        fn version(&self) -> EntryPointVersion;
         fn address(&self) -> &Address;
         async fn balance_of(&self, address: Address, block_id: Option<BlockId>)
             -> ProviderResult<U256>;
@@ -254,12 +276,15 @@ mockall::mock! {
             user_op: v0_7::UserOperation,
             block_id: Option<BlockId>
         ) -> ProviderResult<Result<ValidationOutput, ValidationRevert>>;
-        fn get_simulate_handle_op_call(
+        async fn simulate_handle_op(
             &self,
             op: v0_7::UserOperation,
+            target: Address,
+            target_call_data: Bytes,
+            block_id: BlockId,
             state_override: StateOverride,
-        ) -> crate::EvmCall;
-        async fn simulate_handle_op(
+        ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>>;
+        async fn simulate_handle_op_estimate_gas(
             &self,
             op: v0_7::UserOperation,
             target: Address,
@@ -283,11 +308,11 @@ mockall::mock! {
             block: BlockHashOrNumber,
             gas_price: u128,
             bundle_size: usize,
-        ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
+        ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)>;
     }
 
     #[async_trait::async_trait]
-    impl BundleHandler for EntryPointV0_7 {
+    impl<'a> BundleHandler for EntryPointV0_7 {
         type UO = v0_7::UserOperation;
         async fn call_handle_ops(
             &self,
@@ -296,6 +321,7 @@ mockall::mock! {
             gas_limit: u64,
             gas_fees: GasFees,
             proxy: Option<Address>,
+            validation_only: bool,
         ) -> ProviderResult<HandleOpsOut>;
         fn get_send_bundle_transaction(
             &self,
@@ -305,7 +331,7 @@ mockall::mock! {
             gas_fees: GasFees,
             proxy: Option<Address>,
         ) -> TransactionRequest;
-        fn decode_handle_ops_revert(message: &str, revert_data: &Bytes) -> HandleOpsOut;
+        fn decode_handle_ops_revert(message: &str, revert_data: &Option<Bytes>) -> Option<HandleOpsOut>;
         fn decode_ops_from_calldata(
             chain_spec: &ChainSpec,
             calldata: &Bytes,
@@ -320,16 +346,16 @@ mockall::mock! {
 
     #[async_trait::async_trait]
     impl DAGasOracleSync for DAGasOracleSync {
-        async fn block_data(&self, block: BlockHashOrNumber) -> ProviderResult<DAGasBlockData>;
-        async fn uo_data(
+        async fn da_block_data(&self, block: BlockHashOrNumber) -> ProviderResult<DAGasBlockData>;
+        async fn da_gas_data(
             &self,
             uo_data: Bytes,
             to: Address,
             block: BlockHashOrNumber,
-        ) -> ProviderResult<DAGasUOData>;
+        ) -> ProviderResult<DAGasData>;
         fn calc_da_gas_sync(
             &self,
-            uo_data: &DAGasUOData,
+            data: &DAGasData,
             block_data: &DAGasBlockData,
             gas_price: u128,
             extra_bytes_len: usize,
@@ -340,11 +366,26 @@ mockall::mock! {
     impl DAGasOracle for DAGasOracleSync {
         async fn estimate_da_gas(
             &self,
-            uo_bytes: Bytes,
+            bytes: Bytes,
             to: Address,
             block: BlockHashOrNumber,
             gas_price: u128,
             extra_data_len: usize,
-        ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
+        ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)>;
+    }
+}
+
+mockall::mock! {
+    pub FeeEstimator {}
+
+    #[async_trait::async_trait]
+    impl FeeEstimator for FeeEstimator {
+        async fn required_bundle_fees(
+            &self,
+            block_hash: B256,
+            min_fees: Option<GasFees>,
+        ) -> anyhow::Result<(GasFees, u128)>;
+        async fn latest_bundle_fees(&self) -> anyhow::Result<(GasFees, u128)>;
+        fn required_op_fees(&self, bundle_fees: GasFees) -> GasFees;
     }
 }

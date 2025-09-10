@@ -21,7 +21,7 @@ use mockall::automock;
 use rundler_provider::ProviderError;
 use rundler_types::{
     pool::{MempoolError, SimulationViolation},
-    EntityInfos, UserOperation, ValidTimeRange,
+    EntityInfos, ExpectedStorage, UserOperation, ValidTimeRange,
 };
 
 mod context;
@@ -41,7 +41,7 @@ pub mod v0_6;
 /// Entry Point v0.7 Tracing
 pub mod v0_7;
 
-use crate::{ExpectedStorage, ViolationError};
+use crate::ViolationError;
 
 /// The result of a successful simulation
 #[derive(Clone, Debug, Default)]
@@ -140,6 +140,7 @@ pub trait Simulator: Send + Sync {
     async fn simulate_validation(
         &self,
         op: Self::UO,
+        trusted: bool,
         block_hash: B256,
         expected_code_hash: Option<B256>,
     ) -> Result<SimulationResult, SimulationError>;
@@ -157,17 +158,8 @@ pub struct Settings {
     /// The max duration of the custom javascript tracer. Must be in a format parseable by the
     /// ParseDuration function on an ethereum node. See Docs: https://pkg.go.dev/time#ParseDuration
     pub tracer_timeout: String,
-}
-
-impl Settings {
-    /// Create new settings
-    pub fn new(min_unstake_delay: u32, min_stake_value: U256, tracer_timeout: String) -> Self {
-        Self {
-            min_unstake_delay,
-            min_stake_value,
-            tracer_timeout,
-        }
-    }
+    /// If set, allows the simulator to fallback to unsafe mode if the simulation tracer fails
+    pub enable_unsafe_fallback: bool,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -179,6 +171,7 @@ impl Default for Settings {
             // 10^18 wei = 1 eth
             min_stake_value: uint!(1_000_000_000_000_000_000_U256),
             tracer_timeout: "10s".to_string(),
+            enable_unsafe_fallback: false,
         }
     }
 }

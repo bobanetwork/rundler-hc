@@ -13,10 +13,12 @@
 
 mod api;
 pub(crate) use api::EthApi;
-pub use api::Settings as EthApiSettings;
 
 mod router;
 pub(crate) use router::*;
+
+mod hc;
+pub(crate) use hc::*;
 
 mod error;
 pub(crate) use error::{EthResult, EthRpcError};
@@ -30,7 +32,7 @@ use rundler_provider::StateOverride;
 
 use crate::types::{
     RpcGasEstimate, RpcUserOperation, RpcUserOperationByHash, RpcUserOperationOptionalGas,
-    RpcUserOperationReceipt,
+    RpcUserOperationPermissions, RpcUserOperationReceipt,
 };
 
 /// Eth API
@@ -43,6 +45,7 @@ pub trait EthApi {
         &self,
         op: RpcUserOperation,
         entry_point: Address,
+        permissions: Option<RpcUserOperationPermissions>,
     ) -> RpcResult<B256>;
 
     /// Estimates the gas fields for a user operation.
@@ -75,4 +78,15 @@ pub trait EthApi {
     /// Returns the chain ID
     #[method(name = "chainId")]
     async fn chain_id(&self) -> RpcResult<U64>;
+}
+
+/// Settings for the `eth_` API
+#[derive(Copy, Clone, Debug)]
+pub struct EthApiSettings {
+    /// The number of blocks to look back for user operation events
+    pub user_operation_event_block_distance: Option<u64>,
+    /// The number of blocks to look back for user operation events during a fallback
+    pub user_operation_event_block_distance_fallback: Option<u64>,
+    /// If external permissions are allowed
+    pub permissions_enabled: bool,
 }

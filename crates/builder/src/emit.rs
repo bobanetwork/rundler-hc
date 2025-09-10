@@ -13,7 +13,7 @@
 
 use std::{fmt::Display, sync::Arc};
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use rundler_provider::TransactionRequest;
 use rundler_sim::SimulationError;
 use rundler_types::{GasFees, ValidTimeRange};
@@ -89,6 +89,7 @@ impl BuilderEvent {
 
 /// BuilderEventKind
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum BuilderEventKind {
     /// A bundle was formed
     FormedBundle {
@@ -145,8 +146,8 @@ pub struct BundleTxDetails {
     pub tx_hash: B256,
     /// The transaction
     pub tx: TransactionRequest,
-    /// Operation hashes included in the bundle
-    pub op_hashes: Arc<Vec<B256>>,
+    /// Operations included in the bundle
+    pub ops: Arc<Vec<(Address, B256)>>,
 }
 
 /// Reason for skipping an operation in a bundle
@@ -166,8 +167,16 @@ pub enum SkipReason {
         required_pvg: u128,
         actual_pvg: u128,
     },
-    /// Bundle ran out of space by gas limit to include the operation
-    GasLimit,
+    /// Cost of this operation is greater than the max cost of the bundler sponsorship
+    OverSponsorshipMaxCost { max_cost: U256, actual_cost: U256 },
+    /// Bundle ran out of space by simulation gas limit to include the operation
+    SimulationGasLimit,
+    /// Bundle ran out of space by target gas limit to include the operation
+    TargetGasLimit,
+    /// Bundle ran out of space by max gas limit to include the operation
+    MaxGasLimit,
+    /// Bundle ran out of space by max bundle fee to include the operation
+    OverMaxBundleFee,
     /// Expected storage conflict
     ExpectedStorageConflict(String),
     /// Expected storage limit reached
@@ -220,9 +229,9 @@ impl Display for BuilderEvent {
                 match tx_details {
                     Some(tx_details) => {
                         let op_hashes = tx_details
-                            .op_hashes
+                            .ops
                             .iter()
-                            .map(|hash| format!("{hash:?}"))
+                            .map(|(sender, hash)| format!("(sender: {sender:?} hash: {hash:?})"))
                             .collect::<Vec<_>>()
                             .join(", ");
                         write!(
@@ -235,7 +244,7 @@ impl Display for BuilderEvent {
                                 "    Fee increases: {}",
                                 "    Required maxFeePerGas: {}",
                                 "    Required maxPriorityFeePerGas: {}",
-                                "    Op hashes: {}",
+                                "    Ops: {}",
                             ),
                             self.tag,
                             tx_details.tx_hash,

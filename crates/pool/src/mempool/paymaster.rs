@@ -520,7 +520,8 @@ mod tests {
         chain::ChainSpec,
         pool::{PaymasterMetadata, PoolOperation},
         v0_6::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
-        EntityInfos, UserOperation as UserOperationTrait, UserOperationId, ValidTimeRange,
+        EntityInfos, UserOperation as UserOperationTrait, UserOperationId,
+        UserOperationPermissions, ValidTimeRange,
     };
 
     use super::*;
@@ -537,8 +538,9 @@ mod tests {
             sim_block_number: 0,
             account_is_staked: true,
             entity_infos: EntityInfos::default(),
-            da_gas_data: rundler_types::da::DAGasUOData::Empty,
+            da_gas_data: rundler_types::da::DAGasData::Empty,
             filter_id: None,
+            perms: UserOperationPermissions::default(),
         }
     }
 

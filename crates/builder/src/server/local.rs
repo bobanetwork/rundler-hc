@@ -11,32 +11,58 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
 use alloy_primitives::{Address, B256};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use futures_util::StreamExt;
+use metrics::Histogram;
+use metrics_derive::Metrics;
+use rundler_signer::SignerManager;
 use rundler_task::{
     server::{HealthCheck, ServerStatus},
     GracefulShutdown,
 };
-use rundler_types::builder::{Builder, BuilderError, BuilderResult, BundlingMode};
+use rundler_types::{
+    builder::{Builder, BuilderError, BuilderResult, BundlingMode},
+    pool::Pool,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bundle_sender::{BundleSenderAction, SendBundleRequest, SendBundleResult};
 
 /// Local builder server builder
-#[derive(Debug)]
 pub struct LocalBuilderBuilder {
     req_sender: mpsc::Sender<ServerRequest>,
     req_receiver: mpsc::Receiver<ServerRequest>,
+    signer_manager: Arc<dyn SignerManager>,
+    pool: Arc<dyn Pool>,
+}
+
+#[derive(Metrics, Clone)]
+#[metrics(scope = "builder_internal")]
+struct LocalBuilderMetrics {
+    #[metric(describe = "the duration in milliseconds of send call")]
+    send_duration: Histogram,
 }
 
 impl LocalBuilderBuilder {
     /// Create a new local builder server builder
-    pub fn new(request_capcity: usize) -> Self {
+    pub fn new(
+        request_capcity: usize,
+        signer_manager: Arc<dyn SignerManager>,
+        pool: Arc<dyn Pool>,
+    ) -> Self {
         let (req_sender, req_receiver) = mpsc::channel(request_capcity);
         Self {
             req_sender,
             req_receiver,
+            signer_manager,
+            pool,
         }
     }
 
@@ -44,6 +70,7 @@ impl LocalBuilderBuilder {
     pub fn get_handle(&self) -> LocalBuilderHandle {
         LocalBuilderHandle {
             req_sender: self.req_sender.clone(),
+            metric: LocalBuilderMetrics::default(),
         }
     }
 
@@ -54,8 +81,13 @@ impl LocalBuilderBuilder {
         entry_points: Vec<Address>,
         shutdown: GracefulShutdown,
     ) -> BoxFuture<'static, ()> {
-        let runner =
-            LocalBuilderServerRunner::new(self.req_receiver, bundle_sender_actions, entry_points);
+        let runner = LocalBuilderServerRunner::new(
+            self.req_receiver,
+            bundle_sender_actions,
+            entry_points,
+            self.signer_manager,
+            self.pool,
+        );
         Box::pin(runner.run(shutdown))
     }
 }
@@ -64,17 +96,25 @@ impl LocalBuilderBuilder {
 #[derive(Debug, Clone)]
 pub struct LocalBuilderHandle {
     req_sender: mpsc::Sender<ServerRequest>,
+    metric: LocalBuilderMetrics,
 }
 
 struct LocalBuilderServerRunner {
     req_receiver: mpsc::Receiver<ServerRequest>,
     bundle_sender_actions: Vec<mpsc::Sender<BundleSenderAction>>,
     entry_points: Vec<Address>,
+    signer_manager: Arc<dyn SignerManager>,
+    pool: Arc<dyn Pool>,
 }
 
 impl LocalBuilderHandle {
     async fn send(&self, request: ServerRequestKind) -> BuilderResult<ServerResponse> {
         let (response_sender, response_receiver) = oneshot::channel();
+        let begin_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_millis(0))
+            .as_millis();
+
         let request = ServerRequest {
             request,
             response: response_sender,
@@ -83,9 +123,18 @@ impl LocalBuilderHandle {
             .send(request)
             .await
             .map_err(|_| anyhow::anyhow!("LocalBuilderServer closed"))?;
-        response_receiver
+        let response = response_receiver
             .await
-            .map_err(|_| anyhow::anyhow!("LocalBuilderServer closed"))?
+            .map_err(|_| anyhow::anyhow!("LocalBuilderServer closed"))?;
+
+        let end_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_millis(0))
+            .as_millis();
+        self.metric
+            .send_duration
+            .record((end_ms.saturating_sub(begin_ms)) as f64);
+        response
     }
 }
 
@@ -126,10 +175,19 @@ impl HealthCheck for LocalBuilderHandle {
     }
 
     async fn status(&self) -> ServerStatus {
-        if self.get_supported_entry_points().await.is_ok() {
-            ServerStatus::Serving
-        } else {
-            ServerStatus::NotServing
+        match tokio::time::timeout(Duration::from_secs(1), self.get_supported_entry_points()).await
+        {
+            Ok(Ok(_)) => ServerStatus::Serving,
+            Ok(Err(e)) => {
+                tracing::error!(
+                    "Healthcheck: failed to get supported entry points in builder: {e:?}"
+                );
+                ServerStatus::NotServing
+            }
+            _ => {
+                tracing::error!("Healthcheck: timed out getting supported entry points in builder");
+                ServerStatus::NotServing
+            }
         }
     }
 }
@@ -139,19 +197,38 @@ impl LocalBuilderServerRunner {
         req_receiver: mpsc::Receiver<ServerRequest>,
         bundle_sender_actions: Vec<mpsc::Sender<BundleSenderAction>>,
         entry_points: Vec<Address>,
+        signer_manager: Arc<dyn SignerManager>,
+        pool: Arc<dyn Pool>,
     ) -> Self {
         Self {
             req_receiver,
             bundle_sender_actions,
             entry_points,
+            signer_manager,
+            pool,
         }
     }
 
     async fn run(mut self, shutdown: GracefulShutdown) {
+        let Ok(mut new_heads) = self.pool.subscribe_new_heads(vec![]).await else {
+            tracing::error!("Failed to subscribe to new blocks");
+            panic!("failed to subscribe to new blocks");
+        };
+
         loop {
             tokio::select! {
                 _ = shutdown.clone() => {
                     return;
+                }
+                new_head = new_heads.next() => {
+                    let Some(new_head) = new_head else {
+                        tracing::error!("new head stream closed");
+                        panic!("new head stream closed");
+                    };
+                    tracing::info!("received new head: {:?}", new_head);
+
+                    let balances = new_head.address_updates.iter().map(|update| (update.address, update.balance)).collect();
+                    self.signer_manager.update_balances(balances);
                 }
                 Some(req) = self.req_receiver.recv() => {
                     let resp: BuilderResult<ServerResponse> = 'a:  {

@@ -11,6 +11,8 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
+#![allow(clippy::result_large_err)]
+
 use std::{
     net::SocketAddr,
     sync::{
@@ -39,7 +41,8 @@ use super::protos::{
     add_op_response, admin_set_tracking_response, debug_clear_state_response,
     debug_dump_mempool_response, debug_dump_paymaster_balances_response,
     debug_dump_reputation_response, debug_set_reputation_response, get_op_by_hash_response,
-    get_ops_response, get_reputation_status_response, get_stake_status_response,
+    get_op_by_id_response, get_ops_by_hashes_response, get_ops_response,
+    get_ops_summaries_response, get_reputation_status_response, get_stake_status_response,
     op_pool_server::{OpPool, OpPoolServer},
     remove_op_by_id_response, remove_ops_response, update_entities_response, AddOpRequest,
     AddOpResponse, AddOpSuccess, AdminSetTrackingRequest, AdminSetTrackingResponse,
@@ -49,11 +52,14 @@ use super::protos::{
     DebugDumpPaymasterBalancesSuccess, DebugDumpReputationRequest, DebugDumpReputationResponse,
     DebugDumpReputationSuccess, DebugSetReputationRequest, DebugSetReputationResponse,
     DebugSetReputationSuccess, GetOpByHashRequest, GetOpByHashResponse, GetOpByHashSuccess,
-    GetOpsRequest, GetOpsResponse, GetOpsSuccess, GetReputationStatusRequest,
-    GetReputationStatusResponse, GetReputationStatusSuccess, GetStakeStatusRequest,
-    GetStakeStatusResponse, GetStakeStatusSuccess, GetSupportedEntryPointsRequest,
-    GetSupportedEntryPointsResponse, MempoolOp, RemoveOpByIdRequest, RemoveOpByIdResponse,
-    RemoveOpByIdSuccess, RemoveOpsRequest, RemoveOpsResponse, RemoveOpsSuccess, ReputationStatus,
+    GetOpByIdRequest, GetOpByIdResponse, GetOpByIdSuccess, GetOpsByHashesRequest,
+    GetOpsByHashesResponse, GetOpsByHashesSuccess, GetOpsRequest, GetOpsResponse, GetOpsSuccess,
+    GetOpsSummariesRequest, GetOpsSummariesResponse, GetOpsSummariesSuccess,
+    GetReputationStatusRequest, GetReputationStatusResponse, GetReputationStatusSuccess,
+    GetStakeStatusRequest, GetStakeStatusResponse, GetStakeStatusSuccess,
+    GetSupportedEntryPointsRequest, GetSupportedEntryPointsResponse, MempoolOp,
+    PoolOperationSummary, RemoveOpByIdRequest, RemoveOpByIdResponse, RemoveOpByIdSuccess,
+    RemoveOpsRequest, RemoveOpsResponse, RemoveOpsSuccess, ReputationStatus,
     SubscribeNewHeadsRequest, SubscribeNewHeadsResponse, TryUoFromProto, UpdateEntitiesRequest,
     UpdateEntitiesResponse, UpdateEntitiesSuccess, OP_POOL_FILE_DESCRIPTOR_SET,
 };
@@ -150,7 +156,6 @@ impl OpPool for OpPoolImpl {
 
     async fn add_op(&self, request: Request<AddOpRequest>) -> Result<Response<AddOpResponse>> {
         let req = request.into_inner();
-        let ep = self.get_entry_point(&req.entry_point)?;
 
         let proto_op = req
             .op
@@ -159,8 +164,17 @@ impl OpPool for OpPoolImpl {
             UserOperationVariant::try_uo_from_proto(proto_op, &self.chain_spec).map_err(|e| {
                 Status::invalid_argument(format!("Failed to convert to UserOperation: {e}"))
             })?;
+        let permissions = req
+            .permissions
+            .ok_or_else(|| Status::invalid_argument("Permissions are required in AddOpRequest"))?
+            .try_into()
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "Failed to convert to UserOperationPermissions: {e}"
+                ))
+            })?;
 
-        let resp = match self.local_pool.add_op(ep, uo).await {
+        let resp = match self.local_pool.add_op(uo, permissions).await {
             Ok(hash) => AddOpResponse {
                 result: Some(add_op_response::Result::Success(AddOpSuccess {
                     hash: hash.to_vec(),
@@ -184,11 +198,7 @@ impl OpPool for OpPoolImpl {
             Some(req.filter_id)
         };
 
-        let resp = match self
-            .local_pool
-            .get_ops(ep, req.max_ops, req.shard_index, filter_id)
-            .await
-        {
+        let resp = match self.local_pool.get_ops(ep, req.max_ops, filter_id).await {
             Ok(ops) => GetOpsResponse {
                 result: Some(get_ops_response::Result::Success(GetOpsSuccess {
                     ops: ops.iter().map(MempoolOp::from).collect(),
@@ -202,6 +212,71 @@ impl OpPool for OpPoolImpl {
         Ok(Response::new(resp))
     }
 
+    async fn get_ops_summaries(
+        &self,
+        request: Request<GetOpsSummariesRequest>,
+    ) -> Result<Response<GetOpsSummariesResponse>> {
+        let req = request.into_inner();
+        let ep = self.get_entry_point(&req.entry_point)?;
+
+        let filter_id = if req.filter_id.is_empty() {
+            None
+        } else {
+            Some(req.filter_id)
+        };
+
+        let resp = match self
+            .local_pool
+            .get_ops_summaries(ep, req.max_ops, filter_id)
+            .await
+        {
+            Ok(summaries) => GetOpsSummariesResponse {
+                result: Some(get_ops_summaries_response::Result::Success(
+                    GetOpsSummariesSuccess {
+                        summaries: summaries
+                            .into_iter()
+                            .map(PoolOperationSummary::from)
+                            .collect(),
+                    },
+                )),
+            },
+            Err(error) => GetOpsSummariesResponse {
+                result: Some(get_ops_summaries_response::Result::Failure(error.into())),
+            },
+        };
+
+        Ok(Response::new(resp))
+    }
+
+    async fn get_ops_by_hashes(
+        &self,
+        request: Request<GetOpsByHashesRequest>,
+    ) -> Result<Response<GetOpsByHashesResponse>> {
+        let req = request.into_inner();
+        let ep = self.get_entry_point(&req.entry_point)?;
+        let hashes: Vec<B256> = req
+            .hashes
+            .into_iter()
+            .map(|h| {
+                from_bytes(&h).map_err(|e| Status::invalid_argument(format!("Invalid hash: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let resp = match self.local_pool.get_ops_by_hashes(ep, hashes).await {
+            Ok(ops) => GetOpsByHashesResponse {
+                result: Some(get_ops_by_hashes_response::Result::Success(
+                    GetOpsByHashesSuccess {
+                        ops: ops.iter().map(MempoolOp::from).collect(),
+                    },
+                )),
+            },
+            Err(error) => GetOpsByHashesResponse {
+                result: Some(get_ops_by_hashes_response::Result::Failure(error.into())),
+            },
+        };
+
+        Ok(Response::new(resp))
+    }
     async fn get_op_by_hash(
         &self,
         request: Request<GetOpByHashRequest>,
@@ -222,6 +297,35 @@ impl OpPool for OpPoolImpl {
             },
             Err(error) => GetOpByHashResponse {
                 result: Some(get_op_by_hash_response::Result::Failure(error.into())),
+            },
+        };
+
+        Ok(Response::new(resp))
+    }
+
+    async fn get_op_by_id(
+        &self,
+        request: Request<GetOpByIdRequest>,
+    ) -> Result<Response<GetOpByIdResponse>> {
+        let req = request.into_inner();
+
+        let resp = match self
+            .local_pool
+            .get_op_by_id(UserOperationId {
+                sender: from_bytes(&req.sender)
+                    .map_err(|e| Status::invalid_argument(format!("Invalid sender: {e}")))?,
+                nonce: from_bytes(&req.nonce)
+                    .map_err(|e| Status::invalid_argument(format!("Invalid nonce: {e}")))?,
+            })
+            .await
+        {
+            Ok(op) => GetOpByIdResponse {
+                result: Some(get_op_by_id_response::Result::Success(GetOpByIdSuccess {
+                    op: op.map(|op| MempoolOp::from(&op)),
+                })),
+            },
+            Err(error) => GetOpByIdResponse {
+                result: Some(get_op_by_id_response::Result::Failure(error.into())),
             },
         };
 
@@ -539,7 +643,7 @@ impl OpPool for OpPoolImpl {
 
     async fn subscribe_new_heads(
         &self,
-        _request: Request<SubscribeNewHeadsRequest>,
+        request: Request<SubscribeNewHeadsRequest>,
     ) -> Result<Response<Self::SubscribeNewHeadsStream>> {
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -550,8 +654,16 @@ impl OpPool for OpPoolImpl {
             return Err(Status::resource_exhausted("Too many block subscriptions"));
         }
 
+        let req = request.into_inner();
+        let to_track = req
+            .to_track
+            .into_iter()
+            .map(|a| from_bytes(&a))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Status::invalid_argument(format!("Invalid address: {e}")))?;
+
         let num_block_subscriptions = Arc::clone(&self.num_block_subscriptions);
-        let mut new_heads = match self.local_pool.subscribe_new_heads().await {
+        let mut new_heads = match self.local_pool.subscribe_new_heads(to_track).await {
             Ok(new_heads) => new_heads,
             Err(error) => {
                 tracing::error!("Failed to subscribe to new blocks: {error}");

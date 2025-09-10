@@ -38,7 +38,8 @@ use rundler_types::{
     pool::{
         MempoolError, PaymasterMetadata, PoolOperation, Reputation, ReputationStatus, StakeStatus,
     },
-    EntityUpdate, EntryPointVersion, UserOperationId, UserOperationVariant,
+    EntityUpdate, EntryPointVersion, UserOperationId, UserOperationPermissions,
+    UserOperationVariant,
 };
 use tonic::async_trait;
 pub(crate) use uo_pool::{UoPool, UoPoolProviders};
@@ -50,12 +51,9 @@ pub(crate) type MempoolResult<T> = std::result::Result<T, MempoolError>;
 #[cfg_attr(test, automock)]
 #[async_trait]
 /// In-memory operation pool
-pub trait Mempool: Send + Sync {
+pub(crate) trait Mempool: Send + Sync {
     /// Call to update the mempool with a new chain update
     async fn on_chain_update(&self, update: &ChainUpdate);
-
-    /// Returns the entry point address this pool targets.
-    fn entry_point(&self) -> Address;
 
     /// Returns the entry point version this pool targets.
     fn entry_point_version(&self) -> EntryPointVersion;
@@ -65,6 +63,7 @@ pub trait Mempool: Send + Sync {
         &self,
         origin: OperationOrigin,
         op: UserOperationVariant,
+        perms: UserOperationPermissions,
     ) -> MempoolResult<B256>;
 
     /// Removes a set of operations from the pool.
@@ -90,7 +89,6 @@ pub trait Mempool: Send + Sync {
     fn best_operations(
         &self,
         max: usize,
-        shard_index: u64,
         filter_id: Option<String>,
     ) -> MempoolResult<Vec<Arc<PoolOperation>>>;
 
@@ -99,6 +97,9 @@ pub trait Mempool: Send + Sync {
 
     /// Looks up a user operation by hash, returns None if not found
     fn get_user_operation_by_hash(&self, hash: B256) -> Option<Arc<PoolOperation>>;
+
+    /// Looks up a user operation by id, returns None if not found
+    fn get_op_by_id(&self, id: &UserOperationId) -> Option<Arc<PoolOperation>>;
 
     /// Debug methods
     /// Clears the mempool of UOs or reputation of all addresses
@@ -152,11 +153,6 @@ pub struct PoolConfig {
     pub sim_settings: SimulationSettings,
     /// Configuration for the mempool channels, by channel ID
     pub mempool_channel_configs: HashMap<B256, MempoolConfig>,
-    /// Number of mempool shards to use by filter ID. A mempool shard is a disjoint subset of the mempool
-    /// that is used to ensure that two bundle builders don't attempt to but bundle the same
-    /// operations. The mempool is divided into shards by taking the hash of the operation
-    /// and modding it by the number of shards.
-    pub num_shards_by_filter_id: HashMap<String, u64>,
     /// the maximum number of user operations with a throttled entity that can stay in the mempool
     pub throttled_entity_mempool_count: u64,
     /// The maximum number of blocks a user operation with a throttled entity can stay in the mempool
@@ -173,14 +169,16 @@ pub struct PoolConfig {
     pub drop_min_num_blocks: u64,
     /// Reject user operations with gas limit efficiency below this threshold.
     /// Gas limit efficiency is defined as the ratio of the gas limit to the gas used.
-    /// This applies to all the verification, call, and paymaster gas limits.
-    pub gas_limit_efficiency_reject_threshold: f32,
+    /// This applies to the execution gas limit.
+    pub execution_gas_limit_efficiency_reject_threshold: f64,
+    /// Reject user operations with gas limit efficiency below this threshold.
+    /// Gas limit efficiency is defined as the ratio of the gas limit to the gas used.
+    /// This applies to the verification gas limit.
+    pub verification_gas_limit_efficiency_reject_threshold: f64,
     /// Maximum time a UO is allowed in the pool before being dropped
     pub max_time_in_pool: Option<Duration>,
     /// The maximum number of storage slots that can be expected to be used by a user operation during validation
     pub max_expected_storage_slots: usize,
-    /// Whether to enable UO with 7702 auth
-    pub support_7702: bool,
 }
 
 /// Origin of an operation.
@@ -251,6 +249,7 @@ mod tests {
             },
             da_gas_data: Default::default(),
             filter_id: None,
+            perms: UserOperationPermissions::default(),
         };
 
         let entities = po.entities().collect::<Vec<_>>();

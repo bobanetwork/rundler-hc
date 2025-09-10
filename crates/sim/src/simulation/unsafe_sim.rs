@@ -14,8 +14,8 @@
 use std::marker::PhantomData;
 
 use alloy_primitives::{Address, B256};
-use rundler_provider::{EntryPoint, SignatureAggregator, SimulationProvider};
-use rundler_types::{pool::SimulationViolation, UserOperation, ValidTimeRange};
+use rundler_provider::{EntryPoint, SimulationProvider};
+use rundler_types::{pool::SimulationViolation, UserOperation, ValidTimeRange, TIME_RANGE_BUFFER};
 
 use super::Settings;
 use crate::{simulation::context, SimulationError, SimulationResult, Simulator, ViolationError};
@@ -26,6 +26,7 @@ use crate::{simulation::context, SimulationError, SimulationResult, Simulator, V
 ///
 /// WARNING: This is "unsafe" for a reason. None of the ERC-7562 checks are
 /// performed.
+#[derive(Debug)]
 pub struct UnsafeSimulator<UO, E> {
     entry_point: E,
     settings: Settings,
@@ -47,7 +48,7 @@ impl<UO, E> UnsafeSimulator<UO, E> {
 impl<UO, E> Simulator for UnsafeSimulator<UO, E>
 where
     UO: UserOperation,
-    E: EntryPoint + SimulationProvider<UO = UO> + SignatureAggregator<UO = UO> + Clone,
+    E: EntryPoint + SimulationProvider<UO = UO>,
 {
     type UO = UO;
 
@@ -57,6 +58,7 @@ where
     async fn simulate_validation(
         &self,
         op: UO,
+        _trusted: bool,
         block_hash: B256,
         _expected_code_hash: Option<B256>,
     ) -> Result<SimulationResult, SimulationError> {
@@ -123,6 +125,13 @@ where
             violations.push(SimulationViolation::InvalidPaymasterSignature);
         }
 
+        if !valid_time_range.is_valid_now(TIME_RANGE_BUFFER) {
+            violations.push(SimulationViolation::InvalidTimeRange(
+                valid_time_range.valid_until,
+                valid_time_range.valid_after,
+            ));
+        }
+
         if !violations.is_empty() {
             Err(SimulationError {
                 violation_error: ViolationError::Violations(violations),
@@ -135,6 +144,10 @@ where
                 valid_time_range,
                 requires_post_op,
                 entity_infos,
+                account_is_staked: context::is_staked(
+                    validation_result.sender_info,
+                    &self.settings,
+                ),
                 ..Default::default()
             })
         }

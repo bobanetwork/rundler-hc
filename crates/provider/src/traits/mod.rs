@@ -14,7 +14,7 @@
 //! Traits for the provider module.
 
 mod da;
-pub use da::{DAGasOracle, DAGasOracleSync};
+pub use da::{DAGasOracle, DAGasOracleSync, ZeroDAGasOracle};
 
 mod error;
 pub use error::*;
@@ -24,6 +24,9 @@ pub use entry_point::*;
 
 mod evm;
 pub use evm::*;
+
+mod fee_estimator;
+pub use fee_estimator::*;
 
 #[cfg(feature = "test-utils")]
 pub(crate) mod test_utils;

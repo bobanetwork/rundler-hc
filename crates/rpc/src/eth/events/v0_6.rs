@@ -12,7 +12,10 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use alloy_primitives::{ruint::UintTryFrom, Address, Bytes, B256, U128};
-use rundler_contracts::v0_6::IEntryPoint::{UserOperationEvent, UserOperationRevertReason};
+use alloy_sol_types::SolEvent;
+use rundler_contracts::v0_6::IEntryPoint::{
+    BeforeExecution, UserOperationEvent, UserOperationRevertReason,
+};
 use rundler_provider::{Log, TransactionReceipt};
 use rundler_types::{chain::ChainSpec, v0_6::UserOperation};
 
@@ -31,7 +34,6 @@ impl EntryPointEvents for EntryPointFiltersV0_6 {
 
     fn construct_receipt(
         event: Self::UserOperationEvent,
-        hash: B256,
         entry_point: Address,
         logs: Vec<Log>,
         tx_receipt: TransactionReceipt,
@@ -42,7 +44,7 @@ impl EntryPointEvents for EntryPointFiltersV0_6 {
         } else {
             let revert_reason_evt: Option<Self::UserOperationRevertReason> = logs
                 .iter()
-                .filter(|l| l.topics().len() > 1 && l.topics()[1] == hash)
+                .filter(|l| l.topics().len() > 1 && l.topics()[1] == event.userOpHash)
                 .map_while(|l| {
                     l.log_decode::<Self::UserOperationRevertReason>()
                         .map(|l| l.inner.data)
@@ -56,7 +58,7 @@ impl EntryPointEvents for EntryPointFiltersV0_6 {
         };
 
         RpcUserOperationReceipt {
-            user_op_hash: hash,
+            user_op_hash: event.userOpHash,
             entry_point: entry_point.into(),
             sender: event.sender.into(),
             nonce: event.nonce,
@@ -81,5 +83,9 @@ impl EntryPointEvents for EntryPointFiltersV0_6 {
 
     fn address(chain_spec: &ChainSpec) -> Address {
         chain_spec.entry_point_address_v0_6
+    }
+
+    fn before_execution_selector() -> B256 {
+        BeforeExecution::SIGNATURE_HASH
     }
 }

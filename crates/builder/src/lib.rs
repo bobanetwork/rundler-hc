@@ -19,6 +19,7 @@
 ))]
 //! Bundle builder implementation for the Rundler.
 
+mod assigner;
 mod bundle_proposer;
 mod bundle_sender;
 
@@ -33,8 +34,6 @@ pub use sender::{
 
 mod server;
 pub use server::{LocalBuilderBuilder, LocalBuilderHandle, RemoteBuilderClient};
-
-mod signer;
 
 mod task;
 pub use task::{Args as BuilderTaskArgs, BuilderSettings, BuilderTask, EntryPointBuilderSettings};

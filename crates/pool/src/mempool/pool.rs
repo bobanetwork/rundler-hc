@@ -15,25 +15,24 @@ use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use alloy_primitives::{Address, B256};
 use anyhow::Context;
-use metrics::{Gauge, Histogram};
+use metrics::{Counter, Gauge, Histogram};
 use metrics_derive::Metrics;
 use parking_lot::RwLock;
 use rundler_provider::DAGasOracleSync;
-use rundler_sim::FeeUpdate;
 use rundler_types::{
     chain::ChainSpec,
     da::DAGasBlockData,
     pool::{MempoolError, PoolOperation},
-    Entity, EntityType, Timestamp, UserOperation, UserOperationId, UserOperationVariant,
+    Entity, EntityType, GasFees, Timestamp, UserOperation, UserOperationId, UserOperationVariant,
 };
 use rundler_utils::{emit::WithEntryPoint, math};
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::{entity_tracker::EntityCounter, size::SizeTracker, MempoolResult, PoolConfig};
 use crate::{chain::MinedOp, emit::OpRemovalReason, PoolEvent};
@@ -48,7 +47,7 @@ pub(crate) struct PoolInnerConfig {
     throttled_entity_live_blocks: u64,
     da_gas_tracking_enabled: bool,
     max_time_in_pool: Option<Duration>,
-    support_7702: bool,
+    verification_gas_limit_efficiency_reject_threshold: f64,
 }
 
 impl From<PoolConfig> for PoolInnerConfig {
@@ -62,7 +61,8 @@ impl From<PoolConfig> for PoolInnerConfig {
             throttled_entity_live_blocks: config.throttled_entity_live_blocks,
             da_gas_tracking_enabled: config.da_gas_tracking_enabled,
             max_time_in_pool: config.max_time_in_pool,
-            support_7702: config.support_7702,
+            verification_gas_limit_efficiency_reject_threshold: config
+                .verification_gas_limit_efficiency_reject_threshold,
         }
     }
 }
@@ -97,8 +97,6 @@ pub(crate) struct PoolInner<D> {
     pool_size: SizeTracker,
     /// keeps track of the size of the removed cache in bytes
     cache_size: SizeTracker,
-    /// The time of the previous block
-    prev_sys_block_time: Duration,
     /// The number of the previous block
     prev_block_number: u64,
     /// The metrics of pool.
@@ -130,7 +128,6 @@ where
             submission_id: 0,
             pool_size: SizeTracker::default(),
             cache_size: SizeTracker::default(),
-            prev_sys_block_time: Duration::default(),
             prev_block_number: 0,
             metrics: PoolMetrics::new_with_labels(&[("entry_point", entry_point)]),
             event_sender,
@@ -197,15 +194,21 @@ where
             true
         };
 
+        let is_7702_uo = op.uo.authorization_tuple().is_some();
         // only eligibility requirement is if the op has required pvg
         let pool_op = Arc::new(OrderedPoolOperation::new(
             Arc::new(op),
             self.next_submission_id(),
             is_eligible,
             base_fee,
+            self.prev_block_number,
         ));
 
         let hash = self.add_operation_internal(pool_op)?;
+        self.metrics.num_ops_added.increment(1);
+        if is_7702_uo {
+            self.metrics.num_7702_ops_added.increment(1);
+        }
         Ok(hash)
     }
 
@@ -229,14 +232,9 @@ where
         block_number: u64,
         block_timestamp: Timestamp,
         block_da_data: Option<&DAGasBlockData>,
-        gas_fees: FeeUpdate,
+        uo_fees: GasFees,
+        base_fee: u128,
     ) {
-        let sys_block_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be after epoch");
-
-        let block_delta_time = sys_block_time.saturating_sub(self.prev_sys_block_time);
-        let block_delta_height = block_number.saturating_sub(self.prev_block_number);
         let mut expired = Vec::new();
         let mut num_candidates = 0;
         let mut events = vec![];
@@ -245,7 +243,7 @@ where
         self.best.clear();
 
         for (hash, op) in &mut self.by_hash {
-            op.update_gas_price(gas_fees.base_fee);
+            op.update_gas_price(base_fee);
 
             // check for expiry
             if op.po.valid_time_range.valid_until < block_timestamp {
@@ -265,14 +263,41 @@ where
                 events.push(PoolEvent::RemovedOp {
                     op_hash: *hash,
                     reason: OpRemovalReason::Expired {
-                        valid_until: sys_block_time.into(),
+                        valid_until: block_timestamp,
                     },
                 });
                 expired.push(*hash);
+                continue;
+            } else if op
+                .po
+                .perms
+                .bundler_sponsorship
+                .as_ref()
+                .is_some_and(|s| Timestamp::from(s.valid_until) < block_timestamp)
+            {
+                events.push(PoolEvent::RemovedOp {
+                    op_hash: *hash,
+                    reason: OpRemovalReason::Expired {
+                        valid_until: op
+                            .po
+                            .perms
+                            .bundler_sponsorship
+                            .as_ref()
+                            .unwrap()
+                            .valid_until
+                            .into(),
+                    },
+                });
+                expired.push(*hash);
+                continue;
             }
 
             // check for eligibility
-            if self.da_gas_oracle.is_some() && block_da_data.is_some() {
+            if self.da_gas_oracle.is_some()
+                && block_da_data.is_some()
+                && op.po.perms.bundler_sponsorship.is_none()
+            // skip if bundler sponsored
+            {
                 // TODO(bundle): assuming a bundle size of 1
                 let bundle_size = 1;
 
@@ -282,15 +307,23 @@ where
                 let required_da_gas = da_gas_oracle.calc_da_gas_sync(
                     &op.po.da_gas_data,
                     block_da_data,
-                    op.uo().gas_price(gas_fees.base_fee),
+                    op.uo().gas_price(base_fee),
                     op.uo().extra_data_len(bundle_size),
                 );
 
-                let required_pvg = op.uo().required_pre_verification_gas(
+                let mut required_pvg = op.uo().required_pre_verification_gas(
                     &self.config.chain_spec,
                     bundle_size,
                     required_da_gas,
+                    Some(
+                        self.config
+                            .verification_gas_limit_efficiency_reject_threshold,
+                    ),
                 );
+                if let Some(pct) = op.po.perms.underpriced_bundle_pct {
+                    required_pvg = math::percent_ceil(required_pvg, pct);
+                }
+
                 let actual_pvg = op.uo().pre_verification_gas();
 
                 if actual_pvg < required_pvg {
@@ -318,16 +351,16 @@ where
             self.best.insert(op.clone());
 
             // Check candidate status
-            if op.uo().max_fee_per_gas() < gas_fees.uo_fees.max_fee_per_gas
-                || op.uo().max_priority_fee_per_gas() < gas_fees.uo_fees.max_priority_fee_per_gas
+            if (op.uo().max_fee_per_gas() < uo_fees.max_fee_per_gas
+                || op.uo().max_priority_fee_per_gas() < uo_fees.max_priority_fee_per_gas)
+                && op.po.perms.bundler_sponsorship.is_none()
+            // skip if bundler sponsored
             {
                 // don't mark as ineligible, but also not a candidate
+                op.set_underpriced();
                 continue;
             }
-            // Op is a candidate, update time to mine and candidate count
-            if let Some(ttm) = self.time_to_mine.get_mut(hash) {
-                ttm.increase(block_delta_time, block_delta_height);
-            }
+
             num_candidates += 1;
         }
 
@@ -340,7 +373,6 @@ where
 
         self.metrics.num_candidates.set(num_candidates as f64);
         self.prev_block_number = block_number;
-        self.prev_sys_block_time = sys_block_time;
         self.update_metrics();
     }
 
@@ -417,13 +449,16 @@ where
 
     pub(crate) fn check_eip7702(&self, uo: &UserOperationVariant) -> MempoolResult<()> {
         if let Some(auth) = uo.authorization_tuple() {
-            if self.config.support_7702 {
-                auth.validate(uo.sender())?;
+            if self
+                .config
+                .chain_spec
+                .supports_eip7702(self.config.entry_point)
+            {
+                auth.validate(uo.sender())
+                    .map_err(|err| MempoolError::Invalid7702AuthSignature(err.to_string()))?;
                 Ok(())
             } else {
-                Err(MempoolError::EIPNotSupported(
-                    "EIP 7702 is not supported".to_string(),
-                ))
+                Err(MempoolError::EIPNotSupported("EIP-7702".to_string()))
             }
         } else {
             Ok(())
@@ -444,15 +479,11 @@ where
         // stay in the pool forever as `remove_operation_internal` is hash based.
         // Time to mine will also fail because UO1's hash was removed from the pool.
 
-        if let Some(time_to_mine) = self.time_to_mine.get(&mined_op.hash) {
+        if let Some(time_to_mine) = tx_in_pool.ttm(block_number) {
             self.metrics
                 .time_to_mine
-                .record(time_to_mine.candidate_for_time.as_secs_f64());
-            self.metrics
-                .blocks_to_mine
-                .record(time_to_mine.candidate_for_blocks as f64);
-        } else {
-            warn!("Could not find time to mine for {:?}", mined_op.hash);
+                .record(time_to_mine.0.as_secs_f64());
+            self.metrics.blocks_to_mine.record(time_to_mine.1 as f64);
         }
 
         let hash = tx_in_pool.uo().hash();
@@ -586,7 +617,6 @@ where
         self.pool_size += pool_op.mem_size();
         self.by_hash.insert(hash, pool_op.clone());
         self.by_id.insert(pool_op.uo().id(), pool_op.clone());
-        self.time_to_mine.insert(hash, TimeToMineInfo::new());
 
         if pool_op.eligible() {
             self.best.insert(pool_op);
@@ -685,16 +715,24 @@ struct OrderedPoolOperation {
     eligible: RwLock<bool>,
     insertion_time: Instant,
     gas_price: RwLock<u128>,
+    time_to_mine: RwLock<Option<TimeToMineInfo>>,
 }
 
 impl OrderedPoolOperation {
-    fn new(po: Arc<PoolOperation>, submission_id: u64, eligible: bool, base_fee: u128) -> Self {
+    fn new(
+        po: Arc<PoolOperation>,
+        submission_id: u64,
+        eligible: bool,
+        base_fee: u128,
+        current_block_number: u64,
+    ) -> Self {
         Self {
             gas_price: RwLock::new(po.uo.gas_price(base_fee)),
             po,
             submission_id,
             eligible: RwLock::new(eligible),
             insertion_time: Instant::now(),
+            time_to_mine: RwLock::new(Some(TimeToMineInfo::new(current_block_number))),
         }
     }
 
@@ -716,6 +754,18 @@ impl OrderedPoolOperation {
 
     fn set_ineligible(&self) {
         *self.eligible.write() = false;
+        self.time_to_mine.write().take();
+    }
+
+    fn set_underpriced(&self) {
+        self.time_to_mine.write().take();
+    }
+
+    fn ttm(&self, block_number: u64) -> Option<(Duration, u64)> {
+        self.time_to_mine
+            .read()
+            .as_ref()
+            .map(|ttm| ttm.ttm(block_number))
     }
 
     fn elapsed_time_in_pool(&self) -> Duration {
@@ -759,21 +809,22 @@ impl PartialEq for OrderedPoolOperation {
 
 #[derive(Debug, Clone)]
 struct TimeToMineInfo {
-    candidate_for_blocks: u64,
-    candidate_for_time: Duration,
+    added_at_time: Instant,
+    added_at_block: u64,
 }
 
 impl TimeToMineInfo {
-    fn new() -> Self {
+    fn new(current_block_number: u64) -> Self {
         Self {
-            candidate_for_blocks: 0,
-            candidate_for_time: Duration::default(),
+            added_at_time: Instant::now(),
+            added_at_block: current_block_number,
         }
     }
 
-    fn increase(&mut self, block_delta_time: Duration, block_delta_height: u64) {
-        self.candidate_for_blocks += block_delta_height;
-        self.candidate_for_time += block_delta_time;
+    fn ttm(&self, block_number: u64) -> (Duration, u64) {
+        let time_since_added = Instant::now().duration_since(self.added_at_time);
+        let blocks_since_added = block_number.saturating_sub(self.added_at_block);
+        (time_since_added, blocks_since_added)
     }
 }
 
@@ -794,6 +845,10 @@ struct PoolMetrics {
     time_to_mine: Histogram,
     #[metric(describe = "the duration distribution of a blocked mined.")]
     blocks_to_mine: Histogram,
+    #[metric(describe = "the number of ops with 7702 auth added")]
+    num_7702_ops_added: Counter,
+    #[metric(describe = "the number of ops added")]
+    num_ops_added: Counter,
 }
 
 #[cfg(test)]
@@ -802,7 +857,8 @@ mod tests {
     use rundler_provider::MockDAGasOracleSync;
     use rundler_types::{
         v0_6::{UserOperationBuilder, UserOperationRequiredFields},
-        EntityInfo, EntityInfos, GasFees, UserOperation as UserOperationTrait, ValidTimeRange,
+        BundlerSponsorship, EntityInfo, EntityInfos, GasFees, UserOperation as UserOperationTrait,
+        UserOperationPermissions, ValidTimeRange,
     };
 
     use super::*;
@@ -1199,7 +1255,7 @@ mod tests {
         assert_eq!(pool.address_count(&sender), 1);
         assert_eq!(
             pool.pool_size,
-            OrderedPoolOperation::new(Arc::new(po1), 0, true, 0).mem_size(),
+            OrderedPoolOperation::new(Arc::new(po1), 0, true, 0, 0).mem_size(),
         );
     }
 
@@ -1241,7 +1297,7 @@ mod tests {
         assert_eq!(pool.address_count(&paymaster2), 1);
         assert_eq!(
             pool.pool_size,
-            OrderedPoolOperation::new(Arc::new(po2), 0, true, 0).mem_size()
+            OrderedPoolOperation::new(Arc::new(po2), 0, true, 0, 0).mem_size()
         );
     }
 
@@ -1269,7 +1325,7 @@ mod tests {
         po1.valid_time_range.valid_until = Timestamp::from(1);
         let hash = pool.add_operation(po1.clone(), 0, 0).unwrap();
 
-        pool.do_maintenance(0, Timestamp::from(2), None, FeeUpdate::default());
+        pool.do_maintenance(0, Timestamp::from(2), None, GasFees::default(), 0);
         assert_eq!(None, pool.get_operation_by_hash(hash));
     }
 
@@ -1289,7 +1345,7 @@ mod tests {
         po3.valid_time_range.valid_until = 9.into();
         let hash3 = pool.add_operation(po3.clone(), 0, 0).unwrap();
 
-        pool.do_maintenance(0, Timestamp::from(10), None, FeeUpdate::default());
+        pool.do_maintenance(0, Timestamp::from(10), None, GasFees::default(), 0);
 
         assert_eq!(None, pool.get_operation_by_hash(hash1));
         assert!(pool.get_operation_by_hash(hash2).is_some());
@@ -1339,7 +1395,8 @@ mod tests {
             0,
             0.into(),
             Some(&DAGasBlockData::default()),
-            FeeUpdate::default(),
+            GasFees::default(),
+            0,
         );
 
         assert_eq!(pool.best_operations().collect::<Vec<_>>().len(), 1); // UO is now eligible
@@ -1374,7 +1431,8 @@ mod tests {
             0,
             0.into(),
             Some(&DAGasBlockData::default()),
-            FeeUpdate::default(),
+            GasFees::default(),
+            0,
         );
 
         assert_eq!(pool.best_operations().collect::<Vec<_>>().len(), 0);
@@ -1409,7 +1467,8 @@ mod tests {
             0,
             0.into(),
             Some(&DAGasBlockData::default()),
-            FeeUpdate::default(),
+            GasFees::default(),
+            0,
         );
 
         assert_eq!(pool.best_operations().collect::<Vec<_>>().len(), 1);
@@ -1449,7 +1508,8 @@ mod tests {
             0,
             0.into(),
             Some(&DAGasBlockData::default()),
-            FeeUpdate::default(),
+            GasFees::default(),
+            0,
         );
 
         assert_eq!(pool.best_operations().collect::<Vec<_>>().len(), 0);
@@ -1468,7 +1528,8 @@ mod tests {
             0,
             0.into(),
             Some(&DAGasBlockData::default()),
-            FeeUpdate::default(),
+            GasFees::default(),
+            0,
         );
         assert!(pool.get_operation_by_hash(hash).is_some());
 
@@ -1477,7 +1538,8 @@ mod tests {
             0,
             0.into(),
             Some(&DAGasBlockData::default()),
-            FeeUpdate::default(),
+            GasFees::default(),
+            0,
         );
         assert!(pool.get_operation_by_hash(hash).is_none());
     }
@@ -1518,21 +1580,52 @@ mod tests {
             0,
             0.into(),
             Some(&DAGasBlockData::default()),
-            FeeUpdate {
-                bundle_fees: GasFees {
-                    max_fee_per_gas: 21,
-                    max_priority_fee_per_gas: 10,
-                },
-                uo_fees: GasFees {
-                    max_fee_per_gas: 21,
-                    max_priority_fee_per_gas: 10,
-                },
-                base_fee: 11,
+            GasFees {
+                max_fee_per_gas: 21,
+                max_priority_fee_per_gas: 10,
             },
+            11,
         );
 
         // order swaps after base fee update
         assert_eq!(pool.best_operations().collect::<Vec<_>>(), vec![po2, po1]);
+    }
+
+    #[test]
+    fn test_bundler_sponsorship_expired() {
+        let conf = conf();
+        let mut pool = pool_with_conf(conf.clone());
+        let sender = Address::random();
+        let mut po1 = create_op(sender, 0, 10);
+        po1.perms.bundler_sponsorship = Some(BundlerSponsorship {
+            max_cost: U256::from(100),
+            valid_until: 1,
+        });
+        let hash = pool.add_operation(po1.clone(), 0, 0).unwrap();
+
+        pool.do_maintenance(0, Timestamp::from(2), None, GasFees::default(), 0);
+        assert_eq!(None, pool.get_operation_by_hash(hash));
+    }
+
+    #[test]
+    fn test_bundler_sponsorship_always_eligible() {
+        let mut conf = conf();
+        conf.chain_spec.da_pre_verification_gas = true;
+        conf.chain_spec.include_da_gas_in_gas_limit = true;
+        conf.da_gas_tracking_enabled = true;
+
+        let mut pool = pool_with_conf(conf.clone());
+        let sender = Address::random();
+        let mut po1 = create_op_zero_fees(sender, 0);
+        po1.perms.bundler_sponsorship = Some(BundlerSponsorship {
+            max_cost: U256::from(100),
+            valid_until: u64::MAX,
+        });
+        let hash = pool.add_operation(po1.clone(), 0, 0).unwrap();
+
+        pool.do_maintenance(0, Timestamp::from(2), None, GasFees::default(), 0);
+        assert!(pool.get_operation_by_hash(hash).is_some());
+        assert_eq!(pool.best_operations().collect::<Vec<_>>().len(), 1);
     }
 
     const MAX_POOL_SIZE_OPS: usize = 20;
@@ -1547,7 +1640,7 @@ mod tests {
             throttled_entity_live_blocks: 10,
             da_gas_tracking_enabled: false,
             max_time_in_pool: None,
-            support_7702: false,
+            verification_gas_limit_efficiency_reject_threshold: 0.5,
         }
     }
 
@@ -1567,7 +1660,7 @@ mod tests {
     }
 
     fn mem_size_of_ordered_pool_op() -> usize {
-        OrderedPoolOperation::new(Arc::new(create_op(Address::random(), 1, 1)), 1, true, 0)
+        OrderedPoolOperation::new(Arc::new(create_op(Address::random(), 1, 1)), 1, true, 0, 0)
             .mem_size()
     }
 
@@ -1584,6 +1677,18 @@ mod tests {
             nonce: U256::from(nonce),
             max_fee_per_gas: gas_fee,
             max_priority_fee_per_gas: gas_fee,
+            ..base_required_fields()
+        };
+        create_op_from_required(required)
+    }
+
+    fn create_op_zero_fees(sender: Address, nonce: usize) -> PoolOperation {
+        let required = UserOperationRequiredFields {
+            sender,
+            nonce: U256::from(nonce),
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            pre_verification_gas: 0,
             ..base_required_fields()
         };
         create_op_from_required(required)
@@ -1613,6 +1718,7 @@ mod tests {
             account_is_staked: false,
             da_gas_data: Default::default(),
             filter_id: None,
+            perms: UserOperationPermissions::default(),
         }
     }
 

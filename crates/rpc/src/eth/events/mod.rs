@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use anyhow::bail;
 use rundler_provider::{Log, TransactionReceipt};
 use tracing::instrument;
@@ -30,7 +30,19 @@ pub(crate) trait UserOperationEventProvider: Send + Sync {
     async fn get_mined_by_hash(&self, hash: B256)
         -> anyhow::Result<Option<RpcUserOperationByHash>>;
 
+    async fn get_mined_from_tx_receipt(
+        &self,
+        uo_hash: B256,
+        tx_receipt: TransactionReceipt,
+    ) -> anyhow::Result<Option<RpcUserOperationByHash>>;
+
     async fn get_receipt(&self, hash: B256) -> anyhow::Result<Option<RpcUserOperationReceipt>>;
+
+    async fn get_receipt_from_tx_receipt(
+        &self,
+        uo_hash: B256,
+        tx_receipt: TransactionReceipt,
+    ) -> anyhow::Result<Option<RpcUserOperationReceipt>>;
 }
 
 // This method takes a user operation event and a transaction receipt and filters out all the logs
@@ -47,74 +59,92 @@ pub(crate) trait UserOperationEventProvider: Send + Sync {
 //
 #[instrument(skip_all)]
 fn filter_receipt_logs_matching_user_op(
+    entry_point: Address,
+    before_execution_topic: B256,
     reference_log: &Log,
     tx_receipt: &TransactionReceipt,
 ) -> anyhow::Result<Vec<Log>> {
-    let logs = tx_receipt.inner.logs();
-
-    let mut start_idx = 0;
-    let mut end_idx = logs.len() - 1;
-
-    // TODO protect against topic of zero size
+    let logs = tx_receipt.inner.inner.logs();
 
     let is_ref_user_op = |log: &Log| {
-        log.topics()[0] == reference_log.topics()[0]
+        log.topics().len() >= 2
+            && log.topics()[0] == reference_log.topics()[0]
             && log.topics()[1] == reference_log.topics()[1]
             && log.address() == reference_log.address()
     };
 
-    let is_user_op_event = |log: &Log| log.topics()[0] == reference_log.topics()[0];
+    let is_user_op_event =
+        |log: &Log| !log.topics().is_empty() && log.topics()[0] == reference_log.topics()[0];
+
+    let is_before_execution_log = |log: &Log| {
+        !log.topics().is_empty()
+            && log.topics()[0] == before_execution_topic
+            && log.address() == entry_point
+    };
 
     let mut i = 0;
+    let mut start_idx = None;
     while i < logs.len() {
-        if i < end_idx && is_user_op_event(&logs[i]) && !is_ref_user_op(&logs[i]) {
-            start_idx = i;
+        if is_before_execution_log(&logs[i])
+            || (is_user_op_event(&logs[i]) && !is_ref_user_op(&logs[i]))
+        {
+            start_idx = Some(i + 1);
         } else if is_ref_user_op(&logs[i]) {
-            end_idx = i;
+            let Some(start_idx) = start_idx else {
+                bail!("invalid sequence of logs. found ref user op before BeforeExecution event");
+            };
+            return Ok(logs[start_idx..=i].to_vec());
         }
 
         i += 1;
     }
 
-    if !is_ref_user_op(&logs[end_idx]) {
-        bail!("fatal: no user ops found in tx receipt ({start_idx},{end_idx})");
-    }
-
-    let start_idx = if start_idx == 0 { 0 } else { start_idx + 1 };
-    Ok(logs[start_idx..=end_idx].to_vec())
+    bail!("no matching user op found in tx receipt");
 }
 
 #[cfg(test)]
 mod tests {
 
     use alloy_primitives::{address, utils::keccak256, Address, Log as PrimitiveLog, LogData};
-    use rundler_provider::{TransactionReceiptEnvelope, TransactionReceiptWithBloom};
+    use alloy_rpc_types_eth::TransactionReceipt as AlloyTransactionReceipt;
+    use rundler_provider::{
+        AnyReceiptEnvelope, ReceiptWithBloom, TransactionReceipt, WithOtherFields,
+    };
 
     use super::*;
 
+    const LOG_ADDRESS: Address = Address::ZERO;
     const UO_OP_TOPIC: &str = "user-op-event-topic";
+    const BEFORE_EXECUTION_TOPIC: &str = "before-execution-topic";
 
     #[test]
     fn test_filter_receipt_logs_when_at_beginning_of_list() {
         let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
         let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
             given_log("other-topic", "some-hash"),
             reference_log.clone(),
             given_log(UO_OP_TOPIC, "other-hash"),
             given_log(UO_OP_TOPIC, "another-hash"),
         ]);
 
-        let result = filter_receipt_logs_matching_user_op(&reference_log, &receipt);
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
 
         assert!(result.is_ok(), "{}", result.unwrap_err());
         let result = result.unwrap();
-        assert_eq!(result, receipt.inner.logs()[0..=1]);
+        assert_eq!(result, receipt.inner.inner.logs()[1..=2]);
     }
 
     #[test]
     fn test_filter_receipt_logs_when_in_middle_of_list() {
         let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
         let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
             given_log("other-topic", "some-hash"),
             given_log(UO_OP_TOPIC, "other-hash"),
             given_log("another-topic", "some-hash"),
@@ -123,17 +153,23 @@ mod tests {
             given_log(UO_OP_TOPIC, "another-hash"),
         ]);
 
-        let result = filter_receipt_logs_matching_user_op(&reference_log, &receipt);
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
 
         assert!(result.is_ok(), "{}", result.unwrap_err());
         let result = result.unwrap();
-        assert_eq!(result, receipt.inner.logs()[2..=4]);
+        assert_eq!(result, receipt.inner.inner.logs()[3..=5]);
     }
 
     #[test]
     fn test_filter_receipt_logs_when_at_end_of_list() {
         let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
         let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
             given_log("other-topic", "some-hash"),
             given_log(UO_OP_TOPIC, "other-hash"),
             given_log(UO_OP_TOPIC, "another-hash"),
@@ -142,11 +178,16 @@ mod tests {
             reference_log.clone(),
         ]);
 
-        let result = filter_receipt_logs_matching_user_op(&reference_log, &receipt);
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
 
         assert!(result.is_ok(), "{}", result.unwrap_err());
         let result = result.unwrap();
-        assert_eq!(result, receipt.inner.logs()[3..=5]);
+        assert_eq!(result, receipt.inner.inner.logs()[4..=6]);
     }
 
     #[test]
@@ -157,6 +198,7 @@ mod tests {
             address!("0000000000000000000000000000000000001234");
 
         let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
             given_log("other-topic", "some-hash"),
             given_log(UO_OP_TOPIC, "other-hash"),
             given_log(UO_OP_TOPIC, "another-hash"),
@@ -166,18 +208,26 @@ mod tests {
             reference_log.clone(),
         ]);
 
-        let result = filter_receipt_logs_matching_user_op(&reference_log, &receipt);
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
 
         assert!(result.is_ok(), "{}", result.unwrap_err());
         let result = result.unwrap();
-        assert_eq!(result, receipt.inner.logs()[4..=6]);
+        assert_eq!(result, receipt.inner.inner.logs()[5..=7]);
     }
 
     #[test]
     fn test_filter_receipt_logs_includes_multiple_sets_of_ref_uo() {
         let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
 
+        // This isn't possible as the same UO cannot be executed twice,
+        // make sure it returns the first instance of the UO and doesn't crash
         let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
             given_log("other-topic", "some-hash"),
             given_log(UO_OP_TOPIC, "other-hash"),
             given_log("other-topic-2", "another-hash"),
@@ -188,17 +238,23 @@ mod tests {
             given_log(UO_OP_TOPIC, "other-hash"),
         ]);
 
-        let result = filter_receipt_logs_matching_user_op(&reference_log, &receipt);
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
 
         assert!(result.is_ok(), "{}", result.unwrap_err());
         let result = result.unwrap();
-        assert_eq!(result, receipt.inner.logs()[2..=6]);
+        assert_eq!(result, receipt.inner.inner.logs()[3..=4]);
     }
 
     #[test]
     fn test_filter_receipt_logs_when_not_found() {
         let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
         let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
             given_log("other-topic", "some-hash"),
             given_log(UO_OP_TOPIC, "other-hash"),
             given_log(UO_OP_TOPIC, "another-hash"),
@@ -206,9 +262,37 @@ mod tests {
             given_log("another-topic-2", "some-hash"),
         ]);
 
-        let result = filter_receipt_logs_matching_user_op(&reference_log, &receipt);
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
 
         assert!(result.is_err(), "{:?}", result.unwrap());
+    }
+
+    #[test]
+    fn test_filter_anon_logs() {
+        let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
+        let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
+            anon_log(),
+            anon_log(),
+            reference_log.clone(),
+            anon_log(),
+        ]);
+
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        let result = result.unwrap();
+        assert_eq!(result, receipt.inner.inner.logs()[1..=3]);
     }
 
     fn given_log(topic_0: &str, topic_1: &str) -> Log {
@@ -220,11 +304,111 @@ mod tests {
 
         Log {
             inner: PrimitiveLog {
-                address: Address::ZERO,
+                address: LOG_ADDRESS,
                 data: log_data,
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_start_after_before_execution_log_single() {
+        let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
+        let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
+            reference_log.clone(),
+        ]);
+
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        let result = result.unwrap();
+        assert_eq!(result, receipt.inner.inner.logs()[1..=1]);
+    }
+
+    #[test]
+    fn test_start_after_before_execution_log_multiple() {
+        let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
+        let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
+            anon_log(),
+            reference_log.clone(),
+        ]);
+
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        let result = result.unwrap();
+        assert_eq!(result, receipt.inner.inner.logs()[1..=2]);
+    }
+
+    #[test]
+    fn test_multiple_entry_point_calls_single_txn() {
+        let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
+        let receipt = given_receipt(vec![
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
+            anon_log(),
+            given_log(UO_OP_TOPIC, "other-hash"),
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
+            anon_log(),
+            reference_log.clone(),
+        ]);
+
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        let result = result.unwrap();
+        assert_eq!(result, receipt.inner.inner.logs()[4..=5]);
+    }
+
+    #[test]
+    fn test_invalid_sequence_of_logs() {
+        let reference_log = given_log(UO_OP_TOPIC, "moldy-hash");
+        let receipt = given_receipt(vec![
+            reference_log.clone(),
+            given_log(BEFORE_EXECUTION_TOPIC, "some-hash"),
+        ]);
+
+        let result = filter_receipt_logs_matching_user_op(
+            LOG_ADDRESS,
+            before_execution_selector(),
+            &reference_log,
+            &receipt,
+        );
+
+        assert!(result.is_err(), "{}", result.unwrap_err());
+    }
+
+    fn anon_log() -> Log {
+        let mut log_data = LogData::default();
+        log_data.set_topics_unchecked(vec![]);
+
+        Log {
+            inner: PrimitiveLog {
+                address: LOG_ADDRESS,
+                data: log_data,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn before_execution_selector() -> B256 {
+        keccak256(BEFORE_EXECUTION_TOPIC.as_bytes())
     }
 
     fn given_receipt(logs: Vec<Log>) -> TransactionReceipt {
@@ -232,11 +416,15 @@ mod tests {
             logs,
             ..Default::default()
         };
-        TransactionReceipt {
-            inner: TransactionReceiptEnvelope::Legacy(TransactionReceiptWithBloom {
-                receipt,
-                ..Default::default()
-            }),
+
+        WithOtherFields::new(AlloyTransactionReceipt {
+            inner: AnyReceiptEnvelope {
+                inner: ReceiptWithBloom {
+                    receipt,
+                    ..Default::default()
+                },
+                r#type: 0,
+            },
             transaction_hash: B256::ZERO,
             transaction_index: None,
             block_hash: None,
@@ -248,7 +436,6 @@ mod tests {
             from: Address::ZERO,
             to: None,
             contract_address: None,
-            authorization_list: None,
-        }
+        })
     }
 }

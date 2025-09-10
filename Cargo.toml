@@ -8,6 +8,7 @@ members = [
     "crates/pool/",
     "crates/provider/",
     "crates/rpc/",
+    "crates/signer/",
     "crates/sim/",
     "crates/task/",
     "crates/types/",
@@ -17,52 +18,57 @@ default-members = ["bin/rundler"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.9.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "LGPL-3.0-only"
 repository = "https://github.com/alchemyplatform/rundler"
 
 [workspace.dependencies]
 # rundler crates
+rundler-bindings-fastlz = { path = "crates/bindings/fastlz" }
 rundler-bls = { path = "crates/aggregators/bls" }
+rundler-builder = { path = "crates/builder" }
 rundler-contracts = { path = "crates/contracts" }
+rundler-pbh = { path = "crates/aggregators/pbh" }
+rundler-pool = { path = "crates/pool" }
 rundler-provider = { path = "crates/provider" }
+rundler-rpc = { path = "crates/rpc" }
 rundler-sim = { path = "crates/sim" }
+rundler-signer = { path = "crates/signer" }
 rundler-task = { path = "crates/task" }
 rundler-types = { path = "crates/types" }
 rundler-utils = { path = "crates/utils" }
-rundler-bindings-fastlz = { path = "crates/bindings/fastlz" }
-rundler-builder = { path = "crates/builder" }
-rundler-pbh = { path = "crates/aggregators/pbh" }
-rundler-pool = { path = "crates/pool" }
-rundler-rpc = { path = "crates/rpc" }
 
 # alloy core
-alloy-primitives = "0.8.15"
-alloy-sol-macro = "0.8.15"
-alloy-sol-types =  "0.8.15"
+alloy-primitives = "1.1.2"
+alloy-sol-macro = "1.1.2"
+alloy-sol-types =  "1.1.2"
 
 # alloy
-alloy-consensus = "0.7.3"
-alloy-contract = "0.7.3"
-alloy-eips = { version = "0.7.3", features = ["k256","serde", "std"] }
-alloy-json-rpc = "0.7.3"
-alloy-provider = { version = "0.7.3", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
-alloy-rpc-client = "0.7.3"
-alloy-rpc-types-eth = "0.7.3"
-alloy-rpc-types-trace = "0.7.3"
-alloy-signer = "0.7.3"
-alloy-signer-aws = "0.7.3"
-alloy-signer-local = { version = "0.7.3" }
-alloy-transport = "0.7.3"
-alloy-transport-http = { version = "0.7.3", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
-alloy-network = { version = "0.7.3" }
+alloy-consensus = "1.0.9"
+alloy-contract = "1.0.9"
+alloy-eips = { version = "1.0.9", features = ["k256","serde", "std"] }
+alloy-json-rpc = "1.0.9"
+alloy-network-primitives = "1.0.9"
+alloy-provider = { version = "1.0.9", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
+alloy-rpc-client = "1.0.9"
+alloy-rpc-types-any = "1.0.9"
+alloy-rpc-types-eth = "1.0.9"
+alloy-rpc-types-trace = "1.0.9"
+alloy-serde = "1.0.9"
+alloy-signer = "1.0.9"
+alloy-signer-aws = "1.0.9"
+alloy-signer-local = { version = "1.0.9" }
+alloy-transport = "1.0.9"
+alloy-transport-http = { version = "1.0.9", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
+alloy-network = { version = "1.0.9" }
+
 # alloy other
-alloy-rlp = "0.3.8"
+alloy-rlp = "0.3.12"
 
 # reth
-reth-tasks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.1.4" }
+reth-tasks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.4.7" }
 
 anyhow = "1.0.89"
 async-trait = "0.1.83"
@@ -73,20 +79,22 @@ const-hex = "1.12.0"
 futures = "0.3.30"
 futures-util = "0.3.30"
 itertools = "0.13.0"
-jsonrpsee = "0.24.5"
+jsonrpsee = "0.24.9"
 http = "1.1.0"
 metrics = "0.24.1"
 metrics-derive = "0.1.0"
 mockall = "0.13.0"
+parking_lot = "0.12.3"
 parse-display = "0.10.0"
 pin-project = "1.1.5"
 prost = "0.13.3"
+secrecy = "0.10.3"
 serde = "1.0.210"
 serde_json = "1.0.128"
 rand = "0.8.5"
 reqwest = { version = "0.12.8", default-features = false, features = ["rustls-tls"] }
 thiserror = "1.0.64"
-tokio = { version = "1.41.1", default-features = false, features = ["rt", "sync", "time"] }
+tokio = { version = "1.44.2", default-features = false, features = ["rt", "sync", "time"] }
 tokio-util = "0.7.12"
 tonic = "0.12.3"
 tonic-build = "0.12.3"

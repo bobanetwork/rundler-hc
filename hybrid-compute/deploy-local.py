@@ -1,10 +1,11 @@
-import os
+import argparse
+import base64
 import json
-import time
+import os
 import re
 import subprocess
 import socket
-import argparse
+import time
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_abi import abi as ethabi
@@ -19,15 +20,17 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--boba-path", required=True, help="Path to your local Boba/Optimism repository")
 parser.add_argument("--deploy-salt", required=False, help="Salt value for contract deployment", default="0")
 parser.add_argument("--ep-version", required=False, help="EntryPoint contract version (0.6|0.7)", default="0.7")
+parser.add_argument("--kms-port", required=False, help="Optional KMS server port (on localhost)", default=0)
 
 cli_args = parser.parse_args()
 
 ep7 = False
-
+# Leaving this code block for now in case anything's using the 0.6 version.
+# The rest of the file only has the ep7=True branches.
 if cli_args.ep_version == "0.7":
     ep7 = True
-elif cli_args.ep_version != "0.6":
-    assert "Invalid EntryPoint version (0.6 or 0.7 are supported)" == False
+else:
+    assert "Invalid EntryPoint version (only 0.7 is supported)" == False
 
 # local.env contains fixed configuration for the local devnet. Additional env variables are
 # generated dynamically when contracts are deployed. Do not use any of the local addr/privkey
@@ -37,8 +40,53 @@ with open("local.env", "r", encoding="ascii") as f:
     for line in f.readlines():
         if line.startswith('#'):
             continue
+        if cli_args.kms_port:
+            # Override the hardcoded keys
+            if line.startswith("SIGNER_PRIVATE_KEY") or line.startswith("BUNDLER_ADDR"):
+                continue
         k,v = line.strip().split('=')
         env_vars[k] = v
+
+def make_kms_key():
+    """Generate a key on the local KMS server and find its address"""
+    # Expects to find "aws" cli in $PATH
+    args = ["aws", "--endpoint", "http://127.0.0.1:4566", "kms", "create-key",  "--key-usage", "SIGN_VERIFY", "--key-spec", "ECC_SECG_P256K1"]
+    sys_env = os.environ.copy()
+
+    out = subprocess.run(args, cwd="../crates/contracts/contracts", env=sys_env,
+    capture_output=True, check=True)
+    assert out.returncode == 0
+    jstr = out.stdout.decode('ascii')
+    key_json = json.loads(jstr)
+
+    key_id = key_json['KeyMetadata']['KeyId']
+
+    args = ["aws", "--endpoint", "http://127.0.0.1:4566", "kms", "get-public-key",  "--key-id", key_id]
+    out = subprocess.run(args, cwd="../crates/contracts/contracts", env=sys_env,
+    capture_output=True, check=True)
+    assert out.returncode == 0
+    jstr = out.stdout.decode('ascii')
+    key_json = json.loads(jstr)
+
+    key_pub = key_json['PublicKey']
+    key_asn = base64.b64decode(key_pub)
+
+    # Assume fixed offsets rather than parsing ASN.1
+    assert len(key_asn) == 88
+    key_bytes = key_asn[24:]
+    addr_bytes = Web3.keccak(key_bytes)[12:]
+
+    key_addr = Web3.to_checksum_address(Web3.to_hex(addr_bytes))
+    print("    ", key_id, key_addr)
+    return key_id, key_addr
+
+if cli_args.kms_port:
+    print("Generating local KMS keys")
+    k1, a1 = make_kms_key()
+    k2, a2 = make_kms_key()
+    env_vars['BUNDLER_ADDR'] = a1
+    env_vars['BUNDLER_ADDR_V6'] = a2
+    env_vars['SIGNER_AWS_KMS_KEY_IDS'] = k1 + "," + k2
 
 #For old devnet
 #with open(cli_args.boba_path + "/.devnet/addresses.json", "r", encoding="ascii") as f:
@@ -72,17 +120,6 @@ print("  BOBA L1", boba_l1_addr)
 print("  Bridge", bridge_addr)
 print("  BOBA L2", boba_token)
 
-# local.env contains fixed configuration for the local devnet. Additional env variables are
-# generated dynamically when contracts are deployed. Do not use any of the local addr/privkey
-# accounts on public networks.
-print("Reading local.env")
-with open("local.env", "r", encoding="ascii") as f:
-    for line in f.readlines():
-        if line.startswith('#'):
-            continue
-        k,v = line.strip().split('=')
-        env_vars[k] = v
-
 deploy_addr = env_vars['DEPLOY_ADDR']
 deploy_key = env_vars['DEPLOY_PRIVKEY']
 
@@ -91,22 +128,23 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.connect(("192.0.2.0", 1))
 local_ip = s.getsockname()[0]
 s.close()
+if False:
+    LOCAL_URL_PREFIX = "http://127.0.0.1:"
+else:
+    LOCAL_URL_PREFIX = "http://" + str(local_ip) + ":"
 
-l1 = Web3(Web3.HTTPProvider("http://127.0.0.1:" + str(l1_rpc_port)))
+l1 = Web3(Web3.HTTPProvider(LOCAL_URL_PREFIX + str(l1_rpc_port)))
 assert l1.is_connected
 l1.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:" + str(l2_rpc_port)))
+w3 = Web3(Web3.HTTPProvider(LOCAL_URL_PREFIX + str(l2_rpc_port)))
 assert w3.is_connected
 
 l1_util = eth_utils(l1)
 l2_util = eth_utils(w3)
 
 contract_info = {}
-if ep7:
-    OUT_PREFIX = "../crates/contracts/contracts/out/hc0_7/"
-else:
-    OUT_PREFIX = "../crates/contracts/contracts/out/hc0_6/"
+OUT_PREFIX = "../crates/contracts/contracts/out/hc0_7/"
 
 def load_contract(w, name, path, address):
     """Loads a contract's JSON ABI"""
@@ -170,17 +208,17 @@ def submit_as_v7_op(addr, calldata, signer_key):
        have a Bundler to run gas estimation so the values are hard-coded. It might be
        necessary to change these values e.g. if simulating different L1 prices on the local devnet"""
 
-    gasLimits = "0x00000000000000000000000000016ed900000000000000000000000000053652"
-    gasFees   = "0x00000000000000000000000039d106800000000000000000000000025b9c274c"
+    gas_limits = "0x00000000000000000000000000016ed900000000000000000000000000053652"
+    gas_fees   = "0x00000000000000000000000039d106800000000000000000000000025b9c274c"
 
     op = {
         'sender':addr,
         'nonce': aa.aa_nonce(addr, 1235),
         'initCode':"0x",
         'callData': Web3.to_hex(calldata),
-        'accountGasLimits': gasLimits,
+        'accountGasLimits': gas_limits,
         'preVerificationGas': "0xF0000",
-        'gasFees': gasFees,
+        'gasFees': gas_fees,
         'paymasterAndData':"0x",
         'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
     }
@@ -215,10 +253,7 @@ def permit_caller(acct, caller):
         calldata = selector("PermitCaller(address,bool)") + \
           ethabi.encode(['address','bool'], [caller, True])
 
-        if ep7:
-            submit_as_v7_op(acct.address, calldata, env_vars['OC_PRIVKEY'])
-        else:
-            submit_as_v6_op(acct.address, calldata, env_vars['OC_PRIVKEY'])
+        submit_as_v7_op(acct.address, calldata, env_vars['OC_PRIVKEY'])
 
 def register_url(caller, url):
     """Associates a URL with the address of a HybridAccount contract"""
@@ -276,17 +311,16 @@ def deploy_account(factory, owner):
     return acct_addr
 
 def deploy_forge(script, cmd_env):
-    args = ["forge", "script", "--json", "--broadcast", "--via-ir"]
-    args.append("--rpc-url=http://127.0.0.1:" + str(l2_rpc_port))
+    """Construct parameters and then call 'forge script' to deploy contracts"""
+    args = ["forge", "script", "--json", "--broadcast", "--via-ir", "--root", "v0_7"]
+    args.append("--rpc-url=" + LOCAL_URL_PREFIX + str(l2_rpc_port))
     args.append("--contracts")
-    if ep7:
-        args.append("src/hc0_7")
-        args.append("--remappings")
-        args.append("@openzeppelin/=lib/openzeppelin-contracts-versions/v5_0")
-    else:
-        args.append("src/hc0_6")
-        args.append("--remappings")
-        args.append("@openzeppelin/=lib/openzeppelin-contracts-versions/v4_9")
+
+    args.append("hc_src")
+    args.append("--remappings")
+    args.append("@account-abstraction/=lib/account-abstraction/contracts")
+    args.append("--remappings")
+    args.append("@openzeppelin/=lib/openzeppelin-contracts")
 
     args.append(script)
     sys_env = os.environ.copy()
@@ -298,10 +332,8 @@ def deploy_forge(script, cmd_env):
 
     if 'ENTRY_POINTS' in env_vars:
         cmd_env['ENTRY_POINTS'] = env_vars['ENTRY_POINTS']
-    elif ep7:
-        cmd_env['ENTRY_POINTS'] = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
     else:
-        cmd_env['ENTRY_POINTS'] = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
+        cmd_env['ENTRY_POINTS'] = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
     print("Using EntryPoint address:", cmd_env['ENTRY_POINTS'])
 
     out = subprocess.run(args, cwd="../crates/contracts/contracts", env=cmd_env,
@@ -310,7 +342,7 @@ def deploy_forge(script, cmd_env):
     # Subprocess will fail if contracts were previously deployed but those addresses were
     # not passed in as env variables. Retry on a cleanly deployed devnet or change deploy_salt.
     if out.returncode != 0:
-      print(out)
+        print(out)
     assert out.returncode == 0
 
     jstr = out.stdout.split(b'\n')[0].decode('ascii')
@@ -329,23 +361,18 @@ def deploy_base():
     cmd_env = {}
     cmd_env['HC_SYS_OWNER'] = env_vars['HC_SYS_OWNER']
     cmd_env['BOBA_TOKEN'] = boba_token
-    if ep7:
-        addrs = deploy_forge("hc_scripts/LocalDeploy_v7.s.sol", cmd_env)
-    else:
-        addrs = deploy_forge("hc_scripts/LocalDeploy_v6.s.sol", cmd_env)
+    addrs = deploy_forge("hc_scripts/LocalDeploy_v7.s.sol", cmd_env)
 
     print("Deployed base contracts:", addrs)
     return addrs.split(',')
 
 def deploy_examples(hybrid_acct_addr):
+    """Deploy example contracts"""
     cmd_env = {}
     cmd_env['OC_HYBRID_ACCOUNT'] = hybrid_acct_addr
     cmd_env['BOBA_TOKEN'] = boba_token
     cmd_env['OC_RANDOM_KEYHASH'] = env_vars['OC_RANDOM_KEYHASH']
-    if ep7:
-        addrs = deploy_forge("hc_scripts/ExampleDeploy_v7.s.sol", cmd_env)
-    else:
-        addrs = deploy_forge("hc_scripts/ExampleDeploy_v6.s.sol", cmd_env)
+    addrs = deploy_forge("hc_scripts/ExampleDeploy_v7.s.sol", cmd_env)
 
     print("Deployed example contracts:", addrs)
     return addrs.split(',')
@@ -366,10 +393,7 @@ def boba_balance(addr):
     bal = w3.eth.call({'to':boba_token, 'data':bal_calldata})
     return Web3.to_int(bal)
 
-if ep7:
-    EP = load_contract(w3, "EntryPoint", "../crates/contracts/contracts/out/v0_7/EntryPoint.sol/EntryPoint.json", "0x0000000071727De22E5E9d8BAf0edAc6f37da032")
-else:
-    EP = load_contract(w3, "EntryPoint", "../crates/contracts/contracts/lib/account-abstraction-versions/v0_6/deployments/optimism/EntryPoint.json", "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
+EP = load_contract(w3, "EntryPoint", "../crates/contracts/contracts/out/v0_7/EntryPoint.sol/EntryPoint.json", "0x0000000071727De22E5E9d8BAf0edAc6f37da032")
 
 ETH_MIN = 50
 BOBA_MIN = 500
@@ -516,7 +540,7 @@ env_vars['TEST_RANDOM'] = TEST_RANDOM.address
 # Other
 env_vars['BOBA_TOKEN'] = boba_token
 env_vars['SIMPLE_PM'] = pm_addr
-env_vars['NODE_HTTP'] = "http://127.0.0.1:" + str(l2_rpc_port)
+env_vars['NODE_HTTP'] = LOCAL_URL_PREFIX + str(l2_rpc_port)
 env_vars['OC_NODE_HTTP'] = env_vars['NODE_HTTP']
 env_vars['CHAIN_ID'] = chain_id
 

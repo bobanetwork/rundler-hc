@@ -28,19 +28,20 @@ use super::protos::{
     CallGasLimitTooLow, CallHadValue, CalledBannedEntryPointMethod, CodeHashChanged, DidNotRevert,
     DiscardedOnInsertError, Entity, EntityThrottledError, EntityType, EntryPointRevert,
     ExecutionGasLimitEfficiencyTooLow, ExistingSenderWithInitCode, FactoryCalledCreate2Twice,
-    FactoryIsNotContract, FactoryMustBeEmpty, InvalidAccountSignature, InvalidPaymasterSignature,
-    InvalidSignature, InvalidStorageAccess, InvalidTimeRange, MaxFeePerGasTooLow,
-    MaxOperationsReachedError, MaxPriorityFeePerGasTooLow, MempoolError as ProtoMempoolError,
-    MultipleRolesViolation, NotStaked, OperationAlreadyKnownError, OperationDropTooSoon,
-    OperationRevert, OutOfGas, PanicRevert, PaymasterBalanceTooLow, PaymasterDepositTooLow,
-    PaymasterIsNotContract, PreOpGasLimitEfficiencyTooLow, PreVerificationGasTooLow,
-    PrecheckViolationError as ProtoPrecheckViolationError, ReplacementUnderpricedError,
-    SenderAddressUsedAsAlternateEntity, SenderFundsTooLow, SenderIsNotContractAndNoInitCode,
-    SimulationViolationError as ProtoSimulationViolationError, TooManyExpectedStorageSlots,
-    TotalGasLimitTooHigh, UnintendedRevert, UnintendedRevertWithMessage, UnknownEntryPointError,
-    UnknownRevert, UnstakedPaymasterContext, UseUnsupportedEip, UsedForbiddenOpcode,
-    UsedForbiddenPrecompile, ValidationRevert as ProtoValidationRevert,
-    VerificationGasLimitBufferTooLow, VerificationGasLimitTooHigh, WrongNumberOfPhases,
+    FactoryIsNotContract, FactoryMustBeEmpty, Invalid7702AuthSignature, InvalidAccountSignature,
+    InvalidPaymasterSignature, InvalidSignature, InvalidStorageAccess, InvalidTimeRange,
+    MaxFeePerGasTooLow, MaxOperationsReachedError, MaxPriorityFeePerGasTooLow,
+    MempoolError as ProtoMempoolError, MultipleRolesViolation, NotStaked,
+    OperationAlreadyKnownError, OperationDropTooSoon, OperationRevert, OutOfGas, OverMaxCost,
+    PanicRevert, PaymasterBalanceTooLow, PaymasterDepositTooLow, PaymasterIsNotContract,
+    PreVerificationGasTooLow, PrecheckViolationError as ProtoPrecheckViolationError,
+    ReplacementUnderpricedError, SenderAddressUsedAsAlternateEntity, SenderFundsTooLow,
+    SenderIsNotContractAndNoInitCode, SimulationViolationError as ProtoSimulationViolationError,
+    TooManyExpectedStorageSlots, TotalGasLimitTooHigh, UnintendedRevert,
+    UnintendedRevertWithMessage, UnknownEntryPointError, UnknownRevert, UnstakedPaymasterContext,
+    UseUnsupportedEip, UsedForbiddenOpcode, UsedForbiddenPrecompile,
+    ValidationRevert as ProtoValidationRevert, VerificationGasLimitBufferTooLow,
+    VerificationGasLimitEfficiencyTooLow, VerificationGasLimitTooHigh, WrongNumberOfPhases,
 };
 
 impl TryFrom<ProtoMempoolError> for PoolError {
@@ -125,8 +126,8 @@ impl TryFrom<ProtoMempoolError> for MempoolError {
             Some(mempool_error::Error::OperationDropTooSoon(e)) => {
                 MempoolError::OperationDropTooSoon(e.added_at, e.attempted_at, e.must_wait)
             }
-            Some(mempool_error::Error::PreOpGasLimitEfficiencyTooLow(e)) => {
-                MempoolError::PreOpGasLimitEfficiencyTooLow(e.required, e.actual)
+            Some(mempool_error::Error::VerificationGasLimitEfficiencyTooLow(e)) => {
+                MempoolError::VerificationGasLimitEfficiencyTooLow(e.required, e.actual)
             }
             Some(mempool_error::Error::ExecutionGasLimitEfficiencyTooLow(e)) => {
                 MempoolError::ExecutionGasLimitEfficiencyTooLow(e.required, e.actual)
@@ -139,6 +140,9 @@ impl TryFrom<ProtoMempoolError> for MempoolError {
             }
             Some(mempool_error::Error::UseUnsupportedEip(e)) => {
                 MempoolError::EIPNotSupported(e.eip_name)
+            }
+            Some(mempool_error::Error::Invalid7702AuthSignature(e)) => {
+                MempoolError::Invalid7702AuthSignature(e.reason)
             }
             None => bail!("unknown proto mempool error"),
         })
@@ -240,11 +244,13 @@ impl From<MempoolError> for ProtoMempoolError {
                     )),
                 }
             }
-            MempoolError::PreOpGasLimitEfficiencyTooLow(required, actual) => ProtoMempoolError {
-                error: Some(mempool_error::Error::PreOpGasLimitEfficiencyTooLow(
-                    PreOpGasLimitEfficiencyTooLow { required, actual },
-                )),
-            },
+            MempoolError::VerificationGasLimitEfficiencyTooLow(required, actual) => {
+                ProtoMempoolError {
+                    error: Some(mempool_error::Error::VerificationGasLimitEfficiencyTooLow(
+                        VerificationGasLimitEfficiencyTooLow { required, actual },
+                    )),
+                }
+            }
             MempoolError::ExecutionGasLimitEfficiencyTooLow(required, actual) => {
                 ProtoMempoolError {
                     error: Some(mempool_error::Error::ExecutionGasLimitEfficiencyTooLow(
@@ -266,6 +272,11 @@ impl From<MempoolError> for ProtoMempoolError {
                 error: Some(mempool_error::Error::UseUnsupportedEip(UseUnsupportedEip {
                     eip_name: msg,
                 })),
+            },
+            MempoolError::Invalid7702AuthSignature(msg) => ProtoMempoolError {
+                error: Some(mempool_error::Error::Invalid7702AuthSignature(
+                    Invalid7702AuthSignature { reason: msg },
+                )),
             },
         }
     }
@@ -391,6 +402,14 @@ impl From<PrecheckViolation> for ProtoPrecheckViolationError {
                     },
                 )),
             },
+            PrecheckViolation::OverMaxCost(actual, max) => ProtoPrecheckViolationError {
+                violation: Some(precheck_violation_error::Violation::OverMaxCost(
+                    OverMaxCost {
+                        actual_cost: actual.to_proto_bytes(),
+                        max_cost: max.to_proto_bytes(),
+                    },
+                )),
+            },
         }
     }
 }
@@ -462,6 +481,12 @@ impl TryFrom<ProtoPrecheckViolationError> for PrecheckViolation {
             }
             Some(precheck_violation_error::Violation::FactoryMustBeEmpty(e)) => {
                 PrecheckViolation::FactoryMustBeEmpty(from_bytes(&e.factory_address)?)
+            }
+            Some(precheck_violation_error::Violation::OverMaxCost(e)) => {
+                PrecheckViolation::OverMaxCost(
+                    from_bytes(&e.actual_cost)?,
+                    from_bytes(&e.max_cost)?,
+                )
             }
             None => {
                 bail!("unknown proto mempool precheck violation")
@@ -781,12 +806,10 @@ impl TryFrom<ProtoSimulationViolationError> for SimulationViolation {
                     EntityType::try_from(e.accessing_entity).context("unknown entity type")?,
                 )
                 .context("invalid entity type")?;
-                let accessed_entity = match rundler_types::EntityType::try_from(
+                let accessed_entity = rundler_types::EntityType::try_from(
                     EntityType::try_from(e.accessed_entity).context("unknown entity type")?,
-                ) {
-                    Ok(entity_type) => Some(entity_type),
-                    Err(_) => None,
-                };
+                )
+                .ok();
 
                 SimulationViolation::NotStaked(Box::new(NeedsStakeInformation {
                     needs_stake: (&e.needs_stake.context("should have entity in error")?)

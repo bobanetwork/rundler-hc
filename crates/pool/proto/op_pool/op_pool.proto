@@ -24,6 +24,19 @@ message UserOperation {
   }
 }
 
+message UserOperationPermissions {
+  bool trusted = 1;
+  optional uint64 max_allowed_in_pool_for_sender = 2;
+  optional uint32 underpriced_accept_pct = 3;
+  optional uint32 underpriced_bundle_pct = 4;
+  BundlerSponsorship bundler_sponsorship = 5;
+}
+
+message BundlerSponsorship {
+  bytes max_cost = 1;
+  uint64 valid_until = 2;
+}
+
 // Protocol Buffer representation of an 7702 authorization tuple. See the official 
 // specification at https://eips.ethereum.org/EIPS/eip-7702
 message AuthorizationTuple {
@@ -177,30 +190,43 @@ message MempoolOp {
   // The entry point address of this operation
   bytes entry_point = 8;
   // The DA gas data for the UO
-  DaGasUoData da_gas_data = 9;
+  DaGasData da_gas_data = 9;
   // The filter ID to apply to the UserOperation
   string filter_id = 10;
+  // The permissions for the UserOperation
+  UserOperationPermissions permissions = 11;
+}
+
+message PoolOperationSummary {
+  // The serialized UserOperation hash
+  bytes hash = 1;
+  // The serialized entry point address
+  bytes entry_point = 2;
+  // The sender of the UserOperation
+  bytes sender = 3;
+  // Hybrid Compute extension
+  bytes hc_hash = 4;
 }
 
 // Data associated with a user operation for DA gas calculations
-message DaGasUoData {
+message DaGasData {
   oneof data {
-    EmptyUoData empty = 1;
-    NitroDaGasUoData nitro = 2;
-    BedrockDaGasUoData bedrock = 3;
+    EmptyGasData empty = 1;
+    NitroDaGasData nitro = 2;
+    BedrockDaGasData bedrock = 3;
   }
 }
 
-message EmptyUoData {}
+message EmptyGasData {}
 
 // Data associated with a user operation for Nitro DA gas calculations
-message NitroDaGasUoData {
-  bytes uo_units = 1;
+message NitroDaGasData {
+  bytes units = 1;
 }
 
 // Data associated with a user operation for Bedrock DA gas calculations
-message BedrockDaGasUoData {
-  uint64 uo_units = 1;
+message BedrockDaGasData {
+  uint64 units = 1;
 }
 
 // Defines the gRPC endpoints for a UserOperation mempool service
@@ -216,8 +242,17 @@ service OpPool {
   // Get up to `max_ops` from the mempool.
   rpc GetOps (GetOpsRequest) returns (GetOpsResponse);
 
+  // Get summaries of up to `max_ops` from the mempool.
+  rpc GetOpsSummaries (GetOpsSummariesRequest) returns (GetOpsSummariesResponse);
+
+  // Get operations by their hashes.
+  rpc GetOpsByHashes (GetOpsByHashesRequest) returns (GetOpsByHashesResponse);
+
   // Get a UserOperation by its hash
   rpc GetOpByHash (GetOpByHashRequest) returns (GetOpByHashResponse);
+
+  // Get a UserOperation by its id
+  rpc GetOpById (GetOpByIdRequest) returns (GetOpByIdResponse);
 
   // Removes UserOperations from the mempool
   rpc RemoveOps(RemoveOpsRequest) returns (RemoveOpsResponse);
@@ -269,10 +304,10 @@ message GetSupportedEntryPointsResponse {
 }
 
 message AddOpRequest {
-  // The serialized entry point address via which the UserOperation is being submitted
-  bytes entry_point = 1;
   // The UserOperation to add to the mempool
-  UserOperation op = 2;
+  UserOperation op = 1;
+  // The permissions to use for the UserOperation
+  UserOperationPermissions permissions = 2;
 }
 message AddOpResponse {
   oneof result {
@@ -290,10 +325,8 @@ message GetOpsRequest {
   bytes entry_point = 1;
   // The maximum number of UserOperations to return
   uint64 max_ops = 2;
-  // The mempool shard num retrieve UserOperations from
-  uint64 shard_index = 3; 
   // The filter ID to apply to the UserOperations 
-  string filter_id = 4;
+  string filter_id = 3;
 }
 message GetOpsResponse {
   oneof result {
@@ -302,6 +335,40 @@ message GetOpsResponse {
   }
 }
 message GetOpsSuccess {
+  repeated MempoolOp ops = 1;
+}
+
+message GetOpsSummariesRequest {  
+  // The serialized entry point address
+  bytes entry_point = 1;
+  // The maximum number of UserOperations to return
+  uint64 max_ops = 2;
+  // The filter ID to apply to the UserOperations 
+  string filter_id = 3;
+}
+message GetOpsSummariesResponse {
+  oneof result {
+    GetOpsSummariesSuccess success = 1;
+    MempoolError failure = 2;
+  }
+}
+message GetOpsSummariesSuccess {
+  repeated PoolOperationSummary summaries = 1;
+}
+
+message GetOpsByHashesRequest {
+  // The serialized entry point address
+  bytes entry_point = 1;
+  // The serialized UserOperation hashes to get
+  repeated bytes hashes = 2;
+}
+message GetOpsByHashesResponse {
+  oneof result {
+    GetOpsByHashesSuccess success = 1;
+    MempoolError failure = 2;
+  }
+}
+message GetOpsByHashesSuccess {
   repeated MempoolOp ops = 1;
 }
 
@@ -316,6 +383,20 @@ message GetOpByHashResponse {
   }
 }
 message GetOpByHashSuccess {
+  MempoolOp op = 1;
+}
+
+message GetOpByIdRequest {
+  bytes sender = 1;
+  bytes nonce = 2;
+}
+message GetOpByIdResponse {
+  oneof result {
+    GetOpByIdSuccess success = 1;
+    MempoolError failure = 2;
+  }
+}
+message GetOpByIdSuccess {
   MempoolOp op = 1;
 }
 
@@ -477,7 +558,10 @@ message PaymasterBalance {
   bytes confirmed_balance = 3;
 }
 
-message SubscribeNewHeadsRequest {}
+message SubscribeNewHeadsRequest {
+  // The addresses to track
+  repeated bytes to_track = 1;
+}
 message SubscribeNewHeadsResponse {
   // The new chain head
   NewHead new_head = 1;
@@ -487,8 +571,19 @@ message NewHead {
   bytes block_hash = 1;
   // The block number
   uint64 block_number = 2;
+  // Address Updates
+  repeated AddressUpdate address_updates = 3;
 }
-
+message AddressUpdate {
+  // The address
+  bytes address = 1;
+  // The new nonce (if any)
+  optional uint64 nonce = 2;
+  // The new balance
+  bytes balance = 3;
+  // The mined tx hashes
+  repeated bytes mined_tx_hashes = 4;
+}
 message AdminSetTrackingRequest {
   // The serialized entry point address via which the UserOperation is being submitted
   bytes entry_point = 1;
@@ -539,11 +634,12 @@ message MempoolError {
     AssociatedStorageIsAlternateSender associated_storage_is_alternate_sender = 14;
     PaymasterBalanceTooLow paymaster_balance_too_low = 15;
     OperationDropTooSoon operation_drop_too_soon = 16;
-    PreOpGasLimitEfficiencyTooLow pre_op_gas_limit_efficiency_too_low = 17;
+    VerificationGasLimitEfficiencyTooLow verification_gas_limit_efficiency_too_low = 17;
     ExecutionGasLimitEfficiencyTooLow execution_gas_limit_efficiency_too_low = 18;
     TooManyExpectedStorageSlots too_many_expected_storage_slots = 19;
     UseUnsupportedEIP use_unsupported_eip = 20;
     AggregatorError aggregator = 21;
+    Invalid7702AuthSignature invalid_7702_auth_signature = 22;
   }
 }
 
@@ -584,6 +680,9 @@ message SenderAddressUsedAsAlternateEntity {
 
 message DiscardedOnInsertError {}
 
+message Invalid7702AuthSignature {
+  string reason = 1;
+}
 
 message AggregatorError {
   string reason = 1;
@@ -597,14 +696,14 @@ message OperationDropTooSoon {
   uint64 must_wait = 3;
 }
 
-message PreOpGasLimitEfficiencyTooLow {
-  float required = 1;
-  float actual = 2;
+message VerificationGasLimitEfficiencyTooLow {
+  double required = 1;
+  double actual = 2;
 }
 
 message ExecutionGasLimitEfficiencyTooLow {
-  float required = 1;
-  float actual = 2;
+  double required = 1;
+  double actual = 2;
 }
 
 message TooManyExpectedStorageSlots {
@@ -632,6 +731,7 @@ message PrecheckViolationError {
     MaxPriorityFeePerGasTooLow max_priority_fee_per_gas_too_low = 11;
     CallGasLimitTooLow call_gas_limit_too_low = 12;
     FactoryMustBeEmpty factory_must_be_empty = 13;
+    OverMaxCost over_max_cost = 14;
   }
 }
 
@@ -701,6 +801,11 @@ message CallGasLimitTooLow {
 
 message FactoryMustBeEmpty{
   bytes factory_address = 1;
+}
+
+message OverMaxCost {
+  bytes actual_cost = 1;
+  bytes max_cost = 2;
 }
 
 // SIMULATION VIOLATIONS

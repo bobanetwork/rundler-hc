@@ -35,7 +35,7 @@ mod opcode;
 pub use opcode::{Opcode, ViolationOpCode};
 
 mod gas;
-pub use gas::GasFees;
+pub use gas::{GasFees, PriorityFeeMode};
 
 pub mod pool;
 
@@ -48,7 +48,7 @@ mod user_operation;
 pub use user_operation::*;
 
 mod storage;
-pub use storage::StorageSlot;
+pub use storage::*;
 
 mod validation_results;
 pub use validation_results::{

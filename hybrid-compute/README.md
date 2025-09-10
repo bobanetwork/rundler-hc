@@ -6,6 +6,24 @@ Additional information may be found at https://docs.boba.network/hc and https://
 
 # Changelog
 
+* hc0.3.0
+
+Merges upstream 0.9.0. Code refactoring. Switches HC to use v0.7 entrypoint.
+Note that eth_estimateUserOperationGas() now returns a paymaster_verification_gas_limit field.
+Some params/envs renamed from BUILDER_ to SIGNER_ namespace.
+
+* hc0.2.3
+
+Merges upstream 0.6.0. Adds Verifiable Random Function example.
+
+* hc0.2.2
+
+Various updates
+
+* hc0.2.1
+
+Various updates. Defaults to v0.7 entrypoint
+
 * v0.2.0
 
 This version ports the hybrid-compute features on top of the upstream rundler 0.3.0 release, with a restriction that the functionality is only implemented for version 0.6 of the AA EntryPoint contract. The address of the EntryPoint contract is no longer configurable.

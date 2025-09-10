@@ -28,8 +28,11 @@ use rundler_types::{
     ValidTimeRange, ValidationOutput, ValidationReturnInfo, ViolationOpCode,
 };
 
-use super::context::{
-    self, AccessInfo, AssociatedSlotsByAddress, ValidationContext, ValidationContextProvider,
+use super::{
+    context::{
+        self, AccessInfo, AssociatedSlotsByAddress, ValidationContext, ValidationContextProvider,
+    },
+    UnsafeSimulator,
 };
 use crate::{
     simulation::{
@@ -101,6 +104,7 @@ pub struct SimulatorImpl<UO, P, E, V> {
     sim_settings: Settings,
     mempool_configs: HashMap<B256, MempoolConfig>,
     allow_unstaked_addresses: HashSet<Address>,
+    unsafe_sim: UnsafeSimulator<UO, E>,
     _uo_type: PhantomData<UO>,
 }
 
@@ -108,7 +112,7 @@ impl<UO, P, E, V> SimulatorImpl<UO, P, E, V>
 where
     UO: UserOperation,
     P: EvmProvider,
-    E: EntryPoint,
+    E: EntryPoint + Clone,
     V: ValidationContextProvider<UO = UO>,
 {
     /// Create a new simulator
@@ -137,6 +141,7 @@ where
 
         Self {
             provider,
+            unsafe_sim: UnsafeSimulator::new(entry_point.clone(), sim_settings.clone()),
             entry_point,
             validation_context_provider,
             sim_settings,
@@ -423,7 +428,7 @@ impl<UO, P, E, V> Simulator for SimulatorImpl<UO, P, E, V>
 where
     UO: UserOperation,
     P: EvmProvider,
-    E: EntryPoint,
+    E: EntryPoint + SimulationProvider<UO = UO> + Clone,
     V: ValidationContextProvider<UO = UO>,
 {
     type UO = UO;
@@ -431,9 +436,17 @@ where
     async fn simulate_validation(
         &self,
         op: UO,
+        trusted: bool,
         block_hash: B256,
         expected_code_hash: Option<B256>,
     ) -> Result<SimulationResult, SimulationError> {
+        if trusted {
+            return self
+                .unsafe_sim
+                .simulate_validation(op, trusted, block_hash, expected_code_hash)
+                .await;
+        }
+
         let block_id = block_hash.into();
         let mut context = match self
             .validation_context_provider
@@ -441,7 +454,20 @@ where
             .await
         {
             Ok(context) => context,
-            error @ Err(_) => error?,
+            error @ Err(ViolationError::Other(_)) => {
+                if self.sim_settings.enable_unsafe_fallback {
+                    tracing::warn!(
+                        "tracing error with enable_unsafe_fallback set, falling back to unsafe sim. Error: {error:?}"
+                    );
+                    return self
+                        .unsafe_sim
+                        .simulate_validation(op, trusted, block_hash, expected_code_hash)
+                        .await;
+                } else {
+                    error?
+                }
+            }
+            error @ Err(ViolationError::Violations(_)) => error?,
         };
 
         // Gather all violations from the tracer
@@ -628,6 +654,8 @@ fn override_infos_staked(eis: &mut EntityInfos, allow_unstaked_addresses: &HashS
 
 #[cfg(test)]
 mod tests {
+    use std::{ops::Sub, sync::Arc, time::Duration};
+
     use alloy_primitives::{address, b256, bytes, uint, Bytes};
     use context::ContractInfo;
     use rundler_provider::{BlockId, BlockNumberOrTag, MockEntryPointV0_6, MockEvmProvider};
@@ -635,7 +663,7 @@ mod tests {
         aggregator::AggregatorCosts,
         chain::ChainSpec,
         v0_6::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
-        AggregatorInfo, Opcode, StakeInfo, UserOperation as _,
+        AggregatorInfo, Opcode, StakeInfo, Timestamp, UserOperation as _,
     };
 
     use self::context::{Phase, TracerOutput};
@@ -788,7 +816,9 @@ mod tests {
                     pre_op_gas: 3000,
                     account_sig_failed: true,
                     paymaster_sig_failed: true,
-                    ..Default::default()
+                    valid_after: 0.into(),
+                    valid_until: u64::MAX.into(),
+                    paymaster_context: Bytes::default(),
                 },
                 sender_info: StakeInfo::default(),
                 factory_info: StakeInfo::default(),
@@ -806,7 +836,7 @@ mod tests {
     ) -> SimulatorImpl<
         UserOperation,
         MockEvmProvider,
-        MockEntryPointV0_6,
+        Arc<MockEntryPointV0_6>,
         MockValidationContextProviderV0_6,
     > {
         let settings = Settings::default();
@@ -814,7 +844,13 @@ mod tests {
         let mut mempool_configs = HashMap::new();
         mempool_configs.insert(B256::ZERO, MempoolConfig::default());
 
-        SimulatorImpl::new(provider, entry_point, context, settings, mempool_configs)
+        SimulatorImpl::new(
+            provider,
+            Arc::new(entry_point),
+            context,
+            settings,
+            mempool_configs,
+        )
     }
 
     #[tokio::test]
@@ -862,7 +898,33 @@ mod tests {
 
         let simulator = create_simulator(provider, entry_point, context);
         let res = simulator
-            .simulate_validation(user_operation, B256::ZERO, None)
+            .simulate_validation(user_operation, false, B256::ZERO, None)
+            .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_simulate_validation_trusted() {
+        let (provider, mut entry_point, context) = create_base_config();
+        let uo = UserOperationBuilder::new(
+            &ChainSpec::default(),
+            UserOperationRequiredFields::default(),
+        )
+        .build();
+
+        entry_point.expect_simulate_validation().returning(|_, _| {
+            Ok(Ok(ValidationOutput {
+                return_info: ValidationReturnInfo::default(),
+                sender_info: StakeInfo::default(),
+                factory_info: StakeInfo::default(),
+                paymaster_info: StakeInfo::default(),
+                aggregator_info: None,
+            }))
+        });
+
+        let simulator = create_simulator(provider, entry_point, context);
+        let res = simulator
+            .simulate_validation(uo, true, B256::ZERO, None)
             .await;
         assert!(res.is_ok());
     }
@@ -1186,6 +1248,32 @@ mod tests {
             vec![SimulationViolation::AggregatorMismatch(
                 Address::ZERO,
                 bad_agg
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_time_range() {
+        let (provider, mut ep, mut context_provider) = create_base_config();
+        ep.expect_address()
+            .return_const(address!("5ff137d4b0fdcd49dca30c7cf57e578a026d2789"));
+        context_provider
+            .expect_get_specific_violations()
+            .returning(|_| Ok(vec![]));
+
+        let mut context = get_test_context();
+        context.entry_point_out.return_info.valid_after = 0.into();
+        context.entry_point_out.return_info.valid_until =
+            Timestamp::now().sub(Duration::from_secs(10)); // invalid time range
+
+        let simulator = create_simulator(provider, ep, context_provider);
+        let res = simulator.gather_context_violations(&mut context);
+
+        assert_eq!(
+            res.unwrap(),
+            vec![SimulationViolation::InvalidTimeRange(
+                context.entry_point_out.return_info.valid_until,
+                context.entry_point_out.return_info.valid_after,
             )]
         );
     }

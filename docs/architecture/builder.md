@@ -65,7 +65,7 @@ The builder supports multiple sender implementations to support bundle transacti
 
 - **Flashbots**: Submit bundles via the [Flashbots Protect](https://docs.flashbots.net/) RPC endpoint, only supported on Ethereum Mainnet.
 
-- **Bloxroute**: Submit bundles via Bloxroute's [Polygon Private Transaction](https://docs.bloxroute.com/apis/frontrunning-protection/polygon_private_tx) endpoint. Only supported on polygon.
+- **Bloxroute**: Submit bundles via Bloxroute's Polygon Private Transaction endpoint. Only supported on polygon.
 
 ## N-Senders
 
@@ -140,7 +140,7 @@ stateDiagram-v2
 
 Rundler supports running multiple builder instances per entry point, per node. To configure set `--num_builders_v0_7` (or corresponding for other entry point) to the number of builders the node should run. Ensure that you have provisioned enough private or KMS keys such that at each builder has access to a distinct key.
 
-If deploying multiple builder nodes all targeting the same mempool, users must ensure that each builder has a distinct index. To control this, set the `--builder_index_offset_v0_7` (or corresponding for other entry point) such that there are no overlaps or gaps in the builder indexes.
+NOTE: builder servers must be 1:1 with mempools or builders may invalidate each other's bundles.
 
 ### Custom
 

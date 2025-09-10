@@ -14,13 +14,12 @@
 use alloy_primitives::{aliases::U192, Address, Bytes, U256};
 use rundler_types::{
     chain::ChainSpec,
-    da::{DAGasBlockData, DAGasUOData},
-    GasFees, Timestamp, UserOperation, UserOpsPerAggregator, ValidationOutput, ValidationRevert,
+    da::{DAGasBlockData, DAGasData},
+    EntryPointVersion, GasFees, Timestamp, UserOperation, UserOpsPerAggregator, ValidationOutput,
+    ValidationRevert,
 };
 
-use crate::{
-    BlockHashOrNumber, BlockId, EvmCall, ProviderResult, StateOverride, TransactionRequest,
-};
+use crate::{BlockHashOrNumber, BlockId, ProviderResult, StateOverride, TransactionRequest};
 
 /// Output of a successful signature aggregator simulation call
 #[derive(Clone, Debug, Default)]
@@ -41,7 +40,7 @@ pub enum AggregatorOut {
 }
 
 /// Result of an entry point handle ops call
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HandleOpsOut {
     /// Call succeeded
     Success,
@@ -92,6 +91,9 @@ pub struct ExecutionResult {
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(&, &mut, Rc, Arc, Box)]
 pub trait EntryPoint: Send + Sync {
+    /// Get the version of the entry point contract
+    fn version(&self) -> EntryPointVersion;
+
     /// Get the address of the entry point contract
     fn address(&self) -> &Address;
 
@@ -148,6 +150,7 @@ pub trait BundleHandler: Send + Sync {
         gas_limit: u64,
         gas_fees: GasFees,
         proxy: Option<Address>,
+        validation_only: bool,
     ) -> ProviderResult<HandleOpsOut>;
 
     /// Construct the transaction to send a bundle of operations to the entry point contract
@@ -161,7 +164,8 @@ pub trait BundleHandler: Send + Sync {
     ) -> TransactionRequest;
 
     /// Decode the revert data from a call to `handleOps`
-    fn decode_handle_ops_revert(message: &str, revert_data: &Bytes) -> HandleOpsOut;
+    fn decode_handle_ops_revert(message: &str, revert_data: &Option<Bytes>)
+        -> Option<HandleOpsOut>;
 
     /// Decode user ops from calldata
     fn decode_ops_from_calldata(
@@ -192,7 +196,7 @@ pub trait DAGasProvider: Send + Sync {
         block: BlockHashOrNumber,
         gas_price: u128,
         bundle_size: usize,
-    ) -> ProviderResult<(u128, DAGasUOData, DAGasBlockData)>;
+    ) -> ProviderResult<(u128, DAGasData, DAGasBlockData)>;
 }
 
 /// Trait for simulating user operations on an entry point contract
@@ -215,12 +219,18 @@ pub trait SimulationProvider: Send + Sync {
         block_id: Option<BlockId>,
     ) -> ProviderResult<Result<ValidationOutput, ValidationRevert>>;
 
-    /// Get call data and state overrides needed to call `simulateHandleOp`
-    fn get_simulate_handle_op_call(&self, op: Self::UO, state_override: StateOverride) -> EvmCall;
-
-    /// Call the entry point contract's `simulateHandleOp` function
-    /// with a spoofed state
+    /// Call the entry point contract's `simulateHandleOp` function.
     async fn simulate_handle_op(
+        &self,
+        op: Self::UO,
+        target: Address,
+        target_call_data: Bytes,
+        block_id: BlockId,
+        state_override: StateOverride,
+    ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>>;
+
+    /// Simulate handle op function for gas estimation
+    async fn simulate_handle_op_estimate_gas(
         &self,
         op: Self::UO,
         target: Address,

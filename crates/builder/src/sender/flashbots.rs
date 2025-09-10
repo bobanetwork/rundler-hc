@@ -23,40 +23,40 @@ use reqwest::{
     header::{HeaderMap, HeaderValue, CONTENT_TYPE},
     Client, Response,
 };
-use rundler_provider::{EvmProvider, TransactionRequest};
+use rundler_provider::TransactionRequest;
+use rundler_signer::SignerLease;
 use rundler_types::GasFees;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{de, Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::{ExpectedStorage, Result, SentTxInfo, TransactionSender, TxSenderError, TxStatus};
-use crate::{sender::CancelTxInfo, signer::Signer};
+use super::{ExpectedStorage, Result, TransactionSender, TxSenderError};
+use crate::sender::CancelTxInfo;
 
 #[derive(Debug)]
-pub(crate) struct FlashbotsTransactionSender<P, S> {
-    provider: P,
-    signer: S,
+pub(crate) struct FlashbotsTransactionSender {
     flashbots_client: FlashbotsClient,
 }
 
 #[async_trait::async_trait]
-impl<P, S> TransactionSender for FlashbotsTransactionSender<P, S>
-where
-    P: EvmProvider,
-    S: Signer,
-{
+impl TransactionSender for FlashbotsTransactionSender {
     async fn send_transaction(
         &self,
         tx: TransactionRequest,
         _expected_storage: &ExpectedStorage,
-    ) -> Result<SentTxInfo> {
-        let (raw_tx, nonce) = self.signer.fill_and_sign(tx).await?;
+        signer: &SignerLease,
+    ) -> Result<B256> {
+        let raw_tx = signer
+            .sign_tx_raw(tx)
+            .await
+            .context("failed to sign transaction")?;
 
         let tx_hash = self
             .flashbots_client
             .send_private_transaction(raw_tx)
             .await?;
 
-        Ok(SentTxInfo { nonce, tx_hash })
+        Ok(tx_hash)
     }
 
     async fn cancel_transaction(
@@ -64,6 +64,7 @@ where
         tx_hash: B256,
         _nonce: u64,
         _gas_fees: GasFees,
+        _signer: &SignerLease,
     ) -> Result<CancelTxInfo> {
         let success = self
             .flashbots_client
@@ -79,65 +80,16 @@ where
             soft_cancelled: true,
         })
     }
-
-    async fn get_transaction_status(&self, tx_hash: B256) -> Result<TxStatus> {
-        let status = self.flashbots_client.status(tx_hash).await?;
-        Ok(match status.status {
-            FlashbotsAPITransactionStatus::Pending => TxStatus::Pending,
-            FlashbotsAPITransactionStatus::Included => {
-                // Even if Flashbots says the transaction is included, we still
-                // need to wait for the provider to see it. Until it does, we're
-                // still pending.
-                let tx = self
-                    .provider
-                    .get_transaction_by_hash(tx_hash)
-                    .await
-                    .context("provider should look up transaction included by Flashbots")?;
-                if let Some(tx) = tx {
-                    if let Some(block_number) = tx.block_number {
-                        return Ok(TxStatus::Mined { block_number });
-                    }
-                }
-                TxStatus::Pending
-            }
-            FlashbotsAPITransactionStatus::Unknown => {
-                return Err(TxSenderError::Other(anyhow!(
-                    "Transaction {tx_hash:?} unknown in Flashbots API",
-                )));
-            }
-            FlashbotsAPITransactionStatus::Failed | FlashbotsAPITransactionStatus::Cancelled => {
-                TxStatus::Dropped
-            }
-        })
-    }
-
-    fn address(&self) -> Address {
-        self.signer.address()
-    }
 }
 
-impl<P, S> FlashbotsTransactionSender<P, S>
-where
-    P: EvmProvider,
-    S: Signer,
-{
+impl FlashbotsTransactionSender {
     pub(crate) fn new(
-        provider: P,
-        signer: S,
-        flashbots_auth_key: String,
+        flashbots_auth_key: SecretString,
         builders: Vec<String>,
         relay_url: String,
-        status_url: String,
     ) -> Result<Self> {
         Ok(Self {
-            provider,
-            signer,
-            flashbots_client: FlashbotsClient::new(
-                flashbots_auth_key,
-                builders,
-                relay_url,
-                status_url,
-            ),
+            flashbots_client: FlashbotsClient::new(flashbots_auth_key, builders, relay_url),
         })
     }
 }
@@ -246,30 +198,21 @@ struct FlashbotsClient {
     signer: PrivateKeySigner,
     builders: Vec<String>,
     relay_url: String,
-    status_url: String,
 }
 
 impl FlashbotsClient {
-    fn new(auth_key: String, builders: Vec<String>, relay_url: String, status_url: String) -> Self {
+    fn new(auth_key: SecretString, builders: Vec<String>, relay_url: String) -> Self {
         Self {
             http_client: Client::new(),
-            signer: auth_key.parse().expect("should parse auth key"),
+            signer: auth_key
+                .expose_secret()
+                .parse()
+                .expect("should parse auth key"),
             builders,
             relay_url,
-            status_url,
         }
     }
 
-    async fn status(&self, tx_hash: B256) -> anyhow::Result<FlashbotsAPIResponse> {
-        let url = format!("{}{:?}", self.status_url, tx_hash);
-        let resp = self.http_client.get(&url).send().await?;
-        resp.json::<FlashbotsAPIResponse>()
-            .await
-            .context("should deserialize FlashbotsAPIResponse")
-    }
-}
-
-impl FlashbotsClient {
     async fn send_private_transaction(&self, raw_tx: Bytes) -> anyhow::Result<B256> {
         let preferences = Preferences {
             fast: false,
