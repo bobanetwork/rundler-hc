@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from web3 import Web3
 import requests
 from eth_abi import abi as ethabi
-from offchain_utils import gen_response_v7, parse_req
+from hybrid_compute_sdk.server import HybridComputeSDK
 
 load_dotenv()
 
@@ -17,9 +17,10 @@ def offchain_getrainfall(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args)
     err_code = 0
     resp = Web3.to_bytes(text="unknown error")
     assert(ver == "0.3")
+    sdk = HybridComputeSDK()
 
     try:
-        req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
+        req = sdk.parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
         dec = ethabi.decode(['string'], req['reqBytes'])
         city = dec[0]
         print("city", city)
@@ -53,6 +54,6 @@ def offchain_getrainfall(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args)
     except Exception as e:
         print("DECODE FAILED", e)
 
-    return gen_response_v7(req, err_code, resp)
+    return sdk.gen_response(req, err_code, resp)
 
 

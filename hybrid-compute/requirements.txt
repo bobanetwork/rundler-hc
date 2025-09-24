@@ -4,3 +4,4 @@ python-dotenv
 redis
 web3~=6.14
 fastecdsa
+hybrid_compute_sdk>=0.2.43

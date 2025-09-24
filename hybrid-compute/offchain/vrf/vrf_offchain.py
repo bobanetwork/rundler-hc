@@ -1,11 +1,9 @@
 import os
 from web3 import Web3
 from eth_abi import abi as ethabi
-from offchain_utils import gen_response_v7, parse_req
+from hybrid_compute_sdk.server import HybridComputeSDK
 
 # --------------------------------------
-#from web3 import Web3
-#eth_abi import abi as ethabi
 from fastecdsa import curve,keys,util,point
 from eth_keys import keys as ethkeys
 
@@ -220,12 +218,13 @@ def offchain_random(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     err_code = 1
     resp = Web3.to_bytes(text="unknown error")
     assert ver == "0.3"
+    sdk = HybridComputeSDK()
 
     try:
         w3 = Web3(Web3.HTTPProvider(oc_node_http, request_kwargs={'timeout': 900}))
         assert w3.is_connected
 
-        req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
+        req = sdk.parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
         dec = ethabi.decode(['uint256', 'bytes32'], req['reqBytes'])
 
         bn = dec[0]
@@ -276,4 +275,4 @@ def offchain_random(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
         if "HTTPConnection" in str(e):
             resp = Web3.to_bytes(text="HC01: OC_NODE_HTTP connection failure")
 
-    return gen_response_v7(req, err_code, resp)
+    return sdk.gen_response(req, err_code, resp)

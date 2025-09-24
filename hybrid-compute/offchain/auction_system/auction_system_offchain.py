@@ -1,6 +1,6 @@
 from web3 import Web3
 from eth_abi import abi as ethabi
-from offchain_utils import gen_response_v7, parse_req
+from hybrid_compute_sdk.server import HybridComputeSDK
 
 blacklist = ["0x123"]
 
@@ -10,9 +10,10 @@ def offchain_auction(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     err_code = 0
     resp = Web3.to_bytes(text="unknown error")
     assert(ver == "0.3")
+    sdk = HybridComputeSDK()
 
     try:
-        req = parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
+        req = sdk.parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
         dec = ethabi.decode(['address'], req['reqBytes'])
 
         walletAddressToVerify = dec[0]
@@ -26,4 +27,4 @@ def offchain_auction(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
         err_code = 1
         print("DECODE FAILED", e)
 
-    return gen_response_v7(req, err_code, resp)
+    return sdk.gen_response(req, err_code, resp)
