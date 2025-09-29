@@ -1,20 +1,27 @@
+""" Calls the offchain AddSub2 method """
 from eth_abi import abi as ethabi
-from userop_utils import *
 
-def TestAddSub2(aa, a, b):
+def test_add_sub_2(t, a, b):
+    """ Calls the offchain AddSub2 method"""
+    test_contract = t.eth_contract('TestHybrid')
+
     print(f"\n  - - - - TestAddSub2({a},{b}) - - - -")
-    print("TestCount(begin)=", TC.functions.counters(u_account).call())
+    print("TestCount(begin)=",
+        test_contract.functions.counters(t.client_addr).call()
+    )
 
-    count_call = selector("count(uint32,uint32)") + \
+    count_call = t.selector("count(uint32,uint32)") + \
         ethabi.encode(['uint32', 'uint32'], [a, b])
 
-    op = aa.build_op(u_account, TC.address, 0, count_call, nKey, PM_ADDR)
+    op = t.build_op('TestHybrid', 0, count_call)
 
-    (success, op) = estimateOp(aa, op)
+    (success, op) = t.estimate_op(op)
     if not success:
         return
 
-    rcpt = aa.sign_submit_op(op, u_key)
-    ParseReceipt(rcpt)
+    rcpt = t.submit_op(op)
+    t.parse_receipt(rcpt)
 
-    print("TestCount(end)=", TC.functions.counters(u_account).call())
+    print("TestCount(end)=",
+        test_contract.functions.counters(t.client_addr).call()
+    )

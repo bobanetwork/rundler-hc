@@ -1,3 +1,4 @@
+"""Offchain handler for the Hybrid Compute auction-system example"""
 from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
@@ -5,20 +6,22 @@ from hybrid_compute_sdk.server import HybridComputeSDK
 blacklist = ["0x123"]
 
 def offchain_auction(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
-    print("  -> offchain_auction handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
-          src_addr, src_nonce, oo_nonce, payload, args))
+    """Offchain handler for the Hybrid Compute auction-system example"""
+    print(f"  -> offchain_auction handler called with subkey={sk} "
+        f"src_addr={src_addr} src_nonce={src_nonce} oo_nonce={oo_nonce} "
+        f"payload={payload} extra_args={args}"
+    )
     err_code = 0
     resp = Web3.to_bytes(text="unknown error")
-    assert(ver == "0.3")
+    assert ver == "0.3"
     sdk = HybridComputeSDK()
 
     try:
         req = sdk.parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
-        dec = ethabi.decode(['address'], req['reqBytes'])
+        (wallet_address_to_verify,) = ethabi.decode(['address'], req['reqBytes'])
 
-        walletAddressToVerify = dec[0]
-        print("offchain wallet-address to verify:", walletAddressToVerify)
-        if walletAddressToVerify in blacklist:
+        print("offchain wallet-address to verify:", wallet_address_to_verify)
+        if wallet_address_to_verify in blacklist:
             resp = ethabi.encode(["bool"], [False])
         else:
             resp = ethabi.encode(["bool"], [True])

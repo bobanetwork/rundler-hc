@@ -1,3 +1,4 @@
+"""Offchain handler for the Hybrid Compute check_kyc example"""
 from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
@@ -5,20 +6,22 @@ from hybrid_compute_sdk.server import HybridComputeSDK
 validWallets = ["0x123"]
 
 def offchain_checkkyc(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
-    print("  -> offchain_checkkyc handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
-          src_addr, src_nonce, oo_nonce, payload, args))
+    """Offchain handler for the Hybrid Compute check_kyc example"""
+    print(f"  -> offchain_checkkyc handler called with subkey={sk} "
+        f"src_addr={src_addr} src_nonce={src_nonce} oo_nonce={oo_nonce} "
+        f"payload={payload} extra_args={args}"
+    )
     err_code = 0
     resp = Web3.to_bytes(text="unknown error")
-    assert(ver == "0.3")
+    assert ver == "0.3"
     sdk = HybridComputeSDK()
 
     try:
         req = sdk.parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
-        dec = ethabi.decode(['string'], req['reqBytes'])
+        (wallet_address_to_verify,) = ethabi.decode(['string'], req['reqBytes'])
 
-        walletAddressToVerify = dec[0]
-        print("offchain wallet-address to verify:", walletAddressToVerify)
-        if walletAddressToVerify in validWallets:
+        print("offchain wallet-address to verify:", wallet_address_to_verify)
+        if wallet_address_to_verify in validWallets:
             resp = ethabi.encode(["bool"], [True])
         else:
             resp = ethabi.encode(["bool"], [False])

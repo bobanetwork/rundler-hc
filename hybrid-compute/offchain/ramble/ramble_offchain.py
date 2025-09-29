@@ -1,27 +1,27 @@
+"""Offchain handler for the Hybrid Compute word generator + guessing game"""
 import re
 import random
 from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
 
+wordlist = []
 def load_words():
     """Loads a list of dictionary words, assumes a standard file path"""
-    wordlist = []
-    with open("/usr/share/dict/words", "r") as f:
+    with open("/usr/share/dict/words", "r", encoding="utf-8") as f:
         p = re.compile('^[a-z]{4}$')
         for line in f.readlines():
             line = line.strip()
-            if p.match(line) and line != "frog":  # Reserved for "cheat" mode
+            if p.match(line) and line != "frog": # Reserved for "cheat" mode
                 wordlist.append(line)
     return wordlist
 
-wordlist = load_words()
-
 def offchain_ramble(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     """Generates a random list of words, cheating if requested to do so"""
-    global wordlist
-    print("  -> offchain_ramble handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
-          src_addr, src_nonce, oo_nonce, payload, args))
+    print(f"  -> offchain_ramble handler called with subkey={sk} "
+        f"src_addr={src_addr} src_nonce={src_nonce} oo_nonce={oo_nonce} "
+        f"payload={payload} extra_args={args}"
+    )
     err_code = 1
     resp = Web3.to_bytes(text="unknown error")
     assert ver == "0.3"
@@ -29,13 +29,11 @@ def offchain_ramble(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
 
     try:
         req = sdk.parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
-        dec = ethabi.decode(['uint256', 'bool'], req['reqBytes'])
-        n = dec[0]
-        cheat = dec[1]
+        (n, cheat) = ethabi.decode(['uint256', 'bool'], req['reqBytes'])
         words = []
 
-        if n >= 1 and n < 1000:
-            for i in range(n):
+        if 1 <= n < 1000:
+            for _i in range(n):
                 r = random.randint(0, len(wordlist)-1)
                 words.append(wordlist[r])
 
@@ -53,3 +51,5 @@ def offchain_ramble(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
         print("DECODE FAILED", e)
 
     return sdk.gen_response(req, err_code, resp)
+
+load_words()

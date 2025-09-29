@@ -1,33 +1,38 @@
+"""Test the Hybrid Compute auction-system example"""
 from eth_abi import abi as ethabi
-from userop_utils import *
+from web3 import Web3
 
-def TestAuction(aa):
+def test_auction(t):
+    """Test the Hybrid Compute auction-system example"""
     print("\n  - - - - TestAuction() - - - -")
 
-    start_auction_call = selector("createAuction(uint256,address)") + ethabi.encode(['uint256', 'address'], [300, u_account])
+    start_auction_call = t.selector("createAuction(uint256,address)") + \
+        ethabi.encode(['uint256', 'address'], [300, t.client_addr])
 
-    op = aa.build_op(u_account, TEST_AUCTION.address, 0, start_auction_call, nKey)
+    op = t.build_op('TestAuctionSystem', 0, start_auction_call)
 
-    (success, op) = estimateOp(aa, op)
+    (success, op) = t.estimate_op(op)
     assert success
 
-    rcpt = aa.sign_submit_op(op, u_key)
+    rcpt = t.submit_op(op)
     topic = Web3.keccak(text="AuctionCreated(uint256,address)")
-    event = ParseReceipt(rcpt, topic)
-    (auctionId, auctionAddress) = ethabi.decode(['uint256', 'address'], Web3.to_bytes(hexstr=event[1]))
-    bid(aa, auctionId)
+    event = t.parse_receipt(rcpt, topic)
+    (auction_id, _auction_address) = ethabi.decode(['uint256', 'address'],
+        Web3.to_bytes(hexstr=event[1]))
+    bid(t, auction_id)
     print("TestAuction end")
 
-def bid(aa, auctionId):
+def bid(t, auction_id):
+    """Place a bid"""
     print("\n  - - - - bid() - - - -")
-    bid_call = selector("bid(uint256)") + ethabi.encode(['uint256'], [auctionId])
+    bid_call = t.selector("bid(uint256)") + ethabi.encode(['uint256'], [auction_id])
 
-    op = aa.build_op(u_account, TEST_AUCTION.address, 6, bid_call, nKey)
+    op = t.build_op('TestAuctionSystem', 6, bid_call)
 
-    (success, op) = estimateOp(aa, op)
+    (success, op) = t.estimate_op(op)
     assert success
 
-    rcpt = aa.sign_submit_op(op, u_key)
-    ParseReceipt(rcpt)
+    rcpt = t.submit_op(op)
+    t.parse_receipt(rcpt)
 
     print("TestAuction end")

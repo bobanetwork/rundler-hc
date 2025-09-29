@@ -1,37 +1,25 @@
-from web3 import Web3
-import time
-from random import *
-import requests
-
-from jsonrpcclient import request
-import requests
-
+"""Test the Hybrid Compute check_kyc example"""
 from eth_abi import abi as ethabi
-import eth_account
 
-from userop_utils import *
-
-
-def TestKyc(aa, isValid: bool):
-    print("\n  - - - - TestKyc({}) - - - -".format(isValid))
-    print("SA ADDRESS {}".format(u_account))
+def test_kyc(t, is_valid: bool):
+    """Test the Hybrid Compute check_kyc example"""
+    print(f"\n  - - - - TestKyc({is_valid}) - - - -")
     print("TestKyc begin")
 
-    kycCall = None
+    kyc_call = None
 
-    if isValid:
-        kycCall = selector("openForKyced(string)") + ethabi.encode(['string'], ["0x123"])
+    if is_valid:
+        kyc_call = t.selector("openForKyced(string)") + ethabi.encode(['string'], ["0x123"])
     else:
-        kycCall = selector("openForKyced(string)") + ethabi.encode(['string'], [""])
+        kyc_call = t.selector("openForKyced(string)") + ethabi.encode(['string'], [""])
 
-    op = aa.build_op(u_account, KYC.address, 0, kycCall, nKey)
+    op = t.build_op('TestKyc', 0, kyc_call)
 
-    (success, op) = estimateOp(aa, op)
-    assert success == isValid
+    (success, op) = t.estimate_op(op)
+    assert success == is_valid
 
     if success:
-        rcpt = aa.sign_submit_op(op, u_key)
-        ParseReceipt(rcpt)
+        rcpt = t.submit_op(op)
+        t.parse_receipt(rcpt)
 
     print(f"TestKyc end (success {success})")
-

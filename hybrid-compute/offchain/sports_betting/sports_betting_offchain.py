@@ -1,10 +1,14 @@
+"""Offchain handler for the Hybrid Compute sports betting example"""
 from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
 
 def offchain_sports_betting(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
-    print("  -> offchain_sport_betting handler called with subkey={} src_addr={} src_nonce={} oo_nonce={} payload={} extra_args={}".format(sk,
-          src_addr, src_nonce, oo_nonce, payload, args))
+    """Offchain handler for the Hybrid Compute sports betting example"""
+    print(f"  -> offchain_sport_betting handler called with subkey={sk} "
+        f"src_addr={src_addr} src_nonce={src_nonce} oo_nonce={oo_nonce} "
+        f"payload={payload} extra_args={args}"
+    )
     err_code = 0
     resp = Web3.to_bytes(text="unknown error")
     assert ver == "0.3"
@@ -12,9 +16,8 @@ def offchain_sports_betting(ver, sk, src_addr, src_nonce, oo_nonce, payload, *ar
 
     try:
         req = sdk.parse_req(sk, src_addr, src_nonce, oo_nonce, payload)
-        dec = ethabi.decode(['uint256'], req['reqBytes'])
+        (game_id,) = ethabi.decode(['uint256'], req['reqBytes'])
 
-        game_id = dec[0]
         print("offchain game_id:", game_id)
         score = get_game_score(game_id)
         end_result = 0
@@ -35,12 +38,13 @@ def offchain_sports_betting(ver, sk, src_addr, src_nonce, oo_nonce, payload, *ar
     return sdk.gen_response(req, err_code, resp)
 
 def get_game_score(game_id):
-    # This is a dummy function to simulate the offchain data retrieval
-    # In a real-world scenario, this function would query an API
-    # to get the game score
+    """
+    This is a dummy function to simulate the offchain data retrieval
+    In a real-world scenario, this function would query an API
+    to get the game score
+    """
     if game_id == "123":
         return [2, 1]
-    elif game_id == "456":
+    if game_id == "456":
         return [0, 3]
-    else:
-        return [0, 0]
+    return [0, 0]

@@ -1,63 +1,69 @@
-from eth_abi import abi as ethabi
-from userop_utils import *
+"""Test the Hybrid Compute sports betting example"""
 import time
-def TestSportsBetting(aa):
+from eth_abi import abi as ethabi
+
+def test_sports_betting(t):
+    """Test the Hybrid Compute sports betting example"""
     print("\n  - - - - SportBetting() - - - -")
-    print("SA ADDRESS {}".format(u_account))
 
     game_id = 456
-    create_bet(aa, game_id)
-    place_bet(aa, game_id)
-    settle_bet(aa, game_id)
-    bets = TEST_SPORTS_BETTING.functions.bets(game_id, 0).call()
-    game = TEST_SPORTS_BETTING.functions.games(game_id).call()
-    score = TEST_SPORTS_BETTING.functions.gameScores(game_id).call()
+    create_bet(t, game_id)
+    place_bet(t, game_id)
+    settle_bet(t, game_id)
+    test_contract = t.eth_contract('TestSportsBetting')
+
+    bets = test_contract.functions.bets(game_id, 0).call()
+    game = test_contract.functions.games(game_id).call()
+    score = test_contract.functions.gameScores(game_id).call()
     print("Bets: ", bets)
     print("Game: ", game)
     print("Score: ", score)
     print("Test Sports Betting end")
 
-def create_bet(aa, game_id):
+def create_bet(t, game_id):
+    """Create a game to accept bets"""
     print("--------------------Create Bet--------------------")
-    create_call = selector("createGame(uint256)") + ethabi.encode(['uint256'], [game_id])
+    create_call = t.selector("createGame(uint256)") + ethabi.encode(['uint256'], [game_id])
 
-    op = aa.build_op(u_account, TEST_SPORTS_BETTING.address, 0, create_call, nKey)
+    op = t.build_op('TestSportsBetting', 0, create_call)
 
-    (success, op) = estimateOp(aa, op)
+    (success, op) = t.estimate_op(op)
     assert success
 
-    rcpt = aa.sign_submit_op(op, u_key)
-    ParseReceipt(rcpt)
+    rcpt = t.submit_op(op)
+    t.parse_receipt(rcpt)
 
     print("Create Bet end")
 
-def place_bet(aa, game_id):
+def place_bet(t, game_id):
+    """Place a bet"""
     print("--------------------Place Bet--------------------")
     outcome = 1
-    place_bet = selector("placeBet(uint256,uint256)") + ethabi.encode(['uint256', 'uint256'],
+    place_calldata = t.selector("placeBet(uint256,uint256)") + ethabi.encode(['uint256', 'uint256'],
                                                                             [game_id, outcome])
     amount_to_bet = 2
 
-    op = aa.build_op(u_account, TEST_SPORTS_BETTING.address, amount_to_bet, place_bet, nKey)
+    op = t.build_op('TestSportsBetting', amount_to_bet, place_calldata)
 
-    (success, op) = estimateOp(aa, op)
+    (success, op) = t.estimate_op(op)
     assert success
 
-    rcpt = aa.sign_submit_op(op, u_key)
-    ParseReceipt(rcpt)
+    rcpt = t.submit_op(op)
+    t.parse_receipt(rcpt)
 
     print("Place Bet end")
 
-def settle_bet(aa, game_id):
+def settle_bet(t, game_id):
+    """Settle bets"""
     print("--------------------Settle Bet--------------------")
-    settle_bet = selector("settleBet(uint256)") + ethabi.encode(['uint256'], [game_id])
+    settle_calldata = t.selector("settleBet(uint256)") + ethabi.encode(['uint256'], [game_id])
 
-    op = aa.build_op(u_account, TEST_SPORTS_BETTING.address, 0, settle_bet, nKey)
+    op = t.build_op('TestSportsBetting', 0, settle_calldata)
     time.sleep(5)
-    (success, op) = estimateOp(aa, op)
+    (success, op) = t.estimate_op(op)
     assert success
 
-    rcpt = aa.sign_submit_op(op, u_key)
-    ParseReceipt(rcpt)
+    rcpt = t.submit_op(op)
+    t.parse_receipt(rcpt)
 
     print("Settle Bet end")

@@ -1,23 +1,28 @@
-from eth_abi import abi as ethabi
-from userop_utils import *
+"""Test the Hybrid Compute word generator + guessing game"""
 
-def TestWordGuess(aa, n, cheat):
+from eth_abi import abi as ethabi
+from web3 import Web3
+
+def test_word_guess(t, n, cheat):
+    """Test the Hybrid Compute word generator + guessing game"""
     print(f"\n  - - - - TestWordGuess({n},{cheat}) - - - -")
 
-    game_call = selector("wordGuess(string,bool)") + \
+    game_call = t.selector("wordGuess(string,bool)") + \
         ethabi.encode(['string', 'bool'], ["frog", cheat])
 
-    per_entry = TC.functions.EntryCost().call()
+    test_contract = t.eth_contract('TestHybrid')
+    per_entry = test_contract.functions.EntryCost().call()
+
     print("Pool balance before playing =", Web3.from_wei(
-        TC.functions.Pool().call(), 'gwei'))
+        test_contract.functions.Pool().call(), 'gwei'))
 
-    op = aa.build_op(u_account, TC.address, n * per_entry, game_call, nKey)
+    op = t.build_op('TestHybrid', n * per_entry, game_call)
 
-    (success, op) = estimateOp(aa, op)
+    (success, op) = t.estimate_op(op)
     assert success
 
-    rcpt = aa.sign_submit_op(op, u_key)
-    ParseReceipt(rcpt)
+    rcpt = t.submit_op(op)
+    t.parse_receipt(rcpt)
 
     print("Pool balance after playing =", Web3.from_wei(
-        TC.functions.Pool().call(), 'gwei'))
+        test_contract.functions.Pool().call(), 'gwei'))
