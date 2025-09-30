@@ -876,20 +876,23 @@ where
                     .bundle_providers
                     .simulator()
                     .simulate_validation(u_op2.clone().into(), true, block_hash, None)
-                    .await
-                    .expect("simulate u_op2");
+                    .await;
 
-                context
-                    .groups_by_aggregator
-                    .entry(op.aggregator().unwrap_or(Address::ZERO))
-                    .or_default()
-                    .ops_with_simulations
-                    .push(OpWithSimulation {
-                        op: u_op2.into(),
-                        simulation: sim_result,
-                        sponsored_da_gas: po.sponsored_da_gas, // FIXME
-                    });
-                cleanup_keys.push(hc_ent.clone().unwrap().map_key);
+                if let Ok(sim_result) = sim_result {
+                    context
+                        .groups_by_aggregator
+                        .entry(op.aggregator().unwrap_or(Address::ZERO))
+                        .or_default()
+                        .ops_with_simulations
+                        .push(OpWithSimulation {
+                            op: u_op2.into(),
+                            simulation: sim_result,
+                            sponsored_da_gas: po.sponsored_da_gas, // FIXME
+                        });
+                    cleanup_keys.push(hc_ent.clone().unwrap().map_key);
+                } else {
+                    println!("HC ERROR u_op2 simulation failed: {:?}", sim_result);
+                }
             }
 
             // FIXME
