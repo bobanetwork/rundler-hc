@@ -5,6 +5,7 @@ from web3 import Web3
 def test_auction(t):
     """Test the Hybrid Compute auction-system example"""
     print("\n  - - - - TestAuction() - - - -")
+    t.load_contract('TestAuctionSystem')
 
     start_auction_call = t.selector("createAuction(uint256,address)") + \
         ethabi.encode(['uint256', 'address'], [300, t.client_addr])

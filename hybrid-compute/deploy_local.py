@@ -12,7 +12,7 @@ from web3 import Web3
 from eth_abi import abi as ethabi
 
 from hybrid_compute_sdk.aa_client import AAClient, selector
-from offchain.userop_utils import EthUtils
+from offchain.test_utils import EthUtils
 
 OUT_PREFIX = "../crates/contracts/contracts/out/hc0_7/"
 ETH_MIN = 50
@@ -383,7 +383,7 @@ class Deployer:
                 'to': Web3.to_checksum_address(self.portal_addr),
                 'value': Web3.to_wei(2 * ETH_MIN, 'ether')
             }
-            print("Funding L2 self.deploy_addr (ETH)")
+            print("Funding L2 Deployer (ETH)")
             self.l1_util.sign_and_submit(tx, self.deploy_key)
 
             print("Sleep...")
@@ -412,7 +412,7 @@ class Deployer:
                 'to': self.bridge_addr,
             }
             tx['gas'] = int(self.l1.eth.estimate_gas(tx) * 1.5)
-            print("Funding L2 self.deploy_addr (BOBA)")
+            print("Funding L2 Deployer (BOBA)")
             self.l1_util.sign_and_submit(tx, self.deploy_key)
 
             print("Sleep...")

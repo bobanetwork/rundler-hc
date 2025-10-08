@@ -10,7 +10,7 @@ def test_sports_betting(t):
     create_bet(t, game_id)
     place_bet(t, game_id)
     settle_bet(t, game_id)
-    test_contract = t.eth_contract('TestSportsBetting')
+    test_contract = t.load_contract('TestSportsBetting')
 
     bets = test_contract.functions.bets(game_id, 0).call()
     game = test_contract.functions.games(game_id).call()

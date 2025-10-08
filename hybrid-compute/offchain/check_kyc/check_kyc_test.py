@@ -4,7 +4,7 @@ from eth_abi import abi as ethabi
 def test_kyc(t, is_valid: bool):
     """Test the Hybrid Compute check_kyc example"""
     print(f"\n  - - - - TestKyc({is_valid}) - - - -")
-    print("TestKyc begin")
+    t.load_contract('TestKyc')
 
     kyc_call = None
 

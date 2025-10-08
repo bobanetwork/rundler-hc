@@ -215,7 +215,6 @@ def offchain_random(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     resp = Web3.to_bytes(text="unknown error")
     assert ver == "0.3"
     sdk = HybridComputeSDK()
-
     try:
         w3 = Web3(Web3.HTTPProvider(oc_node_http, request_kwargs={'timeout': 900}))
         assert w3.is_connected
@@ -224,15 +223,12 @@ def offchain_random(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
         (bn, req_seed) = ethabi.decode(['uint256', 'bytes32'], req['reqBytes'])
 
         bh = Web3.to_hex(w3.eth.get_block(bn).hash)
-        #print("Block", bn, "Hash", bh, "req_seed", req_seed)
 
-        actual_seed = Web3.to_hex(Web3.keccak(Web3.to_bytes(hexstr = req_seed + str(bh)[2:])))
-        #print("actual_seed", actual_seed)
+        actual_seed = Web3.to_hex(Web3.keccak(req_seed + Web3.to_bytes(hexstr=bh)))
         proof = make_proof(rand_key, pub_key, Web3.to_int(hexstr=actual_seed))
         verify_proof(pub_key, proof)
 
-        proof['seed'] = Web3.to_int(hexstr=req_seed) # contract will construct its own actualSeed
-        #print("proof output hash", output_hash(proof))
+        proof['seed'] = Web3.to_int(req_seed) # contract will construct its own actualSeed
 
         resp = ethabi.encode([
           'uint256[2]',

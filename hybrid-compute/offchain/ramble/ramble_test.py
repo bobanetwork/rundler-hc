@@ -6,11 +6,11 @@ from web3 import Web3
 def test_word_guess(t, n, cheat):
     """Test the Hybrid Compute word generator + guessing game"""
     print(f"\n  - - - - TestWordGuess({n},{cheat}) - - - -")
+    test_contract = t.load_contract('TestHybrid')
 
     game_call = t.selector("wordGuess(string,bool)") + \
         ethabi.encode(['string', 'bool'], ["frog", cheat])
 
-    test_contract = t.eth_contract('TestHybrid')
     per_entry = test_contract.functions.EntryCost().call()
 
     print("Pool balance before playing =", Web3.from_wei(

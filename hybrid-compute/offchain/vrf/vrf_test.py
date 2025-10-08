@@ -7,22 +7,22 @@ from hybrid_compute_sdk.aa_client import selector
 def test_random_request(t, joint_random):
     """ Tests the VRF contract """
     print("\n  - - - - TestRandomRequest() - - - -")
+    t.load_contract('TestRandom')
 
     client_random = Web3.to_int(hexstr=\
         "0x0000111100000000000000000000000000000000000000000000000000001111")
     client_hash   = Web3.keccak(ethabi.encode(['uint256'],[client_random]))
 
     if joint_random:
-        count_call = selector("requestJointRandomWord(bytes32)") + \
+        calldata = selector("requestJointRandomWord(bytes32)") + \
                      ethabi.encode(['bytes32'],[client_hash])
     else:
-        count_call = selector("requestRandomWord()")
+        calldata = selector("requestRandomWord()")
 
-    op = t.build_op('TestRandom', 0, count_call)
+    op = t.build_op('TestRandom', 0, calldata)
 
     (success, op) = t.estimate_op(op)
-    if not success:
-        return
+    assert success
 
     rcpt = t.submit_op(op)
     logs = t.parse_receipt(rcpt, Web3.keccak(text="RandomRequest(bytes32,address)"))
@@ -33,17 +33,16 @@ def test_random_request(t, joint_random):
     print()
 
     if joint_random:
-        count_call = selector("revealJointRandomWord(bytes32,uint256)") + \
+        calldata = selector("revealJointRandomWord(bytes32,uint256)") + \
                      ethabi.encode(['bytes32', 'uint256'], [rid, client_random])
     else:
-        count_call = selector("revealRandomWord(bytes32)") + \
+        calldata = selector("revealRandomWord(bytes32)") + \
                      ethabi.encode(['bytes32'], [rid])
 
-    op = t.build_op('TestRandom', 0, count_call)
+    op = t.build_op('TestRandom', 0, calldata)
 
     (success, op) = t.estimate_op(op)
-    if not success:
-        return
+    assert success
 
     rcpt = t.submit_op(op)
     logs = t.parse_receipt(rcpt, Web3.keccak(text="RandomResult(bytes32,uint256)"))
