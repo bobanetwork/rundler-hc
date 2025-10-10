@@ -372,15 +372,20 @@ where
         state_override: Option<StateOverride>,
         at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
-        println!(
-            "HC router estimate_gas op {:?} state {:?}",
-            uo, state_override
-        );
+        //println!(
+        //    "HC router estimate_gas op {:?} state {:?}",
+        //    uo, state_override
+        //);
         let ret = self
             .gas_estimator
-            .estimate_op_gas(uo.into(), state_override.unwrap_or_default(), at_price)
+            .estimate_op_gas(
+                uo.clone().into(),
+                state_override.unwrap_or_default(),
+                at_price,
+            )
             .await;
-        println!("HC router estimate_gas ret {:?}", ret);
+        //Commented out to reduce log volume; re-enable if needed
+        //println!("HC router estimate_gas returned {:?} for op {:?}", ret, uo);
         ret
     }
 

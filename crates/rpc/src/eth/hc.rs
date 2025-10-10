@@ -71,7 +71,7 @@ impl HcApi {
             .estimate_gas(&entry_point, op.clone(), Some(s2), None)
             .await;
 
-        println!("HC result_v {:?}", result_v);
+        //println!("HC result_v {:?}", result_v);
         if let Err(EthRpcError::ExecutionReverted(ref msg)) = result_v {
             if *msg == "_HC_VRFY" {
                 return true;
@@ -94,14 +94,12 @@ impl HcApi {
         let s2 = state_override.unwrap_or_default();
 
         let hh = op.hc_hash(&self.cfg.chain_spec);
-        println!("HC api.rs hh {:?}", hh);
         let op_t: UserOperationVariant = op.into_variant(&self.cfg.chain_spec);
 
         let ep_addr = hybrid_compute::hc_ha_addr(revert_data);
 
         let n_key: U256 = op_t.nonce() >> 64;
         let at_price = Some(op_t.max_priority_fee_per_gas());
-        //let hc_nonce = context.gas_estimator.entry_point.get_nonce(op_t.sender(), n_key.into()).await.unwrap();
         let hc_nonce = self
             .router
             .get_nonce(&entry_point, op_t.sender(), n_key.to::<U192>())
@@ -113,13 +111,6 @@ impl HcApi {
             .get_nonce(&entry_point, self.cfg.sys_account, n_key.to::<U192>())
             .await
             .unwrap();
-        println!(
-            "HC hc_nonce {:?} err_nonce {:?} op_nonce {:?} n_key {:?}",
-            hc_nonce,
-            err_nonce,
-            op_t.nonce(),
-            n_key
-        );
 
         let p2 = rundler_provider::new_alloy_provider(&self.cfg.node_http, 120)?;
 
@@ -127,9 +118,8 @@ impl HcApi {
         let url_response = hx.RegisteredCallers(ep_addr).call().await;
 
         let url = url_response.expect("url_decode").url;
-        println!("HC registered_caller url {:?}", url);
 
-        let cc = HttpClientBuilder::default().build(url); // could specify a request_timeout() here.
+        let cc = HttpClientBuilder::default().build(&url); // could specify a request_timeout() here.
         if cc.is_err() {
             return Err(EthRpcError::Internal(anyhow::anyhow!(
                 "Invalid URL registered for HC"
@@ -141,7 +131,16 @@ impl HcApi {
         let sk_hex = hex::encode(sub_key);
         let map_key = hybrid_compute::hc_map_key(revert_data);
 
-        println!("HC api.rs sk_hex {:?} mk {:?}", sk_hex, map_key);
+        println!(
+            "HC api.rs processing hc_hash {:?}, url {:?} ({:?}, {:?}, {:?}, {:?}, {:?})",
+            hh,
+            url,
+            hc_nonce,
+            err_nonce,
+            op_t.nonce(),
+            sk_hex,
+            map_key,
+        );
 
         let payload = hex::encode(hybrid_compute::hc_req_payload(revert_data));
         let n_bytes: B256 = hc_nonce.into();
@@ -196,7 +195,7 @@ impl HcApi {
 
         let resp: Result<HashMap<String, JsonValue>, _> = cc.unwrap().request(&m, params).await;
 
-        println!("HC resp {:?}", resp);
+        println!("HC offchain response for {:?} = {:?}", hh, resp);
         let err_hc: hybrid_compute::HcErr;
 
         match resp {
@@ -305,11 +304,10 @@ impl HcApi {
             .router
             .estimate_gas(&entry_point, op.clone(), Some(s2), None)
             .await;
-        println!("HC result2 {:?}", result2);
+        //println!("HC api.rs estimate_gas 2 for hc_hash {:?} = {:?}", hh, result2);
 
         let r3: RpcGasEstimateV0_7;
         if result2.is_ok() {
-            println!("HC api.rs Ok gas result2 = {:?}", result2);
             let r3a = result2.unwrap();
             match r3a {
                 RpcGasEstimate::V0_6(_est) => {
@@ -380,7 +378,7 @@ impl HcApi {
             let cleanup_op =
                 hybrid_compute::rr_op(&self.cfg, entry_point, c_nonce, cleanup_keys.clone()).await;
 
-            println!("HC cleanup_op {:?} {:?}", cleanup_op, cleanup_keys);
+            //println!("HC cleanup_op {:?} {:?}", cleanup_op, cleanup_keys);
             let r4a = self
                 .router
                 .estimate_gas(
@@ -416,8 +414,8 @@ impl HcApi {
 
             let needed_pvg = r3.pre_verification_gas + offchain_gas;
             println!(
-                "HC needed_pvg {:?} = {:?} + {:?}",
-                needed_pvg, r3.pre_verification_gas, offchain_gas
+                "HC api.rs needed_pvg for hc_hash {:?} is {:?} ({:?} + {:?})",
+                hh, needed_pvg, r3.pre_verification_gas, offchain_gas
             );
 
             let offchain_pvg = offchain_gas
@@ -449,6 +447,10 @@ impl HcApi {
             }
             .into())
         } else {
+            println!(
+                "HC WARNING api.rs estimate_gas result2 for hc_hash {:?} = {:?}",
+                hh, result2
+            );
             result2
         }
 
@@ -461,14 +463,23 @@ impl HcApi {
         op: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
     ) -> EthResult<RpcGasEstimate> {
+        let hc_hash = op.hc_hash(&self.cfg.chain_spec);
+        println!(
+            "HC api.rs calling estimate_gas for hc_hash {:?} op {:?}",
+            hc_hash, op
+        );
+
         let mut result = self
             .router
             .estimate_gas(&entry_point, op.clone(), state_override.clone(), None)
             .await;
 
-        println!("HC api.rs estimate_gas result1 {:?}", result);
         match result {
             Ok(ref estimate) => {
+                println!(
+                    "HC api.rs estimate_gas Ok for hc_hash {:?}: {:?}",
+                    hc_hash, result
+                );
                 if let RpcGasEstimate::V0_6(estimate6) = estimate {
                     return Ok(RpcGasEstimateV0_6 {
                         pre_verification_gas: estimate6
@@ -497,9 +508,6 @@ impl HcApi {
             }
             Err(EthRpcError::ExecutionRevertedWithBytes(ref r)) => {
                 if hybrid_compute::check_trigger(&r.revert_data) {
-                    let bn = 0; //self.provider.get_block_number().await.unwrap();
-                    println!("HC api.rs HC trigger at bn {}", bn);
-
                     let map_key = hybrid_compute::hc_map_key(&r.revert_data);
                     let key: B256 = hybrid_compute::hc_storage_key(map_key);
 
@@ -510,13 +518,20 @@ impl HcApi {
                         result = self
                             .hc_simulate_response(entry_point, op, state_override, &r.revert_data)
                             .await;
+                        println!(
+                            "HC api.rs Final estimate_gas for hc_hash {:?} = {:?}",
+                            hc_hash, result
+                        );
                     } else {
-                        println!("HC did not get expected _HC_VRFY");
+                        println!("HC WARNING did not get expected _HC_VRFY for {:?}", hc_hash);
                         let msg = "HC04: Failed to verify trigger event".to_owned();
                         return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
                     }
                 } else {
-                    println!("HC trigger prefix not detected in revert data");
+                    println!(
+                        "HC trigger prefix not detected in revert data for {:?}",
+                        hc_hash
+                    );
                 }
             }
             Err(_) => {}

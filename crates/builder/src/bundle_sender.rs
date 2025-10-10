@@ -280,6 +280,10 @@ where
             Ok(SendBundleAttemptResult::Success(_)) => {
                 // sent the bundle
                 info!("Bundle sent successfully");
+                println!(
+                    "HC Bundle sent successfully at bn {:?} with fee_increase_count {:?}",
+                    block_number, inner.fee_increase_count
+                );
                 state.update(InnerState::Pending(inner.to_pending(
                     block_number + self.settings.max_blocks_to_wait_for_mine,
                 )));
@@ -387,6 +391,7 @@ where
         tracker_update: Option<TrackerUpdate>,
     ) -> anyhow::Result<()> {
         if let Some(update) = tracker_update {
+            println!("HC handle_pending_state tracker update {:?}", update);
             match update {
                 TrackerUpdate::Mined {
                     block_number,
@@ -441,6 +446,12 @@ where
             // start replacement, don't wait for trigger. Continue
             // to attempt until there are no longer any UOs priced high enough
             // to bundle.
+            println!(
+                "HC starting bundle replacement at {:?}/{:?}, fee_increase_count {:?}",
+                state.block_number(),
+                inner.until,
+                inner.fee_increase_count
+            );
             info!(
                 "Not mined after {} blocks, increasing fees, attempt: {}",
                 self.settings.max_blocks_to_wait_for_mine,
@@ -607,6 +618,7 @@ where
                 self.builder_settings.filter_id.clone(),
             )
             .await?;
+
         if ops.is_empty() {
             // there are no UOs for this sender, so we can release all from the assigner
             self.assigner.release_all(self.sender_eoa);
@@ -617,10 +629,12 @@ where
 
         match &result {
             Ok(SendBundleAttemptResult::Success(ops)) => {
+                //println!("HC send_bundle inner success, {:?}", ops.len());
                 self.assigner
                     .confirm_senders_drop_unused(self.sender_eoa, ops.iter().map(|op| &op.0));
             }
             Ok(SendBundleAttemptResult::NonceTooLow) => {
+                println!("HC send_bundle_inner: NonceTooLow");
                 self.assigner.release_all(self.sender_eoa);
             }
             Ok(SendBundleAttemptResult::NoOperationsAfterSimulation) => {
@@ -638,7 +652,6 @@ where
                 }
             }
         }
-
         result
     }
 
@@ -688,7 +701,6 @@ where
             ));
             return Ok(SendBundleAttemptResult::NoOperationsAfterSimulation);
         };
-        println!("HC before BundleTx bundle_tx {:?}", bundle_tx);
 
         let BundleTx {
             tx,
@@ -701,6 +713,11 @@ where
             .send_transaction(tx.clone(), &expected_storage, state.block_number())
             .await;
         self.metrics.bundle_txns_sent.increment(1);
+
+        println!(
+            "HC bundle_sender got result {:?} for tx {:?}",
+            send_result, tx
+        );
 
         match send_result {
             Ok(tx_hash) => {
@@ -807,7 +824,7 @@ where
             .iter_ops()
             .map(|op| (op.sender(), op.hash()))
             .collect();
-        println!("HC bundle_sender bundle {:?} ops {:?}", bundle, ops);
+        //println!("HC bundle_sender bundle {:?} ops {:?}", bundle, ops);
 
         let mut tx = self.ep_providers.entry_point().get_send_bundle_transaction(
             bundle.ops_per_aggregator,
@@ -1165,6 +1182,10 @@ impl BuildingState {
                 rounds: 1,
             }
         };
+        println!(
+            "HC marking underpriced at bn {:?}, fic was {:?}",
+            block_number, self.fee_increase_count
+        );
 
         BuildingState {
             wait_for_trigger: true,
@@ -1183,6 +1204,8 @@ impl BuildingState {
             .expect("underpriced_info must be Some when calling underpriced_round");
         underpriced_info.rounds += 1;
 
+        println!("HC underpriced_round {:?}", underpriced_info.rounds);
+
         BuildingState {
             wait_for_trigger: true,
             fee_increase_count: 0,
@@ -1199,6 +1222,10 @@ struct PendingState {
 
 impl PendingState {
     fn to_building(self) -> BuildingState {
+        println!(
+            "HC going to BuildingState, fic was {:?}",
+            self.fee_increase_count
+        );
         BuildingState {
             wait_for_trigger: false,
             fee_increase_count: self.fee_increase_count + 1,
@@ -1214,11 +1241,19 @@ struct CancellingState {
 
 impl CancellingState {
     fn to_self(mut self) -> Self {
+        println!(
+            "HC going to cancelling state, fic was {:?}",
+            self.fee_increase_count
+        );
         self.fee_increase_count += 1;
         self
     }
 
     fn to_cancel_pending(self, until: u64) -> CancelPendingState {
+        println!(
+            "HC going to cancel_pending state, fic was {:?}",
+            self.fee_increase_count
+        );
         CancelPendingState {
             until,
             fee_increase_count: self.fee_increase_count,
@@ -1234,6 +1269,10 @@ struct CancelPendingState {
 
 impl CancelPendingState {
     fn to_cancelling(self) -> CancellingState {
+        println!(
+            "HC cancel_pending to cancel_state, fic was  {:?}",
+            self.fee_increase_count
+        );
         CancellingState {
             fee_increase_count: self.fee_increase_count + 1,
         }

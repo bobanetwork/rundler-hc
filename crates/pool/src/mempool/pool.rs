@@ -176,7 +176,7 @@ where
         base_fee: u128,
         required_pvg: u128,
     ) -> MempoolResult<B256> {
-        println!("HC pool add_operation {:?}", op);
+        //println!("HC pool add_operation {:?}", op);
         // only eligibility criteria is required PVG which is enabled when da_gas_tracking is enabled
         let is_eligible = if self.config.da_gas_tracking_enabled && self.da_gas_oracle.is_some() {
             if op.uo.pre_verification_gas() < required_pvg {

@@ -209,12 +209,12 @@ pub fn make_rr_calldata(keys: Vec<B256>) -> Bytes {
 pub fn check_trigger(rev: &Bytes) -> bool {
     const MIN_REQ_LEN: usize = 8 + 20 + 32 + 4; // trigger prefix + endpoint_addr + user_key + 4-byte selector
 
-    println!("HC trigger check in {:?}", rev);
     const TRIGGER: [u8; 8] = [0x5f, 0x48, 0x43, 0x5f, 0x54, 0x52, 0x49, 0x47];
 
-    if rev.len() >= MIN_REQ_LEN && rev[0..8] == TRIGGER {
-        println!("HC HC triggered");
-        return true;
+    if rev.len() >= MIN_REQ_LEN {
+        let trigger_status = rev[0..8] == TRIGGER;
+        //println!("HC trigger status {:?} for {:?}", trigger_status, rev);
+        return trigger_status;
     }
     false
 }
@@ -283,13 +283,13 @@ fn make_external_op(
 
     let call_gas = 705 * response_payload.len() + 170000;
 
-    println!(
-        "HC external_op call_data len {:?} {:?} gas {:?} {:?}",
-        response_payload.len(),
-        call_data.len(),
-        call_gas,
-        call_data
-    );
+    //println!(
+    //    "HC external_op call_data len {:?} {:?} gas {:?} {:?}",
+    //    response_payload.len(),
+    //    call_data.len(),
+    //    call_gas,
+    //    call_data
+    //);
     if true {
         let mut new_op = UserOperationOptionalGasV0_7 {
             sender: ha_addr,
@@ -561,7 +561,7 @@ pub async fn rr_op(
     keys: Vec<B256>,
 ) -> UserOperationOptionalGas {
     let call_data = make_rr_calldata(keys);
-    println!("HC rr_op call_data {:?}", call_data);
+    //println!("HC rr_op call_data {:?}", call_data);
 
     if true {
         let mut new_op = UserOperationOptionalGasV0_7 {
@@ -593,7 +593,7 @@ pub async fn rr_op(
 
         let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
         new_op.signature = signature.as_bytes().into();
-        println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
+        //println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
 
         UserOperationOptionalGas::V0_7(new_op)
     } else {
@@ -623,7 +623,7 @@ pub async fn rr_op(
 
         let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
         new_op.signature = signature.as_bytes().into();
-        println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
+        //println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
 
         UserOperationOptionalGas::V0_6(new_op)
     }
