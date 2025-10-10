@@ -196,6 +196,13 @@ where
         let timer = Instant::now();
         let (bundle_fees, base_fee) = self.estimate_gas_fees(block_hash, min_gas_fees).await?;
 
+        println!(
+            "HC calling make_bundle with ops_len {:?}, min_gas {:?}, is_replacement {:?}",
+            ops.len(),
+            min_gas_fees,
+            is_replacement
+        );
+
         // (0) Determine fees required for ops to be included in a bundle
         // if replacing, just require bundle fees increase chances of unsticking
         let required_op_fees = if is_replacement {
@@ -278,12 +285,12 @@ where
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        if !ops_with_simulations.is_empty() {
-            println!(
-                "HC bundle_proposer before assemble_context len {:?}",
-                ops_with_simulations.len()
-            );
-        }
+        //if !ops_with_simulations.is_empty() {
+        //    println!(
+        //        "HC bundle_proposer before assemble_context len {:?}",
+        //        ops_with_simulations.len()
+        //    );
+        //}
         let mut context = self
             .assemble_context(
                 max_bundle_fee,
@@ -393,8 +400,7 @@ where
     ) -> Option<PoolOperationWithSponsoredDAGas> {
         let op_hash = op.uo.hash();
 
-        println!("HC proposer check_fees op {:?}", op);
-
+        //println!("HC proposer check_fees op {:?}", op);
         let mut required_max_fee_per_gas = required_op_fees.max_fee_per_gas;
         let mut required_max_priority_fee_per_gas = required_op_fees.max_priority_fee_per_gas;
 
@@ -789,8 +795,8 @@ where
                 let offchain_gas = hc_ent.clone().unwrap().oc_gas;
                 bundle_computation_gas_limit += offchain_gas;
                 println!(
-                    "HC bundle_properer found hc_ent {:?} op_hash {:?} required_gas {:?}",
-                    hc_ent, hc_hash, offchain_gas
+                    "HC bundle_properer found hc_ent for op_hash {:?}, required_gas {:?}",
+                    hc_hash, offchain_gas
                 );
             }
 
@@ -864,8 +870,11 @@ where
                     .get_latest_block_hash_and_number()
                     .await
                     .expect("get block_hash for hc");
-
-                println!("HC insert, hc_ent {:?}", hc_ent);
+                let h = hc_ent.clone().unwrap();
+                println!(
+                    "HC inserting hc_ent sub_key {:?} map_key {:?} user_op {:?}",
+                    h.sub_key, h.map_key, h.user_op
+                );
                 let u_op2: UserOperationVariant = hc_ent
                     .clone()
                     .unwrap()
@@ -1127,9 +1136,9 @@ where
 
         // call handle ops with the bundle to filter any rejected ops before sending
         println!(
-            "HC bundle_proposer gas1 {:?} {:?}",
+            "HC bundle_proposer gas estimate 1: {:?} for {:?} ops",
             gas,
-            context.to_ops_per_aggregator()
+            context.to_ops_per_aggregator().len()
         );
         // if EP v0.7+ and only 1 op, skip this call as simulation has already run a similar check
         // v0.6 cannot do this as we need to check for postOp reverts
@@ -1162,7 +1171,10 @@ where
             .bundle_simulation_ms
             .record(start.elapsed().as_millis() as f64);
 
-        println!("HC bundle_proposer gas2 result {:?}", handle_ops_out);
+        println!(
+            "HC bundle_proposer gas estimate 2 result {:?} with gas_limit {:?}",
+            handle_ops_out, gas_limit
+        );
         match handle_ops_out {
             HandleOpsOut::Success => Ok(Some(gas_limit)),
             HandleOpsOut::FailedOp(index, message) => {

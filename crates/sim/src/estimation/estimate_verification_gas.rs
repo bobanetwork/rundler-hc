@@ -178,7 +178,7 @@ where
         )
         .await?;
 
-        println!("HC estimate_verification_gas result {:?}", result);
+        //println!("HC estimate_verification_gas result {:?}", result);
 
         match result {
             BinarySearchResult::Success(estimate, num_rounds) => {

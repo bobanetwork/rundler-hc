@@ -259,10 +259,6 @@ where
             self.provider.get_transaction_receipt(tx_hash),
         )?;
 
-        println!(
-            "HC get_mined_tx_gas_info looking for hash {:?} got tx {:?} receipt {:?}",
-            tx_hash, tx, tx_receipt
-        );
         let gas_limit = tx.map(|t| t.inner.gas_limit()).or_else(|| {
             warn!("failed to find transaction data for tx: {}", tx_hash);
             None
@@ -339,7 +335,7 @@ where
         block_number: u64,
     ) -> TransactionTrackerResult<B256> {
         self.validate_transaction(&tx)?;
-        println!("HC send_transaction will send tx {:?}", tx.clone());
+        //println!("HC send_transaction will send tx {:?}", tx.clone());
         let gas_fees = GasFees {
             max_fee_per_gas: tx.max_fee_per_gas.unwrap_or(0),
             max_priority_fee_per_gas: tx.max_priority_fee_per_gas.unwrap_or(0),
@@ -362,7 +358,7 @@ where
             .sender
             .send_transaction(tx, expected_storage, &self.signer)
             .await;
-        println!("HC send_transaction hash {:?}", tx_hash);
+        //println!("HC send_transaction hash {:?}", tx_hash);
 
         self.update_metrics();
 
@@ -537,7 +533,7 @@ where
                     continue;
                 };
                 println!(
-                    "HC tx_hash {:?} mined_tx_info {:?}",
+                    "HC mined_tx_info for {:?} = {:?}",
                     tx.tx_hash, mined_tx_info
                 );
                 out = TrackerUpdate::Mined {
