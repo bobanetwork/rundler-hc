@@ -896,17 +896,24 @@ where
                         .push(OpWithSimulation {
                             op: u_op2.into(),
                             simulation: sim_result,
-                            sponsored_da_gas: po.sponsored_da_gas, // FIXME
+                            sponsored_da_gas: 0,
                         });
                     cleanup_keys.push(hc_ent.clone().unwrap().map_key);
+                } else if let Err(SimulationError {
+                    violation_error: ref sim_error,
+                    entity_infos: _,
+                }) = sim_result
+                {
+                    // An "AA25 invalid account nonce" here can be caused by a too-rapid bundle resubmission
+                    // where the original Tx was mined but not checked before the fee_increase logic kicked in.
+                    println!("HC WARN offchain op simulation error: {:?}", sim_error);
                 } else {
-                    println!("HC ERROR u_op2 simulation failed: {:?}", sim_result);
+                    println!(
+                        "HC ERROR offchain op had unknown simulation result: {:?}",
+                        sim_result
+                    );
                 }
             }
-
-            // FIXME
-            //constructed_bundle_size =
-            //    constructed_bundle_size.saturating_add(op_size_with_offset_word);
 
             // check if we've passed the computation target
             if bundle_computation_gas_limit >= self.settings.target_bundle_gas {
@@ -961,7 +968,7 @@ where
                 .push(OpWithSimulation {
                     op: cleanup_op.into(),
                     simulation: cleanup_sim,
-                    sponsored_da_gas: 0, // FIXME
+                    sponsored_da_gas: 0,
                 });
         }
 
