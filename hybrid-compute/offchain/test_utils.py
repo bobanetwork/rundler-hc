@@ -314,6 +314,10 @@ class TestUtils:
         print("            L2 Gas:", self.bal_print(user_paid, w, l2_gas))
         print("          Residual:", self.bal_print(user_paid, w, residual))
 
+        # A small residual is "normal" but large amounts can indicate e.g.
+        # duplicate/stale bundle submissions.
+        assert residual < 10
+
     def show_balance_details(self):
         """
         Show the current balances of system accounts, individually reporting
