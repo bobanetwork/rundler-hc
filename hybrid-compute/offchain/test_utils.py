@@ -242,7 +242,14 @@ class TestUtils:
                 print(f" log {n} -> UserOperationEvent success {success} "
                     f"gas_cost {gas_cost} gas_used {gas_used}")
             else:
-                print(f" log {n} {i['topics'][0]} {i['data']}")
+                if len(i['topics']) == 1:
+                    print(f" log {n} {i['topics'][0]} {i['data']}")
+                elif len(i['topics']) == 2:
+                    print(f" log {n} {i['topics'][0]} {i['topics'][1]} {i['data']}")
+                elif len(i['topics']) == 3:
+                    print(f" log {n} {i['topics'][0]} {i['topics'][1]} {i['topics'][2]} {i['data']}")
+                else:
+                    print(f" log {n} {i['topics'][0]} {i['topics'][1]} {i['topics'][2]} {i['topics'][3]} {i['data']}")
             n += 1
         if 'l1GasUsed' not in tx_rcpt:
             tx_rcpt['l1GasUsed'] = "0x0"
