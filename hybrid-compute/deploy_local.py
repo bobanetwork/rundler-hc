@@ -510,6 +510,9 @@ class Deployer:
         self.env_vars['OC_NODE_HTTP'] = self.env_vars['NODE_HTTP']
         self.env_vars['CHAIN_ID'] = self.chain_id
 
+        # Allow HybridAccount to re-register its URL
+        self.env_vars['OC_ALLOW_REG'] = ha1_addr
+
         with open(".env", "w", encoding="ascii") as f:
             for k in self.env_vars.items():
                 f.write(f"{k[0]}={k[1]}\n")

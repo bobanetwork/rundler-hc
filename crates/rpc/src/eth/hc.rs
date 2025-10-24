@@ -5,6 +5,7 @@ use alloy_primitives::{
     Address, Bytes, B256, U128, U256,
 };
 use alloy_rpc_types_eth::state::AccountOverride;
+use alloy_sol_types::SolValue;
 use jsonrpsee::{
     core::{client::ClientT, params::ObjectParams, JsonValue},
     http_client::HttpClientBuilder,
@@ -113,11 +114,36 @@ impl HcApi {
             .unwrap();
 
         let p2 = rundler_provider::new_alloy_provider(&self.cfg.node_http, 120)?;
+        let m = hex::encode(hybrid_compute::hc_selector(revert_data));
 
-        let hx = IHCHelper::new(self.cfg.helper_addr, p2.clone());
-        let url_response = hx.RegisteredCallers(ep_addr).call().await;
+        let sub_key = hybrid_compute::hc_sub_key(revert_data);
+        let sk_hex = hex::encode(sub_key);
+        let map_key = hybrid_compute::hc_map_key(revert_data);
 
-        let url = url_response.expect("url_decode").url;
+        let payload = hex::encode(hybrid_compute::hc_req_payload(revert_data));
+        let n_bytes: B256 = hc_nonce.into();
+        let src_n = hex::encode(n_bytes);
+        let src_addr = hex::encode(op_t.sender());
+
+        let mut is_registration = false;
+
+        // check for "_register(address,string)"
+        let url = match m.as_str() {
+            hybrid_compute::REG_SELECTOR => {
+                is_registration = true;
+                let (addr, new_url) = <(Address, String)>::abi_decode_sequence(
+                    &hybrid_compute::hc_req_payload(revert_data),
+                )
+                .unwrap();
+                println!("HC Registration request for {:?} -> {:?}", addr, new_url);
+                new_url
+            }
+            _ => {
+                let hx = IHCHelper::new(self.cfg.helper_addr, p2.clone());
+                let url_response = hx.RegisteredCallers(ep_addr).call().await;
+                url_response.expect("url_decode").url
+            }
+        };
 
         let cc = HttpClientBuilder::default().build(&url); // could specify a request_timeout() here.
         if cc.is_err() {
@@ -125,11 +151,6 @@ impl HcApi {
                 "Invalid URL registered for HC"
             )));
         }
-
-        let m = hex::encode(hybrid_compute::hc_selector(revert_data));
-        let sub_key = hybrid_compute::hc_sub_key(revert_data);
-        let sk_hex = hex::encode(sub_key);
-        let map_key = hybrid_compute::hc_map_key(revert_data);
 
         println!(
             "HC api.rs processing hc_hash {:?}, url {:?} ({:?}, {:?}, {:?}, {:?}, {:?})",
@@ -141,12 +162,6 @@ impl HcApi {
             sk_hex,
             map_key,
         );
-
-        let payload = hex::encode(hybrid_compute::hc_req_payload(revert_data));
-        let n_bytes: B256 = hc_nonce.into();
-        let src_n = hex::encode(n_bytes);
-        let src_addr = hex::encode(op_t.sender());
-
         let oo_n_key: U256 = U256::from_be_slice(op_t.sender().as_slice());
 
         let oo_nonce = self
@@ -211,6 +226,21 @@ impl HcApi {
                     let resp_hex = resp["response"].as_str().unwrap();
                     let sig_hex: String = resp["signature"].as_str().unwrap().into();
                     let hc_res: Bytes = hex::decode(resp_hex).unwrap().into();
+
+                    if is_registration {
+                        if let Ok(reg_ok) = resp_hex.parse::<U256>() {
+                            println!(
+                                "HC Self-registration op_success {:?}, reg_ok {:?}",
+                                op_success, reg_ok
+                            );
+                            // Placeholder for additional checks. Bundler could choose to deny certain
+                            // requests, substituting a system error. Bundler could detect repeated failures
+                            // for a particular URL or particular source contract and auto-blacklist. Etc.
+                        } else {
+                            let msg = "HC04: Bad self-registration response".to_owned();
+                            return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
+                        }
+                    }
 
                     err_hc = hybrid_compute::external_op(
                         entry_point,
@@ -284,7 +314,10 @@ impl HcApi {
         }
 
         if err_hc.code != 0 {
-            println!("HC api.rs calling err_op {:?}", err_hc.message);
+            println!(
+                "HC api.rs calling err_op {:?} / {:?}",
+                err_hc.code, err_hc.message
+            );
             hybrid_compute::err_op(
                 hh,
                 entry_point,
@@ -424,7 +457,7 @@ impl HcApi {
 
             hybrid_compute::hc_set_pvg(hh, needed_pvg.to::<u128>(), offchain_pvg.to::<u128>());
 
-            if err_hc.code != 0 {
+            if err_hc.code != 0 && err_hc.code != 128 {
                 return Err(EthRpcError::Internal(anyhow::anyhow!(err_hc.message)));
             }
 

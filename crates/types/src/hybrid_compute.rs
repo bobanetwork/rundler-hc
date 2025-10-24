@@ -68,6 +68,9 @@ pub struct HcEntry {
 
 const EXPIRE_SECS: std::time::Duration = Duration::new(120, 0);
 
+/// Selector for "_register(address,string)"
+pub const REG_SELECTOR: &str = "aca1d472";
+
 impl Clone for HcEntry {
     fn clone(&self) -> HcEntry {
         HcEntry {

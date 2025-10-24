@@ -87,6 +87,70 @@ contract HCHelper is ReentrancyGuard, UUPSUpgradeable, Initializable {
         emit RegisteredUrl(contract_addr, url);
     }
 
+    // This method allows a HybridAccount to register its offchain URL, creating an entry
+    // in RegisteredCallers. The bundler will call a special method on the offchain url, passing
+    // the address of the contract which is attempting to register it. The registration will
+    // only succeed if the server sends a response accepting it.
+    function SelfRegister(string calldata url) public returns (bool) {
+        address contract_addr = msg.sender;
+        bool success = true;
+
+        require(contract_addr.codehash != keccak256(""), "SelfRegister must be called by a contract");
+        if(bytes(url).length == 0) {
+            RegisteredCallers[contract_addr].url = "";
+            emit RegisteredUrl(contract_addr, "");
+        } else {
+            // This is a modified subset of TryCallOffchain()
+            bytes32 userKey = keccak256(abi.encodePacked("_register_", msg.sender));
+            bytes memory req = abi.encodeWithSignature("_register(address,string)", contract_addr, url);
+
+            bytes32 subKey = keccak256(abi.encodePacked(userKey, req));
+            bytes32 mapKey = keccak256(abi.encodePacked(msg.sender, subKey));
+
+            bool found;
+	    uint32 errCode;
+            bytes memory ret;
+
+            (found, errCode, ret) = getEntry(mapKey);
+
+	    if (found) {
+                if (errCode == 0) {
+	            bool reg_success = abi.decode(ret, (bool));
+                    if (reg_success) {
+                        RegisteredCallers[contract_addr].owner = contract_addr;
+                        RegisteredCallers[contract_addr].url = url;
+                        emit RegisteredUrl(contract_addr, url);
+                    }
+                    return reg_success;
+                }
+                return false;
+	    } else {
+	        // If no off-chain response, check for a system error response.
+                bytes32 errKey = keccak256(abi.encodePacked(address(this), subKey));
+
+	        (found, errCode, ret) = getEntry(errKey);
+	        if (found) {
+	            return false;
+	        } else {
+	            // Nothing found, so trigger a new request.
+                    bytes memory prefix = "_HC_TRIG";
+                    bytes memory r2 = bytes.concat(prefix, abi.encodePacked(msg.sender, userKey, req));
+                    assembly {
+                        revert(add(r2, 32), mload(r2))
+	            }
+	        }
+	    }
+        }
+    }
+
+    // Reassign ownership of a registered caller. Not needed under normal circumstances.
+    function ReassignOwner(address contract_addr, address new_owner) public {
+        require(new_owner != address(0), "Must supply a new_owner");
+        require(RegisteredCallers[contract_addr].owner != address(0), "Caller is not registered");
+        require(msg.sender == RegisteredCallers[contract_addr].owner, "Only existing owner may reassign");
+        RegisteredCallers[contract_addr].owner = new_owner;
+    }
+
     // Set or change the per-call token price (0 is allowed), token,
     // and maximum credit balance. Does not affect existing balances,
     // only new AddCredit() purchases.
