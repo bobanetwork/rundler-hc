@@ -82,6 +82,7 @@ pub async fn run() -> anyhow::Result<()> {
     .context("metrics server should start")?;
 
     let mut cs = chain_spec::resolve_chain_spec(&opt.common.network, &opt.common.chain_spec);
+    println!("HC Starting with chain_spec {:?} ({:?})", cs.name, cs.id);
 
     let (mempool_configs, entry_point_builders) = load_configs(&opt.common).await?;
     if let Some(entry_point_builders) = &entry_point_builders {

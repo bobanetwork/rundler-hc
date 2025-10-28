@@ -1,7 +1,7 @@
 base = "optimism"
 
-name = "Boba Sepolia"
-id = 28882
+name = "Boba Mainnet"
+id = 288
 
 min_max_priority_fee_per_gas = 1_000_000
 

@@ -123,6 +123,6 @@ define_hardcoded_chain_specs!(
     polygon_amoy,
     avax,
     avax_fuji,
-    boba_sepolia,
-    optimism_devnet
+    boba,
+    boba_sepolia
 );
