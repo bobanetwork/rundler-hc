@@ -212,6 +212,7 @@ where
                 .fee_estimator()
                 .required_op_fees(bundle_fees)
         };
+
         let all_paymaster_addresses = ops
             .iter()
             .filter_map(|op| op.uo.paymaster())
@@ -252,6 +253,7 @@ where
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+        println!("HC Bundle proposal after fee limit had {} ops", ops.len());
 
         tracing::debug!("Bundle proposal after fee limit had {} ops", ops.len());
         if ops.is_empty() {
@@ -416,6 +418,7 @@ where
             && op.perms.bundler_sponsorship.is_none()
         // skip if bundler sponsored
         {
+            println!("HC check_fees skipping op_hash {:?}", op.uo.hash());
             self.emit(BuilderEvent::skipped_op(
                 self.builder_tag.clone(),
                 op_hash,
@@ -790,13 +793,15 @@ where
 
             // Account for the gas which will be added by an offchain HC operation
             let hc_hash = op.hc_hash();
+
             let hc_ent = hybrid_compute::get_hc_ent(hc_hash);
-            if hc_ent.is_some() {
-                let offchain_gas = hc_ent.clone().unwrap().oc_gas;
+
+            if let Some(ref hc_ent) = hc_ent {
+                let offchain_gas = hc_ent.oc_gas;
                 bundle_computation_gas_limit += offchain_gas;
                 println!(
-                    "HC bundle_properer found hc_ent for op_hash {:?}, required_gas {:?}",
-                    hc_hash, offchain_gas
+                    "HC bundle_properer found hc_ent for op_hash {:?}, required_gas {:?}, valid {:?}",
+                    hc_hash, offchain_gas, hc_ent.valid
                 );
             }
 

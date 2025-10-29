@@ -605,12 +605,36 @@ where
         Ok(())
     }
 
+    /// Checks for UserOperations still in the pool whose associated HC entries
+    /// have gone stale, and removes them. TODO: pass an error back to the submitter.
+    async fn filter_hc_stale(&mut self, ops: &mut Vec<PoolOperation>) -> bool {
+        let hc_stale: Vec<B256> = ops.iter().filter_map(|op| {
+            if let Some(hc_ent) = hybrid_compute::get_hc_ent(op.uo.hc_hash()) {
+                if !hc_ent.valid {
+                    println!("HC WARN Removing sender {:?} op_hash {:?} hc_hash {:?} with stale cache entry", op.uo.sender(), op.uo.hash(), op.uo.hc_hash());
+                    return Some(op.uo.hash());
+                }
+            }
+            None
+        }).collect();
+
+        if !hc_stale.is_empty() {
+            ops.retain(|op| !hc_stale.contains(&op.uo.hash()));
+
+            let result = self.remove_ops_from_pool_by_hash(hc_stale).await;
+            if let Err(error) = result {
+                error!("HC Failed to remove hc_stale ops from pool: {error}");
+            }
+        }
+        ops.is_empty()
+    }
+
     async fn send_bundle<TRIG: Trigger>(
         &mut self,
         state: &mut SenderMachineState<T, TRIG>,
         fee_increase_count: u64,
     ) -> anyhow::Result<SendBundleAttemptResult> {
-        let ops = self
+        let mut ops = self
             .assigner
             .assign_operations(
                 self.sender_eoa,
@@ -619,7 +643,7 @@ where
             )
             .await?;
 
-        if ops.is_empty() {
+        if ops.is_empty() || self.filter_hc_stale(&mut ops).await {
             // there are no UOs for this sender, so we can release all from the assigner
             self.assigner.release_all(self.sender_eoa);
             return Ok(SendBundleAttemptResult::NoOperationsInitially);
