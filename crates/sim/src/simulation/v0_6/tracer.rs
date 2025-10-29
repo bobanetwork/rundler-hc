@@ -94,6 +94,7 @@ where
                         },
                         state_overrides: Some(s2),
                         block_overrides: None,
+                        tx_index: None,
                     },
                 )
                 .await?,

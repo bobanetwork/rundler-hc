@@ -162,6 +162,7 @@ where
                     },
                     state_overrides: Some(state_override),
                     block_overrides: None,
+                    tx_index: None,
                 },
             )
             .await?;

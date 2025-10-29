@@ -61,7 +61,6 @@ alloy-signer = "1.0.9"
 alloy-signer-aws = "1.0.9"
 alloy-signer-local = { version = "1.0.9" }
 alloy-transport = "1.0.9"
-alloy-transport-http = { version = "1.0.9", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
 alloy-network = { version = "1.0.9" }
 
 # alloy other
@@ -95,7 +94,6 @@ rand = "0.8.5"
 reqwest = { version = "0.12.8", default-features = false, features = ["rustls-tls"] }
 thiserror = "1.0.64"
 tokio = { version = "1.44.2", default-features = false, features = ["rt", "sync", "time"] }
-tokio-util = "0.7.12"
 tonic = "0.12.3"
 tonic-build = "0.12.3"
 tonic-health = "0.12.3"
