@@ -447,8 +447,8 @@ where
             // to attempt until there are no longer any UOs priced high enough
             // to bundle.
             println!(
-                "HC starting bundle replacement at {:?}/{:?}, fee_increase_count {:?}",
-                state.block_number(),
+                "HC starting bundle replacement at inner.until {:?}, fee_increase_count {:?}",
+                /* accessing state.block_number() here breaks bundle_sender::tests::test_wait_for_mine_timed_out */
                 inner.until,
                 inner.fee_increase_count
             );
