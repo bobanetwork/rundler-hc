@@ -27,6 +27,9 @@ parser.add_argument("--estimate-only", action="store_true", help="Debug option: 
 
 args = parser.parse_args()
 
+# Multiply w3.eth.gas_price by this to get maxFeePerGas
+ETH_GAS_FEE_MULT = 1.05
+
 # "https://gateway.tenderly.co/public/boba-sepolia"
 # "https://bundler-hc.sepolia.boba.network"
 # +------------------------------------------------------+
@@ -118,6 +121,11 @@ def build_op(to_contract, value_in_wei, initcode_hex, calldata_hex):
     ex_call = selector("execute(address,uint256,bytes)") + \
           ethabi.encode(['address', 'uint256', 'bytes'], [to_contract, value_in_wei, Web3.to_bytes(hexstr=calldata_hex)])
 
+    fee_resp = requests.post(
+        args.bundler_rpc, json=request("rundler_maxPriorityFeePerGas"), timeout=30)
+    print("fee_resp", fee_resp.json())
+    print("eth_gas", w3.eth.gas_price)
+
     if args.ep_version == "v7":
         p = {
             'sender':u_addr,
@@ -127,7 +135,7 @@ def build_op(to_contract, value_in_wei, initcode_hex, calldata_hex):
             'callGasLimit': "0x0",
             'verificationGasLimit': "0x0",
             'preVerificationGas': "0x0",
-            'maxFeePerGas': Web3.to_hex(w3.eth.gas_price),
+            'maxFeePerGas': Web3.to_hex(int(w3.eth.gas_price * ETH_GAS_FEE_MULT)),
             'maxPriorityFeePerGas': Web3.to_hex(w3.eth.max_priority_fee),
     #        'paymasterAndData':"0x",
             'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
@@ -141,7 +149,7 @@ def build_op(to_contract, value_in_wei, initcode_hex, calldata_hex):
             'callGasLimit': "0x0",
             'verificationGasLimit': "0x0",
             'preVerificationGas': "0x0",
-            'maxFeePerGas': Web3.to_hex(w3.eth.gas_price),
+            'maxFeePerGas': Web3.to_hex(int(w3.eth.gas_price * ETH_GAS_FEE_MULT)),
             'maxPriorityFeePerGas': Web3.to_hex(w3.eth.max_priority_fee),
             'paymasterAndData':"0x",
             'signature': '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
@@ -171,7 +179,7 @@ def estimate_op(p):
     else:
         est_result = response.json()['result']
         p['preVerificationGas'] = Web3.to_hex(Web3.to_int(
-            hexstr=est_result['preVerificationGas']) + args.extra_pvg)
+            hexstr=est_result['preVerificationGas']) + int(args.extra_pvg))
         if 'verificationGasLimit' in est_result:
             p['verificationGasLimit'] = Web3.to_hex(Web3.to_int(
                 hexstr=est_result['verificationGasLimit']) + 0)
@@ -180,7 +188,7 @@ def estimate_op(p):
                 hexstr=est_result['verificationGas']) + 0)
         p['callGasLimit'] = Web3.to_hex(Web3.to_int(
             hexstr=est_result['callGasLimit']) + 0)
-        gas_total = Web3.to_int(hexstr=est_result['preVerificationGas']) + args.extra_pvg + \
+        gas_total = Web3.to_int(hexstr=est_result['preVerificationGas']) + int(args.extra_pvg) + \
             Web3.to_int(hexstr=est_result['callGasLimit'])
         if 'verificationGasLimit' in est_result:
             gas_total += Web3.to_int(hexstr=est_result['verificationGasLimit'])
