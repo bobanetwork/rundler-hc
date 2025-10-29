@@ -64,9 +64,14 @@ pub struct HcEntry {
     pub needed_pvg: u128,
     /// Version flag
     pub is_v7: bool,
+    /// Workaround to check for stale cache entries
+    pub valid: bool,
 }
 
-const EXPIRE_SECS: std::time::Duration = Duration::new(120, 0);
+/// Duration after which a cache entry is removed
+const EXPIRE_SECS: std::time::Duration = Duration::new(180, 0);
+/// Duration after which a cache entry is treated as stale (rejecting a userOp)
+const STALE_SECS: std::time::Duration = Duration::new(120, 0);
 
 impl Clone for HcEntry {
     fn clone(&self) -> HcEntry {
@@ -79,6 +84,7 @@ impl Clone for HcEntry {
             oc_gas: self.oc_gas,
             needed_pvg: self.needed_pvg,
             is_v7: self.is_v7,
+            valid: self.valid,
         }
     }
 }
@@ -417,6 +423,7 @@ pub async fn external_op(
         oc_gas: 0,
         needed_pvg: 0,
         is_v7: true,
+        valid: true,
     };
     HC_MAP.lock().unwrap().insert(op_key, ent);
 
@@ -549,6 +556,7 @@ pub async fn err_op(
         oc_gas: 0,
         needed_pvg: 0,
         is_v7: true,
+        valid: true,
     };
     HC_MAP.lock().unwrap().insert(op_key, ent);
 }
@@ -629,9 +637,15 @@ pub async fn rr_op(
     }
 }
 
-/// Retrieve a cached HC operation
+/// Retrieve a cached HC operation, checking for staleness
 pub fn get_hc_ent(key: B256) -> Option<HcEntry> {
-    HC_MAP.lock().unwrap().get(&key).cloned()
+    if let Some(mut hc_ent) = HC_MAP.lock().unwrap().get(&key).cloned() {
+        let stale_time = SystemTime::now().checked_sub(STALE_SECS).unwrap();
+        let ent_time = hc_ent.ts;
+        hc_ent.valid = ent_time > stale_time;
+        return Some(hc_ent);
+    }
+    None
 }
 
 /// Remove a cache entry
@@ -715,6 +729,7 @@ pub fn hc_set_pvg(key: B256, needed_pvg: u128, oc_gas: u128) {
         needed_pvg,
         oc_gas,
         is_v7: ent.is_v7,
+        valid: ent.valid,
     };
     map.remove(&key);
     map.insert(key, new_ent);

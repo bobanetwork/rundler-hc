@@ -90,14 +90,17 @@ impl Assigner {
             let mut state = self.state.lock().unwrap();
             for op in ops {
                 if let Some(hc_ent) = hybrid_compute::get_hc_ent(op.hc_hash) {
-                    println!(
-                        "HC assigner.rs pair {:?} to {:?}",
-                        hybrid_compute::get_hc_sender(hc_ent.clone()),
-                        op.sender
-                    );
-                    state
-                        .hc_extra_senders
-                        .insert(hybrid_compute::get_hc_sender(hc_ent), op.sender);
+                    let hc_sender = hybrid_compute::get_hc_sender(hc_ent.clone());
+                    if hc_sender != op.sender {
+                        println!("HC assigner.rs pair {:?} to {:?}", hc_sender, op.sender);
+                        state
+                            .hc_extra_senders
+                            .insert(hybrid_compute::get_hc_sender(hc_ent), op.sender);
+                    } else {
+                        // This can happen if a HybridAccount makes its own HC call, e.g.
+                        // during the self-registration protocol.
+                        println!("HC assigner.rs pair {:?} to self", hc_sender);
+                    }
                 }
 
                 let (locked_builder_address, _) = state
