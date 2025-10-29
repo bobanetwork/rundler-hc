@@ -19,6 +19,7 @@
 ))]
 //! Main CLI entry point for Rundler
 
+use alloy as _;
 use dotenvy::dotenv;
 mod cli;
 
