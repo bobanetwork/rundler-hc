@@ -300,9 +300,11 @@ class TestUtils:
         w = len(str(user_paid)) + 2
 
         bundler_profit = 0
+        pm_profit = 0
         for a in self.bundler_addrs:
             bundler_profit += self.bal.now_total(a)
-        pm_profit = self.bal.now_total(self.paymaster)
+        if self.paymaster:
+            pm_profit = self.bal.now_total(self.paymaster)
         hh_profit = self.bal.now_total(self.hh.address)
         ha_profit = self.bal.now_total(self.ha.address)
         contract_profit = self.contract_net_balances()
