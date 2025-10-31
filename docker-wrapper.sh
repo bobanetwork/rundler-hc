@@ -12,4 +12,5 @@ echo "Launching rundler"
   --signer.redis_uri redis://127.0.0.1:6379 \
   --min_stake_value 1000000000000000 \
   --min_unstake_delay 60 \
+  --base_fee_accept_percent 100 \
   $@
