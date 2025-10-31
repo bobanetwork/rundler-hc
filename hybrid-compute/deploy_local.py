@@ -14,7 +14,7 @@ from eth_abi import abi as ethabi
 from hybrid_compute_sdk.aa_client import AAClient, selector
 from offchain.test_utils import EthUtils
 
-OUT_PREFIX = "../crates/contracts/contracts/out/hc0_7/"
+OUT_PREFIX = "./contracts/v0_7/out/"
 ETH_MIN = 50
 BOBA_MIN = 500
 
@@ -55,6 +55,8 @@ class Deployer:
         parser = argparse.ArgumentParser()
         parser.add_argument("--boba-path", required=True,
             help="Path to your local Boba/Optimism repository")
+        parser.add_argument("--rundler-path", required=True,
+            help="Path to your local rundler-hc repository")
         parser.add_argument("--deploy-salt", required=False,
             help="Salt value for contract deployment", default="0")
         parser.add_argument("--kms-port", required=False,
@@ -129,7 +131,7 @@ class Deployer:
             "--key-usage", "SIGN_VERIFY", "--key-spec", "ECC_SECG_P256K1"]
         sys_env = os.environ.copy()
 
-        out = subprocess.run(args, cwd="../crates/contracts/contracts", env=sys_env,
+        out = subprocess.run(args, cwd="./contracts", env=sys_env,
             capture_output=True, check=True)
         assert out.returncode == 0
         jstr = out.stdout.decode('ascii')
@@ -139,7 +141,7 @@ class Deployer:
 
         args = ["aws", "--endpoint", "http://127.0.0.1:4566", "kms", "get-public-key",
              "--key-id", key_id]
-        out = subprocess.run(args, cwd="../crates/contracts/contracts", env=sys_env,
+        out = subprocess.run(args, cwd="./contracts", env=sys_env,
             capture_output=True, check=True)
         assert out.returncode == 0
         jstr = out.stdout.decode('ascii')
@@ -294,9 +296,11 @@ class Deployer:
 
         args.append("hc_src")
         args.append("--remappings")
-        args.append("@account-abstraction/=lib/account-abstraction/contracts")
+        args.append("@account-abstraction/=" + self.cli_args.rundler_path + "/crates/contracts/contracts/v0_7/lib/account-abstraction/contracts")
         args.append("--remappings")
-        args.append("@openzeppelin/=lib/openzeppelin-contracts")
+        args.append("@openzeppelin/=" + self.cli_args.rundler_path + "/crates/contracts/contracts/v0_7/lib/openzeppelin-contracts")
+        args.append("--remappings")
+        args.append("@forge-std/=" + self.cli_args.rundler_path + "/crates/contracts/contracts/common/lib/forge-std/")
 
         args.append(script)
         sys_env = os.environ.copy()
@@ -312,7 +316,7 @@ class Deployer:
             cmd_env['ENTRY_POINTS'] = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
         print("Using EntryPoint address:", cmd_env['ENTRY_POINTS'])
 
-        out = subprocess.run(args, cwd="../crates/contracts/contracts", env=cmd_env,
+        out = subprocess.run(args, cwd="./contracts", env=cmd_env,
             capture_output=True, check=True)
 
         # Subprocess will fail if contracts were previously self.deployed but those addresses were
@@ -436,7 +440,7 @@ class Deployer:
             self.fund_addr(addr)
 
         (ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr, pm_addr) = self.deploy_base()
-        self.entry_point = self.load_contract("EntryPoint", ep_addr, "../crates/contracts/contracts/v0_7/out/EntryPoint.sol/EntryPoint.json")
+        self.entry_point = self.load_contract("EntryPoint", ep_addr, "./contracts/v0_7/out/EntryPoint.sol/EntryPoint.json")
 
         helper = self.load_contract('HCHelper', hh_addr)
         self.l2_util.approve_token(self.boba_token, helper.address,
@@ -466,11 +470,11 @@ class Deployer:
         hybrid_acct = self.load_contract('HybridAccount', ha1_addr)
 
         example_addrs = self.deploy_examples(ha1_addr)
-        self.load_contract('TestAuctionSystem', example_addrs[0], "../crates/contracts/contracts/out/hc0_7/TestAuctionSystem.sol/AuctionFactory.json")
+        self.load_contract('TestAuctionSystem', example_addrs[0], "./contracts/v0_7/out/TestAuctionSystem.sol/AuctionFactory.json")
         self.load_contract('TestCaptcha', example_addrs[1])
         self.load_contract('TestHybrid', example_addrs[2])
-        self.load_contract('TestRainfallInsurance', example_addrs[3], "../crates/contracts/contracts/out/hc0_7/TestRainfallInsurance.sol/RainfallInsurance.json")
-        self.load_contract('TestSportsBetting', example_addrs[4], "../crates/contracts/contracts/out/hc0_7/TestSportsBetting.sol/SportsBetting.json")
+        self.load_contract('TestRainfallInsurance', example_addrs[3], "./contracts/v0_7/out/TestRainfallInsurance.sol/RainfallInsurance.json")
+        self.load_contract('TestSportsBetting', example_addrs[4], "./contracts/v0_7/out/TestSportsBetting.sol/SportsBetting.json")
         self.load_contract('TestKyc', example_addrs[5])
         self.load_contract('TestTokenPrice', example_addrs[6])
         test_random = self.load_contract('TestRandom', example_addrs[7])

@@ -83,13 +83,6 @@ fn generate_v0_7_bindings() -> Result<(), Box<dyn error::Error>> {
     write_deployed_bytecode!("v0_7", VerificationGasEstimationHelper);
     write_deployed_bytecode!("v0_7", EntryPointSimulations);
 
-    // Hybrid Compute
-    run_command(
-        &mut forge_build("v0_7", "hc_src", "hc0_7"),
-        "https://getfoundry.sh/",
-        "generate ABIs",
-    )?;
-
     Ok(())
 }
 
