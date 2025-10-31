@@ -457,7 +457,7 @@ impl HcApi {
 
             hybrid_compute::hc_set_pvg(hh, needed_pvg.to::<u128>(), offchain_pvg.to::<u128>());
 
-            if err_hc.code != 0 && err_hc.code != 128 {
+            if err_hc.code != 0 {
                 return Err(EthRpcError::Internal(anyhow::anyhow!(err_hc.message)));
             }
 
