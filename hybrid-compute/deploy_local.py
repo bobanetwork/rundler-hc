@@ -288,6 +288,34 @@ class Deployer:
             self.l2_util.sign_and_submit(tx, self.deploy_key)
         return acct_addr
 
+    def build_forge(self):
+        """
+        Compile the contracts using Forge. Uses a "foundry.toml" to specify some options,
+        but the remappings are supplied via CLI.
+        """
+        cmd_env = {}
+        print("Building contracts...")
+        args = ["forge", "build", "--root", "v0_7"]
+        args.append("--contracts")
+        args.append("hc_src")
+        args.append("--remappings")
+        args.append("@account-abstraction/=" + self.cli_args.rundler_path + "/crates/contracts/contracts/v0_7/lib/account-abstraction/contracts")
+        args.append("--remappings")
+        args.append("@openzeppelin/=" + self.cli_args.rundler_path + "/crates/contracts/contracts/v0_7/lib/openzeppelin-contracts")
+        args.append("--remappings")
+        args.append("@forge-std/=" + self.cli_args.rundler_path + "/crates/contracts/contracts/common/lib/forge-std/")
+
+        sys_env = os.environ.copy()
+
+        cmd_env['PATH'] = sys_env['PATH']
+        out = subprocess.run(args, cwd="./contracts", env=cmd_env,
+            capture_output=True, check=True)
+
+        if out.returncode != 0:
+            print(out)
+        assert out.returncode == 0
+        print("Done")
+
     def deploy_forge(self, script, cmd_env):
         """Construct parameters and then call 'forge script' to deploy contracts"""
         args = ["forge", "script", "--json", "--broadcast", "--via-ir", "--root", "v0_7"]
@@ -439,6 +467,7 @@ class Deployer:
         for addr in self.env_vars['BUNDLER_ADDR_LIST'].split(','):
             self.fund_addr(addr)
 
+        self.build_forge()
         (ep_addr, hh_addr, saf_addr, haf_addr, ha0_addr, pm_addr) = self.deploy_base()
         self.entry_point = self.load_contract("EntryPoint", ep_addr, "./contracts/v0_7/out/EntryPoint.sol/EntryPoint.json")
 
