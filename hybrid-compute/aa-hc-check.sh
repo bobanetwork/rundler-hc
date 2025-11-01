@@ -11,7 +11,8 @@ echo "HC_HELPER_ADDR=$HC_HELPER_ADDR"
 echo "OC_HYBRID_ACCOUNT=$OC_HYBRID_ACCOUNT"
 echo "TEST_HYBRID=$TEST_HYBRID"
 
-echo "\n***Checking Client account***"
+echo
+echo "***Checking Client account***"
 echo -n "Owner: "
 cast call --rpc-url=$NODE_HTTP $CLIENT_ADDR "owner()"
 echo -n "ETH Balance: "
@@ -21,7 +22,8 @@ cast call --rpc-url=$NODE_HTTP $BOBA_TOKEN "balanceOf(address)" $CLIENT_ADDR
 echo -n "EntryPoint: "
 cast call --rpc-url=$NODE_HTTP $CLIENT_ADDR "entryPoint()"
 
-echo "\n*** Checking HCHelper ***"
+echo
+echo "*** Checking HCHelper ***"
 echo -n "Owner: "
 cast call --rpc-url=$NODE_HTTP $HC_HELPER_ADDR "owner()"
 echo -n "ETH Balance: "
@@ -57,7 +59,8 @@ cast call --rpc-url=$NODE_HTTP $HC_HELPER_ADDR \
      "TryCallOffchain(bytes32,bytes)" $SOME_B32 0x12345678 \
     || true
 
-echo "\n*** Checking HybridAccount ***"
+echo
+echo "*** Checking HybridAccount ***"
 echo -n "Owner: "
 cast call --rpc-url=$NODE_HTTP $OC_HYBRID_ACCOUNT "owner()"
 echo -n "ETH Balance: "
@@ -82,9 +85,11 @@ CD_no_hc=`cast calldata "count(uint32,uint32)" 5 0`
 CD_underflow=`cast calldata "count(uint32,uint32)" 3 10`
 CD_hc=`cast calldata "count(uint32,uint32)" 2 1`
 
-echo "\n*** Checking Bundler ***"
+echo
+echo "*** Checking Bundler ***"
 
-echo "\nTesting gas estimation (non-HC):"
+echo
+echo "Testing gas estimation (non-HC):"
 python aa-client.py \
   -v \
   --estimate-only \
@@ -96,7 +101,8 @@ python aa-client.py \
   --calldata $CD_no_hc \
   $@
 
-echo "\nTesting gas estimation (HC underflow error):"
+echo
+echo "Testing gas estimation (HC underflow error):"
 python aa-client.py \
   -v \
   --estimate-only \
@@ -108,7 +114,8 @@ python aa-client.py \
   --calldata $CD_underflow \
   $@ || true
 
-echo "\nTesting gas estimation (HC success):"
+echo
+echo "Testing gas estimation (HC success):"
 python aa-client.py \
   -v \
   --estimate-only \

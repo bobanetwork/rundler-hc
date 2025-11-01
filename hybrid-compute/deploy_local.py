@@ -546,6 +546,9 @@ class Deployer:
         # Allow HybridAccount to re-register its URL
         self.env_vars['OC_ALLOW_REG'] = ha1_addr
 
+        # Used by aa-hc-check.sh
+        self.env_vars['TEST_HYBRID'] = example_addrs[2]
+
         with open(".env", "w", encoding="ascii") as f:
             for k in self.env_vars.items():
                 f.write(f"{k[0]}={k[1]}\n")
