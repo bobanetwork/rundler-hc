@@ -62,6 +62,7 @@ where
         block_hash: B256,
         _expected_code_hash: Option<B256>,
     ) -> Result<SimulationResult, SimulationError> {
+        println!("HC unsafe_sim.rs validation for op {:?}", op);
         tracing::debug!("Performing unsafe simulation");
 
         // simulate the validation
@@ -69,6 +70,7 @@ where
             .entry_point
             .simulate_validation(op.clone(), Some(block_hash.into()))
             .await?;
+        println!("HC unsafe_sim result {:?}", validation_result);
 
         let validation_result = match validation_result {
             Ok(res) => res,

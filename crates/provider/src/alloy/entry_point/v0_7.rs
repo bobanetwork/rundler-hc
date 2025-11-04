@@ -468,6 +468,10 @@ where
             .pre_verification_da_gas_limit(&self.chain_spec, Some(1))
             .try_into()
             .unwrap_or(u64::MAX);
+        println!(
+            "HC v0_7 simulate_validation, da_gas {:?}, op {:?}",
+            da_gas, user_op
+        );
 
         let mut override_ep = StateOverride::default();
         add_simulations_override(&mut override_ep, addr);
@@ -485,6 +489,7 @@ where
             .simulateValidation(user_op.pack())
             .gas(self.max_verification_gas.saturating_add(da_gas))
             .into_transaction_request();
+        println!("HC ep_simulation call {:?}", call);
 
         Ok((call.inner, override_ep))
     }
