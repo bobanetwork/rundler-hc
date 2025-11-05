@@ -287,12 +287,7 @@ where
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        if !ops_with_simulations.is_empty() {
-            println!(
-                "HC bundle_proposer before assemble_context len {:?}",
-                ops_with_simulations.len()
-            );
-        }
+
         let mut context = self
             .assemble_context(
                 max_bundle_fee,
@@ -607,7 +602,6 @@ where
         let op_hash = op.op.uo.hash();
 
         // Simulate
-        println!("HC before simulate_op {:?}", op.op.uo);
         let result = self
             .bundle_providers
             .simulator()
@@ -618,7 +612,7 @@ where
                 Some(op.op.expected_code_hash),
             )
             .await;
-        println!("HC sim_result {:?}", result);
+        //println!("HC bundle_proposer sim_result {:?}", result);
         let result = match result {
             Ok(success) => (op, Ok(success)),
             Err(error) => match error {
@@ -656,8 +650,10 @@ where
         mut balances_by_paymaster: HashMap<Address, U256>,
     ) -> ProposalContext<<Self as BundleProposer>::UO> {
         println!(
-            "HC assemble_context {:?} {:?} {:?}",
-            max_bundle_fee, gas_price, ops_with_simulations
+            "HC assemble_context max_bundle_fee {:?} gas_price {:?} num_ops {:?}",
+            max_bundle_fee,
+            gas_price,
+            ops_with_simulations.len()
         );
 
         if max_bundle_fee == U256::ZERO {
@@ -681,7 +677,6 @@ where
         for (po, simulation) in ops_with_simulations {
             // first process any possible rejections
             let op = po.op.clone().uo;
-            println!("HC checking op_with_simulations {:?} {:?}", op, simulation);
 
             let simulation = match simulation {
                 Ok(simulation) => simulation,
@@ -705,7 +700,6 @@ where
                     continue;
                 }
             };
-            println!("HC before filter_time_range");
 
             // filter time range
             if !simulation
@@ -740,8 +734,6 @@ where
                 }
             }
 
-            println!("HC before passed_target, {:?}", passed_target);
-
             // if the bundle is at or past target, skip op and continue to finish processing any rejections
             if passed_target {
                 self.emit(BuilderEvent::skipped_op(
@@ -751,8 +743,6 @@ where
                 ));
                 continue;
             }
-
-            println!("HC adding op to context, {:?}", op);
 
             // Add op to candidate context
             let mut context_with_op = context.clone();

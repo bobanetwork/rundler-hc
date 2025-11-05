@@ -62,7 +62,6 @@ where
         block_hash: B256,
         _expected_code_hash: Option<B256>,
     ) -> Result<SimulationResult, SimulationError> {
-        println!("HC unsafe_sim.rs validation for op {:?}", op);
         tracing::debug!("Performing unsafe simulation");
 
         // simulate the validation

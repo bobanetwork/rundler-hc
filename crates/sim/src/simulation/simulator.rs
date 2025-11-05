@@ -440,7 +440,6 @@ where
         block_hash: B256,
         expected_code_hash: Option<B256>,
     ) -> Result<SimulationResult, SimulationError> {
-        println!("HC simulator.rs simulate_validation {:?} {:?}", trusted, op);
         if trusted {
             return self
                 .unsafe_sim
