@@ -69,6 +69,7 @@ where
             .entry_point
             .simulate_validation(op.clone(), Some(block_hash.into()))
             .await?;
+        println!("HC unsafe_sim result {:?}", validation_result);
 
         let validation_result = match validation_result {
             Ok(res) => res,

@@ -287,12 +287,7 @@ where
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        //if !ops_with_simulations.is_empty() {
-        //    println!(
-        //        "HC bundle_proposer before assemble_context len {:?}",
-        //        ops_with_simulations.len()
-        //    );
-        //}
+
         let mut context = self
             .assemble_context(
                 max_bundle_fee,
@@ -617,6 +612,7 @@ where
                 Some(op.op.expected_code_hash),
             )
             .await;
+        //println!("HC bundle_proposer sim_result {:?}", result);
         let result = match result {
             Ok(success) => (op, Ok(success)),
             Err(error) => match error {
@@ -653,6 +649,13 @@ where
         )>,
         mut balances_by_paymaster: HashMap<Address, U256>,
     ) -> ProposalContext<<Self as BundleProposer>::UO> {
+        println!(
+            "HC assemble_context max_bundle_fee {:?} gas_price {:?} num_ops {:?}",
+            max_bundle_fee,
+            gas_price,
+            ops_with_simulations.len()
+        );
+
         if max_bundle_fee == U256::ZERO {
             warn!("Max bundle fee is zero, skipping bundle");
             return ProposalContext::<<Self as BundleProposer>::UO>::new();
@@ -674,6 +677,7 @@ where
         for (po, simulation) in ops_with_simulations {
             // first process any possible rejections
             let op = po.op.clone().uo;
+
             let simulation = match simulation {
                 Ok(simulation) => simulation,
                 Err(error) => {
@@ -757,6 +761,10 @@ where
             let mut bundle_computation_gas_limit =
                 context_with_op.get_bundle_computation_gas_limit(&self.settings.chain_spec);
             if bundle_computation_gas_limit > self.settings.max_bundle_gas {
+                println!(
+                    "HC bundle_proposer limited by computation_gas_limit {:?} / {:?}",
+                    bundle_computation_gas_limit, self.settings.max_bundle_gas
+                );
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
                     op.hash(),
@@ -769,6 +777,10 @@ where
             let total_gas_cost =
                 context_with_op.get_bundle_cost(&self.settings.chain_spec, gas_price);
             if total_gas_cost > buffered_max_bundle_fee {
+                println!(
+                    "HC bundle_proposer limited by total_gas_cost {:?} / {:?}",
+                    total_gas_cost, buffered_max_bundle_fee
+                );
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
                     op.hash(),
@@ -783,6 +795,11 @@ where
             if bundle_transaction_size
                 >= self.settings.chain_spec.max_transaction_size_bytes as u128
             {
+                println!(
+                    "HC bundle_proposer limited by tx_size {:?} / {:?}",
+                    bundle_transaction_size,
+                    self.settings.chain_spec.max_transaction_size_bytes as u128
+                );
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
                     op.hash(),
@@ -800,12 +817,21 @@ where
                 let offchain_gas = hc_ent.oc_gas;
                 bundle_computation_gas_limit += offchain_gas;
                 println!(
-                    "HC bundle_properer found hc_ent for op_hash {:?}, required_gas {:?}, valid {:?}",
+                    "HC bundle_properer found hc_ent for hc_hash {:?}, required_gas {:?}, valid {:?}",
                     hc_hash, offchain_gas, hc_ent.valid
+                );
+            } else {
+                println!(
+                    "HC bundle_proposer found no hc_ent for hc_hash {:?}",
+                    hc_hash
                 );
             }
 
             if bundle_computation_gas_limit > self.settings.max_bundle_gas {
+                println!(
+                    "HC bundle_proposer limited by computation_gas_limit(2) {:?} / {:?}",
+                    bundle_computation_gas_limit, self.settings.max_bundle_gas
+                );
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
                     op.hash(),
@@ -819,6 +845,7 @@ where
                 .bundle_expected_storage
                 .add(&simulation.expected_storage)
             {
+                println!("HC bundle_proposer limited by storage conflict");
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
                     op.hash(),
@@ -828,6 +855,7 @@ where
             } else if context.bundle_expected_storage.inner.num_slots()
                 > self.settings.max_expected_storage_slots
             {
+                println!("HC bundle_proposer limited by storage slots");
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
                     op.hash(),
@@ -844,6 +872,10 @@ where
                 // Exclude ops that access the sender of another op in the
                 // batch, but don't reject them (remove them from pool).
                 info!("Excluding op from {:?} because it accessed the address of another sender in the bundle.", op.sender());
+                println!(
+                    "HC bundle_proposer limited by sender conflict {:?}",
+                    other_sender
+                );
                 self.emit(BuilderEvent::skipped_op(
                     self.builder_tag.clone(),
                     op.hash(),
