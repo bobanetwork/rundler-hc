@@ -9,6 +9,11 @@ from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
 
+def get_handlers():
+    """Return the method signatures and the associated handlers"""
+    print("--> addsub2(uint32,uint32)")
+    return [("addsub2(uint32,uint32)",  offchain_addsub2)]
+
 def offchain_addsub2(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     """ Handler called by JSON-RPC server """
     print(

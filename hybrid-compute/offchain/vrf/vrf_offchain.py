@@ -10,15 +10,18 @@ import os
 from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
-from dotenv import load_dotenv, find_dotenv
 
 # --------------------------------------
 from fastecdsa import curve,keys,util,point
 from eth_keys import keys as ethkeys
 
-load_dotenv(find_dotenv())
 rand_key_hex = os.environ['OC_RANDOM_SECRET']
 oc_node_http = os.environ['OC_NODE_HTTP']
+
+def get_handlers():
+    """Return the method signatures and the associated handlers"""
+    print("--> random(uint256,bytes32)")
+    return [("random(uint256,bytes32)", offchain_random)]
 
 assert len(rand_key_hex) == 66
 

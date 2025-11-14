@@ -3,6 +3,11 @@ from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
 
+def get_handlers():
+    """Return the method signatures and the associated handlers"""
+    print("--> get_score(uint256)")
+    return [("get_score(uint256)",      offchain_sports_betting)]
+
 def offchain_sports_betting(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):
     """Offchain handler for the Hybrid Compute sports betting example"""
     print(f"  -> offchain_sport_betting handler called with subkey={sk} "

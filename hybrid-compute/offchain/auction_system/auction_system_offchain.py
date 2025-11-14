@@ -3,6 +3,12 @@ from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
 
+def get_handlers():
+    """Return the method signatures and the associated handlers"""
+    print("--> verifyBidder(address)")
+    return [("verifyBidder(address)",   offchain_auction)]
+
+
 blacklist = ["0x123"]
 
 def offchain_auction(ver, sk, src_addr, src_nonce, oo_nonce, payload, *args):

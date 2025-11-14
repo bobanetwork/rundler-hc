@@ -5,6 +5,11 @@ from web3 import Web3
 from eth_abi import abi as ethabi
 from hybrid_compute_sdk.server import HybridComputeSDK
 
+def get_handlers():
+    """Return the method signatures and the associated handlers"""
+    print("--> ramble(uint256,bool)")
+    return [("ramble(uint256,bool)", offchain_ramble)]
+
 wordlist = []
 def load_words():
     """Loads a list of dictionary words, assumes a standard file path"""
