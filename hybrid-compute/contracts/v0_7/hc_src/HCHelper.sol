@@ -48,6 +48,8 @@ contract HCHelper is ReentrancyGuard, UUPSUpgradeable, Initializable {
     // Contracts which are allowed to use Hybrid Compute.
     mapping(address=>callerInfo) public RegisteredCallers;
 
+    // Vesion identifier
+    string public constant version = "0.5.0";
 
     modifier onlyOwner() {
         _onlyOwner();

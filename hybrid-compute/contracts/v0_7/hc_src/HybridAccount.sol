@@ -34,6 +34,9 @@ contract HybridAccount is BaseAccount, TokenCallbackHandler, UUPSUpgradeable, In
 
     event HybridAccountInitialized(IEntryPoint indexed entryPoint, address indexed owner);
 
+    // Vesion identifier
+    string public constant version = "0.5.0";
+
     modifier onlyOwner() {
         _onlyOwner();
         _;
