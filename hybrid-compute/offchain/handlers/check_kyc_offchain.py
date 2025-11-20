@@ -1,1 +1,0 @@
-../check_kyc/check_kyc_offchain.py

@@ -4,6 +4,11 @@ This repository contains a modified version of the Rundler application which imp
 
 Additional information may be found at https://docs.boba.network/hc and https://github.com/bobanetwork/aa-hc-example.
 
+# MOVED
+
+The contracts and scripts which used to be in this location have been removed from rundler-hc and
+will be added to https://github.com/bobanetwork/aa-hc-sdk
+
 # Changelog
 
 * hc0.4.0
