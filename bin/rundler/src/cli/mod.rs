@@ -98,23 +98,27 @@ pub async fn run() -> anyhow::Result<()> {
         .node_http
         .clone()
         .expect("must provide node_http");
-    let p2 = rundler_provider::new_alloy_provider(&node_http, 120)?;
-    let hx = IHCHelper::new(opt.common.hc_helper_addr, p2);
-    let slot_idx = hx
-        .ResponseSlot()
-        .call()
-        .await
-        .expect("Failed to get ResponseSlot");
+    if opt.common.hc_helper_addr.is_zero() {
+        println!("HC helper_addr is 0; Hybrid Compute is disabled");
+    } else {
+        let p2 = rundler_provider::new_alloy_provider(&node_http, 120)?;
+        let hx = IHCHelper::new(opt.common.hc_helper_addr, p2);
+        let slot_idx = hx
+            .ResponseSlot()
+            .call()
+            .await
+            .expect("Failed to get ResponseSlot");
 
-    hybrid_compute::init(
-        opt.common.hc_helper_addr,
-        opt.common.hc_sys_account,
-        opt.common.hc_sys_owner,
-        opt.common.hc_sys_privkey,
-        cs.clone(),
-        node_http,
-        slot_idx,
-    );
+        hybrid_compute::init(
+            opt.common.hc_helper_addr,
+            opt.common.hc_sys_account,
+            opt.common.hc_sys_owner,
+            opt.common.hc_sys_privkey,
+            cs.clone(),
+            node_http,
+            slot_idx,
+        );
+    }
 
     match opt.command {
         Command::Node(args) => {
@@ -537,24 +541,32 @@ pub struct CommonArgs {
     #[arg(
         long = "hc_helper_addr",
         name = "hc_helper_addr",
-        env = "HC_HELPER_ADDR"
+        env = "HC_HELPER_ADDR",
+        default_value = "0x0000000000000000000000000000000000000000"
     )]
     hc_helper_addr: Address,
 
     #[arg(
         long = "hc_sys_account",
         name = "hc_sys_account",
-        env = "HC_SYS_ACCOUNT"
+        env = "HC_SYS_ACCOUNT",
+        default_value = "0x0000000000000000000000000000000000000000"
     )]
     hc_sys_account: Address,
 
-    #[arg(long = "hc_sys_owner", name = "hc_sys_owner", env = "HC_SYS_OWNER")]
+    #[arg(
+        long = "hc_sys_owner",
+        name = "hc_sys_owner",
+        env = "HC_SYS_OWNER",
+        default_value = "0x0000000000000000000000000000000000000000"
+    )]
     hc_sys_owner: Address,
 
     #[arg(
         long = "hc_sys_privkey",
         name = "hc_sys_privkey",
-        env = "HC_SYS_PRIVKEY"
+        env = "HC_SYS_PRIVKEY",
+        default_value = "0x0000000000000000000000000000000000000000000000000000000000000000"
     )]
     hc_sys_privkey: B256,
     #[arg(
