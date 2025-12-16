@@ -52,6 +52,10 @@ impl HcApi {
     ) -> bool {
         let mut s2 = state_override.clone().unwrap_or_default();
         let hc_addr = self.cfg.helper_addr;
+        if hc_addr.is_zero() {
+            //HC is disabled
+            return false;
+        }
 
         let mut hm = HashMap::with_hasher(FbBuildHasher::<32>::default());
 
@@ -541,6 +545,11 @@ impl HcApi {
             }
             Err(EthRpcError::ExecutionRevertedWithBytes(ref r)) => {
                 if hybrid_compute::check_trigger(&r.revert_data) {
+                    if self.cfg.helper_addr.is_zero() {
+                        let msg = "HC04: Hybrid Compute is disabled".to_owned();
+                        return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
+                    }
+
                     let map_key = hybrid_compute::hc_map_key(&r.revert_data);
                     let key: B256 = hybrid_compute::hc_storage_key(map_key);
 
