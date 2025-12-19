@@ -73,6 +73,9 @@ const EXPIRE_SECS: std::time::Duration = Duration::new(180, 0);
 /// Duration after which a cache entry is treated as stale (rejecting a userOp)
 const STALE_SECS: std::time::Duration = Duration::new(120, 0);
 
+/// Selector for "_register(address,string)"
+pub const REG_SELECTOR: &str = "aca1d472";
+
 impl Clone for HcEntry {
     fn clone(&self) -> HcEntry {
         HcEntry {

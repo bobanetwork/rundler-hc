@@ -174,6 +174,7 @@ sol!(
         // FIXME - doesn't decode callerInfo properly.
         function RegisteredCallers(address addr) external view returns (address owner, string url, uint256 credits);
         function ResponseSlot() external view returns (uint256);
+        function SelfRegister(string calldata url) external;
     }
 
     #[allow(missing_docs)]
