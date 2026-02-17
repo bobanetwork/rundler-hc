@@ -12,13 +12,13 @@
 
 use std::{convert::TryFrom, fmt::Debug};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use rundler_provider::{
     BlockId, EvmProvider, GethDebugTracerType, GethDebugTracingCallOptions,
     GethDebugTracingOptions, GethTrace, SimulationProvider,
 };
-use rundler_types::{hybrid_compute, v0_6::UserOperation, UserOperation as UserOperation2};
+use rundler_types::{UserOperation as UserOperation2, hybrid_compute, v0_6::UserOperation};
 use serde::Deserialize;
 
 use crate::simulation::context::TracerOutput;

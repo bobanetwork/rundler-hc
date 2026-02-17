@@ -11,26 +11,43 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{Address, B256, U128, U256};
+use alloy_primitives::{Address, B256, U64, U128, U256};
 use anyhow::Context;
 use async_trait::async_trait;
-use futures_util::{future, TryFutureExt};
+use futures_util::future;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use rundler_provider::{EvmProvider, FeeEstimator};
 use rundler_types::{
-    chain::{ChainSpec, IntoWithSpec},
-    pool::Pool,
-    UserOperation, UserOperationId, UserOperationVariant,
+    GasFees, UserOperation, UserOperationId, UserOperationVariant, chain::ChainSpec, pool::Pool,
 };
 use tracing::instrument;
 
 use crate::{
     eth::{EntryPointRouter, EthResult, EthRpcError},
     types::{
-        RpcMinedUserOperation, RpcUserOperation, RpcUserOperationStatus, UserOperationStatusEnum,
+        RpcMinedUserOperation, RpcSuggestedGasFees, RpcUserOperation, RpcUserOperationGasPrice,
+        RpcUserOperationStatus, UOStatusEnum, UserOperationStatusEnum,
     },
-    utils,
+    utils::{self, TryIntoRundlerType},
 };
+
+/// Settings for the rundler API
+#[derive(Clone, Copy, Debug)]
+pub struct RundlerApiSettings {
+    /// Priority fee buffer percent for gas price suggestions (e.g., 30 for 30% above current)
+    pub priority_fee_buffer_percent: u64,
+    /// Base fee buffer percent for gas price suggestions (e.g., 50 for 1.5x base fee)
+    pub base_fee_buffer_percent: u64,
+}
+
+impl Default for RundlerApiSettings {
+    fn default() -> Self {
+        Self {
+            priority_fee_buffer_percent: 30,
+            base_fee_buffer_percent: 50,
+        }
+    }
+}
 
 #[rpc(client, server, namespace = "rundler")]
 pub trait RundlerApi {
@@ -73,6 +90,10 @@ pub trait RundlerApi {
         sender: Address,
         nonce: U256,
     ) -> RpcResult<Option<RpcUserOperation>>;
+
+    /// Returns suggested gas prices for user operations
+    #[method(name = "getUserOperationGasPrice")]
+    async fn get_user_operation_gas_price(&self) -> RpcResult<RpcUserOperationGasPrice>;
 }
 
 pub(crate) struct RundlerApi<P, F, E> {
@@ -81,6 +102,7 @@ pub(crate) struct RundlerApi<P, F, E> {
     pool_server: P,
     entry_point_router: EntryPointRouter,
     evm_provider: E,
+    settings: RundlerApiSettings,
 }
 
 #[async_trait]
@@ -137,7 +159,7 @@ where
 
     #[instrument(
         skip_all,
-        fields(rpc_method = "rundler_getPendingUserOperationForSenderNonce")
+        fields(rpc_method = "rundler_getPendingUserOperationBySenderNonce")
     )]
     async fn get_pending_user_operation_by_sender_nonce(
         &self,
@@ -147,6 +169,15 @@ where
         utils::safe_call_rpc_handler(
             "rundler_getPendingUserOperationBySenderNonce",
             RundlerApi::get_pending_user_operation_by_sender_nonce(self, sender, nonce),
+        )
+        .await
+    }
+
+    #[instrument(skip_all, fields(rpc_method = "rundler_getUserOperationGasPrice"))]
+    async fn get_user_operation_gas_price(&self) -> RpcResult<RpcUserOperationGasPrice> {
+        utils::safe_call_rpc_handler(
+            "rundler_getUserOperationGasPrice",
+            RundlerApi::get_user_operation_gas_price(self),
         )
         .await
     }
@@ -164,6 +195,7 @@ where
         pool_server: P,
         fee_estimator: F,
         evm_provider: E,
+        settings: RundlerApiSettings,
     ) -> Self {
         Self {
             chain_spec: chain_spec.clone(),
@@ -171,15 +203,22 @@ where
             pool_server,
             fee_estimator,
             evm_provider,
+            settings,
         }
     }
     #[instrument(skip_all)]
     async fn max_priority_fee_per_gas(&self) -> EthResult<U128> {
-        let (bundle_fees, _) = self
+        let estimate = self
             .fee_estimator
-            .latest_bundle_fees()
+            .latest_fee_estimate()
             .await
             .context("should get required fees")?;
+        let bundle_fees = GasFees {
+            max_fee_per_gas: estimate
+                .required_base_fee
+                .saturating_add(estimate.required_priority_fee),
+            max_priority_fee_per_gas: estimate.required_priority_fee,
+        };
         Ok(U128::from(
             self.fee_estimator
                 .required_op_fees(bundle_fees)
@@ -192,7 +231,15 @@ where
         user_op: RpcUserOperation,
         entry_point: Address,
     ) -> EthResult<Option<B256>> {
-        let uo: UserOperationVariant = user_op.into_with_spec(&self.chain_spec);
+        let Some(ep_version) = self.chain_spec.entry_point_version(entry_point) else {
+            Err(EthRpcError::InvalidParams(format!(
+                "Unsupported entry point: {:?}",
+                entry_point
+            )))?
+        };
+
+        let uo: UserOperationVariant =
+            user_op.try_into_rundler_type(&self.chain_spec, ep_version)?;
         let id = uo.id();
 
         if uo.pre_verification_gas() != 0
@@ -248,7 +295,9 @@ where
             self.entry_point_router
                 .get_mined_from_tx_receipt(&entry_point, uo_hash, tx_receipt);
 
-        let (uo, receipt) = future::try_join(uo_fut, receipt_fut).await?;
+        let (uo_result, receipt_result) = future::join(uo_fut, receipt_fut).await;
+        let uo = uo_result.map_err(EthRpcError::from)?;
+        let receipt = receipt_result.map_err(EthRpcError::from)?;
 
         match (uo, receipt) {
             (Some(uo), Some(mut receipt)) => {
@@ -265,36 +314,79 @@ where
     }
 
     async fn get_user_operation_status(&self, uo_hash: B256) -> EthResult<RpcUserOperationStatus> {
-        let receipt_futs = self
-            .entry_point_router
-            .entry_points()
-            .map(|ep| self.entry_point_router.get_receipt(ep, uo_hash));
-
-        let pending_fut = self
+        // Fetch pool status first to get preconf info for the mined query
+        let op_status = self
             .pool_server
-            .get_op_by_hash(uo_hash)
-            .map_err(EthRpcError::from);
+            .get_op_status(uo_hash)
+            .await
+            .map_err(EthRpcError::from)?;
 
-        let (receipts, pending) =
-            future::try_join(future::try_join_all(receipt_futs), pending_fut).await?;
-
-        if let Some(receipt) = receipts.into_iter().find(|r| r.is_some()) {
-            return Ok(RpcUserOperationStatus {
-                status: UserOperationStatusEnum::Mined,
-                receipt,
+        // Fetch mined UO + receipt.
+        // If preconfirmed, we know the entry point so query it directly.
+        // Otherwise, fan out to all entry points.
+        let mined_results = if let Some(pool_status) = op_status.as_ref()
+            && self.chain_spec.flashblocks_enabled
+            && let Some(preconf_info) = &pool_status.preconf_info
+        {
+            let ret = self
+                .entry_point_router
+                .get_mined_and_receipt(
+                    &pool_status.entry_point,
+                    uo_hash,
+                    Some(preconf_info.tx_hash),
+                )
+                .await;
+            match ret {
+                Ok(result) => vec![result],
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to retrieve receipt for preconfirmed UO {uo_hash}: {e}. Treating as pending."
+                    );
+                    vec![]
+                }
+            }
+        } else {
+            let mined_futs = self.entry_point_router.entry_points().map(|ep| {
+                self.entry_point_router
+                    .get_mined_and_receipt(ep, uo_hash, None)
             });
+            future::try_join_all(mined_futs)
+                .await
+                .map_err(EthRpcError::from)?
+        };
+
+        // Check for mined/preconfirmed receipt first (includes user operation)
+        if let Some((uo_by_hash, receipt)) = mined_results.into_iter().find_map(|r| r) {
+            let status = match receipt.status {
+                UOStatusEnum::Mined => UserOperationStatusEnum::Mined,
+                UOStatusEnum::Preconfirmed => UserOperationStatusEnum::Preconfirmed,
+            };
+
+            // For preconfirmed, include pool status since op is still in pool
+            let mut rpc_status: RpcUserOperationStatus = op_status
+                .map(RpcUserOperationStatus::from)
+                .unwrap_or_default();
+
+            rpc_status.status = status;
+            rpc_status.receipt = Some(receipt);
+            rpc_status.user_operation = Some(uo_by_hash.user_operation);
+
+            return Ok(rpc_status);
         }
 
-        if pending.is_some() {
-            return Ok(RpcUserOperationStatus {
-                status: UserOperationStatusEnum::Pending,
-                receipt: None,
-            });
+        // If found in pool, return extended status
+        if let Some(pool_status) = op_status {
+            return Ok(pool_status.into());
         }
 
         Ok(RpcUserOperationStatus {
             status: UserOperationStatusEnum::Unknown,
             receipt: None,
+            user_operation: None,
+            added_at_block: None,
+            valid_until: None,
+            valid_after: None,
+            pending_bundle: None,
         })
     }
 
@@ -310,5 +402,51 @@ where
             .map_err(EthRpcError::from)?;
 
         Ok(uo.map(|uo| uo.uo.into()))
+    }
+
+    #[instrument(skip_all)]
+    async fn get_user_operation_gas_price(&self) -> EthResult<RpcUserOperationGasPrice> {
+        // Get base fee, priority fee (with bundler overhead), and block number
+        let estimate = self
+            .fee_estimator
+            .latest_fee_estimate()
+            .await
+            .context("should get fee estimate")?;
+        let bundle_fees = GasFees {
+            max_fee_per_gas: estimate
+                .required_base_fee
+                .saturating_add(estimate.required_priority_fee),
+            max_priority_fee_per_gas: estimate.required_priority_fee,
+        };
+
+        // Convert to user operation fees (current required)
+        let op_fees = self.fee_estimator.required_op_fees(bundle_fees);
+        let priority_fee = op_fees.max_priority_fee_per_gas;
+
+        // Calculate suggested priority fee with configured buffer
+        let priority_multiplier =
+            100u128.saturating_add(u128::from(self.settings.priority_fee_buffer_percent));
+        let suggested_priority_fee = priority_fee
+            .saturating_mul(priority_multiplier)
+            .saturating_div(100);
+
+        // Calculate suggested max fee with configured base fee buffer
+        let base_fee_multiplier =
+            100u128.saturating_add(u128::from(self.settings.base_fee_buffer_percent));
+        let suggested_max_fee = estimate
+            .required_base_fee
+            .saturating_mul(base_fee_multiplier)
+            .saturating_div(100)
+            .saturating_add(suggested_priority_fee);
+
+        Ok(RpcUserOperationGasPrice {
+            priority_fee: U128::from(priority_fee),
+            base_fee: U128::from(estimate.base_fee),
+            block_number: U64::from(estimate.block_number),
+            suggested: RpcSuggestedGasFees {
+                max_priority_fee_per_gas: U128::from(suggested_priority_fee),
+                max_fee_per_gas: U128::from(suggested_max_fee),
+            },
+        })
     }
 }

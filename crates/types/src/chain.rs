@@ -18,10 +18,14 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 
-use crate::{aggregator::SignatureAggregator, da::DAGasOracleType, proxy::SubmissionProxy};
+use crate::{
+    EntryPointVersion, aggregator::SignatureAggregator, da::DAGasOracleType, proxy::SubmissionProxy,
+};
 
 const ENTRY_POINT_ADDRESS_V0_6: &str = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
 const ENTRY_POINT_ADDRESS_V0_7: &str = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+const ENTRY_POINT_ADDRESS_V0_8: &str = "0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108";
+const ENTRY_POINT_ADDRESS_V0_9: &str = "0x433709009B8330FDa32311DF1C2AFA402eD8D009";
 const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 /// Chain specification for Rundler
@@ -38,8 +42,14 @@ pub struct ChainSpec {
     pub entry_point_address_v0_6: Address,
     /// entry point address for v0_7
     pub entry_point_address_v0_7: Address,
+    /// entry point address for v0.8
+    pub entry_point_address_v0_8: Address,
+    /// entry point address for v0.9
+    pub entry_point_address_v0_9: Address,
     /// address of the multicall3 contract
     pub multicall3_address: Address,
+    /// flashblocks enabled
+    pub flashblocks_enabled: bool,
 
     /// Overhead when preforming gas estimation to account for the deposit storage
     /// and transfer overhead.
@@ -51,6 +61,8 @@ pub struct ChainSpec {
     pub max_transaction_size_bytes: usize,
     /// the block gas limit
     pub block_gas_limit: u64,
+    /// the transaction gas limit, 0 indicates no limit
+    pub transaction_gas_limit: u64,
     /// Intrinsic gas cost for a transaction
     pub transaction_intrinsic_gas: u64,
     /// Per user operation gas cost for v0.6
@@ -86,7 +98,7 @@ pub struct ChainSpec {
      */
     /// true if eip1559 is enabled, and thus priority fees are used
     pub eip1559_enabled: bool,
-    /// true if eip7702 is enabled, and thus the 7702 priority fee mechanism is used
+    /// true if eip7702 is enabled
     pub eip7702_enabled: bool,
     /// true if eip7623 is enabled, and thus the 7623 calldata floor mechanism is used
     pub eip7623_enabled: bool,
@@ -108,6 +120,8 @@ pub struct ChainSpec {
     /// Some chains have artificially high block gas limits but
     /// actually cap block gas usage at a lower value.
     pub congestion_trigger_usage_ratio_threshold: f64,
+    /// A boolean value to set whether to add the total gas limit for an op to the PVG calculation
+    pub charge_gas_limit_via_pvg: bool,
 
     /*
      * Bundle building
@@ -169,8 +183,12 @@ impl Default for ChainSpec {
             block_gas_limit: 30_000_000,
             entry_point_address_v0_6: Address::from_str(ENTRY_POINT_ADDRESS_V0_6).unwrap(),
             entry_point_address_v0_7: Address::from_str(ENTRY_POINT_ADDRESS_V0_7).unwrap(),
+            entry_point_address_v0_8: Address::from_str(ENTRY_POINT_ADDRESS_V0_8).unwrap(),
+            entry_point_address_v0_9: Address::from_str(ENTRY_POINT_ADDRESS_V0_9).unwrap(),
             multicall3_address: Address::from_str(MULTICALL3_ADDRESS).unwrap(),
+            flashblocks_enabled: false,
             deposit_transfer_overhead: 30_000,
+            transaction_gas_limit: 0,
             transaction_intrinsic_gas: 21_000,
             per_user_op_v0_6_gas: 18_300,
             per_user_op_v0_7_gas: 19_500,
@@ -191,6 +209,7 @@ impl Default for ChainSpec {
             min_max_priority_fee_per_gas: 0,
             max_max_priority_fee_per_gas: u64::MAX,
             congestion_trigger_usage_ratio_threshold: 0.75,
+            charge_gas_limit_via_pvg: false,
             max_transaction_size_bytes: 131072, // 128 KiB
             bundle_max_send_interval_millis: 1000,
             flashbots_enabled: false,
@@ -212,6 +231,17 @@ impl ChainSpec {
     /// Get the transaction intrinsic gas
     pub fn transaction_intrinsic_gas(&self) -> u128 {
         self.transaction_intrinsic_gas as u128
+    }
+
+    /// Resolve the transaction gas limit
+    ///
+    /// If the transaction gas limit is 0, the block gas limit is returned.
+    pub fn transaction_gas_limit(&self) -> u128 {
+        if self.transaction_gas_limit > 0 {
+            self.transaction_gas_limit as u128
+        } else {
+            self.block_gas_limit as u128
+        }
     }
 
     /// Get the minimum max priority fee per gas
@@ -273,8 +303,8 @@ impl ChainSpec {
     }
 
     /// Calculate a multiple of the block limit
-    pub fn block_gas_limit_mult(&self, mult: f64) -> u128 {
-        (self.block_gas_limit as f64 * mult) as u128
+    pub fn transaction_gas_limit_mult(&self, mult: f64) -> u128 {
+        (self.transaction_gas_limit() as f64 * mult) as u128
     }
 
     /// Set signature aggregators
@@ -313,7 +343,28 @@ impl ChainSpec {
 
     /// Check if the chain supports EIP-7702
     pub fn supports_eip7702(&self, entry_point: Address) -> bool {
-        self.eip7702_enabled || entry_point == self.entry_point_address_v0_7
+        self.eip7702_enabled && entry_point != self.entry_point_address_v0_6
+    }
+
+    /// Get the entry point address for a given version
+    pub fn entry_point_address(&self, entry_point_version: EntryPointVersion) -> Address {
+        match entry_point_version {
+            EntryPointVersion::V0_6 => self.entry_point_address_v0_6,
+            EntryPointVersion::V0_7 => self.entry_point_address_v0_7,
+            EntryPointVersion::V0_8 => self.entry_point_address_v0_8,
+            EntryPointVersion::V0_9 => self.entry_point_address_v0_9,
+        }
+    }
+
+    /// Get the entry point version for a given address
+    pub fn entry_point_version(&self, entry_point: Address) -> Option<EntryPointVersion> {
+        match entry_point {
+            ep if ep == self.entry_point_address_v0_6 => Some(EntryPointVersion::V0_6),
+            ep if ep == self.entry_point_address_v0_7 => Some(EntryPointVersion::V0_7),
+            ep if ep == self.entry_point_address_v0_8 => Some(EntryPointVersion::V0_8),
+            ep if ep == self.entry_point_address_v0_9 => Some(EntryPointVersion::V0_9),
+            _ => None,
+        }
     }
 }
 

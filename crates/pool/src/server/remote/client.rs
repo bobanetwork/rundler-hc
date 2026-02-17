@@ -17,17 +17,17 @@ use alloy_primitives::{Address, B256};
 use anyhow::Context;
 use futures_util::Stream;
 use rundler_task::{
-    grpc::protos::{from_bytes, ConversionError, ToProtoBytes},
-    server::{HealthCheck, ServerStatus},
     TaskSpawner,
+    grpc::protos::{ConversionError, ToProtoBytes, from_bytes},
+    server::{HealthCheck, ServerStatus},
 };
 use rundler_types::{
+    EntityUpdate, UserOperationId, UserOperationPermissions, UserOperationVariant,
     chain::ChainSpec,
     pool::{
-        NewHead, PaymasterMetadata, Pool, PoolError, PoolOperation, PoolOperationSummary,
-        PoolResult, Reputation, ReputationStatus, StakeStatus,
+        NewHead, PaymasterMetadata, Pool, PoolError, PoolOperation, PoolOperationStatus,
+        PoolOperationSummary, PoolResult, Reputation, ReputationStatus, StakeStatus,
     },
-    EntityUpdate, UserOperationId, UserOperationPermissions, UserOperationVariant,
 };
 use rundler_utils::retry::{self, UnlimitedRetryOpts};
 use tokio::sync::mpsc;
@@ -37,22 +37,22 @@ use tonic::{
     transport::{Channel, Uri},
 };
 use tonic_health::{
-    pb::{health_client::HealthClient, HealthCheckRequest},
     ServingStatus,
+    pb::{HealthCheckRequest, health_client::HealthClient},
 };
 
 use super::protos::{
-    self, add_op_response, admin_set_tracking_response, debug_clear_state_response,
-    debug_dump_mempool_response, debug_dump_paymaster_balances_response,
-    debug_dump_reputation_response, debug_set_reputation_response, get_op_by_hash_response,
-    get_op_by_id_response, get_ops_by_hashes_response, get_ops_response,
-    get_ops_summaries_response, get_reputation_status_response, get_stake_status_response,
-    op_pool_client::OpPoolClient, remove_op_by_id_response, remove_ops_response,
-    update_entities_response, AddOpRequest, AdminSetTrackingRequest, DebugClearStateRequest,
-    DebugDumpMempoolRequest, DebugDumpPaymasterBalancesRequest, DebugDumpReputationRequest,
-    DebugSetReputationRequest, GetOpByIdRequest, GetOpsRequest, GetReputationStatusRequest,
-    GetStakeStatusRequest, RemoveOpsRequest, ReputationStatus as ProtoReputationStatus,
-    SubscribeNewHeadsRequest, SubscribeNewHeadsResponse, TryUoFromProto, UpdateEntitiesRequest,
+    self, AddOpRequest, AdminSetTrackingRequest, DebugClearStateRequest, DebugDumpMempoolRequest,
+    DebugDumpPaymasterBalancesRequest, DebugDumpReputationRequest, DebugSetReputationRequest,
+    GetOpByIdRequest, GetOpsRequest, GetReputationStatusRequest, GetStakeStatusRequest,
+    RemoveOpsRequest, ReputationStatus as ProtoReputationStatus, SubscribeNewHeadsRequest,
+    SubscribeNewHeadsResponse, TryUoFromProto, UpdateEntitiesRequest, add_op_response,
+    admin_set_tracking_response, debug_clear_state_response, debug_dump_mempool_response,
+    debug_dump_paymaster_balances_response, debug_dump_reputation_response,
+    debug_set_reputation_response, get_op_by_hash_response, get_op_by_id_response,
+    get_ops_by_hashes_response, get_ops_response, get_ops_summaries_response,
+    get_reputation_status_response, get_stake_status_response, op_pool_client::OpPoolClient,
+    remove_op_by_id_response, remove_ops_response, update_entities_response,
 };
 
 /// Remote pool client
@@ -63,7 +63,7 @@ pub struct RemotePoolClient {
     chain_spec: ChainSpec,
     op_pool_client: OpPoolClient<Channel>,
     op_pool_health: HealthClient<Channel>,
-    task_spawner: Box<dyn TaskSpawner>,
+    task_spawner: Box<dyn TaskSpawner + Send + Sync>,
 }
 
 impl RemotePoolClient {
@@ -71,7 +71,7 @@ impl RemotePoolClient {
     pub async fn connect(
         url: String,
         chain_spec: ChainSpec,
-        task_spawner: Box<dyn TaskSpawner>,
+        task_spawner: Box<dyn TaskSpawner + Send + Sync>,
     ) -> anyhow::Result<Self> {
         let op_pool_client = OpPoolClient::connect(url.clone()).await?;
         let op_pool_health =
@@ -311,7 +311,9 @@ impl Pool for RemotePoolClient {
                     PoolOperation::try_uo_from_proto(proto_uo, &self.chain_spec)
                         .context("should convert proto uo to pool operation")
                 })
-                .transpose()?),
+                .transpose()
+                .map_err(PoolError::from)?),
+
             Some(get_op_by_hash_response::Result::Failure(e)) => match e.error {
                 Some(_) => Err(e.try_into()?),
                 None => Err(PoolError::Other(anyhow::anyhow!(
@@ -682,6 +684,66 @@ impl Pool for RemotePoolClient {
                 client, tx, to_track,
             )));
         Ok(Box::pin(UnboundedReceiverStream::new(rx)))
+    }
+
+    async fn notify_pending_bundle(
+        &self,
+        entry_point: Address,
+        tx_hash: B256,
+        sent_at_block: u64,
+        builder_address: Address,
+        uo_hashes: Vec<B256>,
+    ) -> PoolResult<()> {
+        let res = self
+            .op_pool_client
+            .clone()
+            .notify_pending_bundle(protos::NotifyPendingBundleRequest {
+                entry_point: entry_point.to_proto_bytes(),
+                tx_hash: tx_hash.to_proto_bytes(),
+                sent_at_block,
+                builder_address: builder_address.to_proto_bytes(),
+                uo_hashes: uo_hashes.into_iter().map(|h| h.to_proto_bytes()).collect(),
+            })
+            .await
+            .map_err(anyhow::Error::from)?
+            .into_inner()
+            .result;
+
+        match res {
+            Some(protos::notify_pending_bundle_response::Result::Success(_)) => Ok(()),
+            Some(protos::notify_pending_bundle_response::Result::Failure(f)) => Err(f.try_into()?),
+            None => Err(PoolError::Other(anyhow::anyhow!(
+                "should have received result from op pool"
+            )))?,
+        }
+    }
+
+    async fn get_op_status(&self, hash: B256) -> PoolResult<Option<PoolOperationStatus>> {
+        let res = self
+            .op_pool_client
+            .clone()
+            .get_op_status(protos::GetOpStatusRequest {
+                hash: hash.to_proto_bytes(),
+            })
+            .await
+            .map_err(anyhow::Error::from)?
+            .into_inner()
+            .result;
+
+        match res {
+            Some(protos::get_op_status_response::Result::Success(s)) => s
+                .status
+                .map(|proto_status| {
+                    PoolOperationStatus::try_uo_from_proto(proto_status, &self.chain_spec)
+                        .context("should convert proto status to pool operation status")
+                        .map_err(PoolError::from)
+                })
+                .transpose(),
+            Some(protos::get_op_status_response::Result::Failure(f)) => Err(f.try_into()?),
+            None => Err(PoolError::Other(anyhow::anyhow!(
+                "should have received result from op pool"
+            )))?,
+        }
     }
 }
 

@@ -13,15 +13,15 @@
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use futures::FutureExt;
 use rundler_provider::{EntryPoint, Providers, ProvidersWithEntryPointT};
 use rundler_sim::{
-    simulation::{self, UnsafeSimulator},
     PrecheckerImpl, Simulator,
+    simulation::{self, UnsafeSimulator},
 };
 use rundler_task::TaskSpawnerExt;
-use rundler_types::{chain::ChainSpec, EntryPointVersion, UserOperation, UserOperationVariant};
+use rundler_types::{EntryPointAbiVersion, UserOperation, UserOperationVariant, chain::ChainSpec};
 use rundler_utils::emit::WithEntryPoint;
 use tokio::sync::broadcast;
 
@@ -108,6 +108,7 @@ where
                 .iter()
                 .map(|config| (config.entry_point, config.entry_point_version))
                 .collect(),
+            flashblocks: self.args.chain_spec.flashblocks_enabled,
         };
 
         let chain = Chain::new(self.providers.evm().clone(), chain_settings);
@@ -120,8 +121,8 @@ where
         // create mempools
         let mut mempools = HashMap::new();
         for pool_config in &self.args.pool_configs {
-            match pool_config.entry_point_version {
-                EntryPointVersion::V0_6 => {
+            match pool_config.entry_point_version.abi_version() {
+                EntryPointAbiVersion::V0_6 => {
                     let pool = self
                         .create_mempool_v0_6(
                             &task_spawner,
@@ -134,7 +135,7 @@ where
 
                     mempools.insert(pool_config.entry_point, pool);
                 }
-                EntryPointVersion::V0_7 => {
+                EntryPointAbiVersion::V0_7 => {
                     let pool = self
                         .create_mempool_v0_7(
                             &task_spawner,
@@ -146,9 +147,6 @@ where
                         .context("should have created mempool")?;
 
                     mempools.insert(pool_config.entry_point, pool);
-                }
-                EntryPointVersion::Unspecified => {
-                    bail!("Unsupported entry point version");
                 }
             }
         }
@@ -206,6 +204,7 @@ where
             let simulator = UnsafeSimulator::new(
                 ep_providers.entry_point().clone(),
                 pool_config.sim_settings.clone(),
+                &pool_config.mempool_channel_configs,
             );
             self.create_mempool(
                 task_spawner,
@@ -246,14 +245,18 @@ where
     {
         let ep_providers = self
             .providers
-            .ep_v0_7_providers()
+            .ep_v0_7_providers(pool_config.entry_point_version)
             .clone()
-            .context("entry point v0.7 not supplied")?;
+            .context(format!(
+                "entry point v0.7 not supplied for entry point version: {:?}",
+                pool_config.entry_point_version
+            ))?;
 
         if unsafe_mode {
             let simulator = UnsafeSimulator::new(
                 ep_providers.entry_point().clone(),
                 pool_config.sim_settings.clone(),
+                &pool_config.mempool_channel_configs,
             );
             self.create_mempool(
                 task_spawner,

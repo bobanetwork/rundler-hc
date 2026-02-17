@@ -32,8 +32,10 @@ futures-util.workspace = true
 metrics.workspace = true
 metrics-derive.workspace = true
 mockall = { workspace = true, optional = true }
+moka = { version = "0.12.11", features = ["future"] }
 pin-project.workspace = true
 rand.workspace = true
+regex.workspace = true
 reth-tasks = { workspace = true, features = ["rayon"] }
 rundler-bindings-fastlz.workspace = true
 rundler-contracts.workspace = true
@@ -46,10 +48,10 @@ tower.workspace = true
 tracing.workspace = true
 url.workspace = true
 
-[features]
-test-utils = ["mockall"]
-
 [dev-dependencies]
 alloy-provider = { workspace = true, features = ["debug-api", "anvil-node"] }
 tiny_http.workspace = true
 tokio.workspace = true
+
+[features]
+test-utils = ["mockall"]

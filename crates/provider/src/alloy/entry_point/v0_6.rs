@@ -13,22 +13,17 @@
 
 use alloy_contract::Error as ContractError;
 use alloy_eips::eip7702::SignedAuthorization;
-use alloy_primitives::{aliases::U192, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, aliases::U192};
 use alloy_provider::network::{AnyNetwork, TransactionBuilder7702};
-/* FIXME
-//use alloy_provider::Provider as AlloyProvider;
-use alloy_rpc_types_eth::{state::StateOverride, BlockId /*, TransactionRequest*/};
-use alloy_serde::WithOtherFields;
-use alloy_sol_types::{ContractError as SolContractError, SolCall, SolError, SolInterface};
-use alloy_transport::{Transport, TransportError};
-*/
-use alloy_rpc_types_eth::{state::StateOverride, BlockId};
-use alloy_sol_types::{ContractError as SolContractError, SolError, SolInterface};
+use alloy_rpc_types_eth::{
+    BlockId,
+    state::{AccountOverride, StateOverride},
+};
+use alloy_sol_types::{ContractError as SolContractError, SolInterface};
 use alloy_transport::TransportError;
 use anyhow::Context;
 use rundler_contracts::v0_6::{
-    DepositInfo as DepositInfoV0_6,
-    GetBalances::{self, GetBalancesResult},
+    DepositInfo as DepositInfoV0_6, ENTRY_POINT_V0_6_DEPLOYED_BYTECODE, GetEntryPointBalances,
     IAggregator,
     IEntryPoint::{
         ExecutionResult as ExecutionResultV0_6, FailedOp, IEntryPointCalls, IEntryPointErrors,
@@ -37,11 +32,13 @@ use rundler_contracts::v0_6::{
     UserOperation as ContractUserOperation, UserOpsPerAggregator as UserOpsPerAggregatorV0_6,
 };
 use rundler_types::{
-    chain::ChainSpec,
-    da::{DAGasBlockData, DAGasData},
-    v0_6::{UserOperation, UserOperationBuilder},
     EntryPointVersion, GasFees, UserOperation as _, UserOpsPerAggregator, ValidationOutput,
     ValidationRevert,
+    authorization::Eip7702Auth,
+    chain::ChainSpec,
+    constants::SIMULATION_SENDER,
+    da::{DAGasBlockData, DAGasData},
+    v0_6::{UserOperation, UserOperationBuilder},
 };
 use rundler_utils::authorization_utils;
 use tracing::instrument;
@@ -142,23 +139,29 @@ where
 
     #[instrument(skip_all)]
     async fn get_balances(&self, addresses: Vec<Address>) -> ProviderResult<Vec<U256>> {
-        let provider = self.i_entry_point.provider();
-        let call = GetBalances::deploy_builder(provider, *self.address(), addresses)
-            .into_transaction_request();
-        let out = provider
-            .call(call)
-            .await
-            .err()
-            .context("get balances call should revert")?;
-        let out = GetBalancesResult::abi_decode(
-            &out.as_error_resp()
-                .context("get balances call should revert")?
-                .as_revert_data()
-                .context("should get revert data from get balances call")?,
-        )
-        .context("should decode revert data from get balances call")?;
+        let helper_addr = Address::random();
+        let helper = GetEntryPointBalances::new(helper_addr, self.i_entry_point.provider());
+        let mut overrides = StateOverride::default();
+        let account = AccountOverride {
+            code: Some(GetEntryPointBalances::DEPLOYED_BYTECODE.clone()),
+            ..Default::default()
+        };
+        overrides.insert(helper_addr, account);
+        let ret = helper
+            .getBalances(*self.address(), addresses.clone())
+            .state(overrides)
+            .call()
+            .await?;
 
-        Ok(out.balances)
+        if ret.len() != addresses.len() {
+            return Err(anyhow::anyhow!(
+                "expected {} balances, got {}",
+                addresses.len(),
+                ret.len()
+            )
+            .into());
+        }
+        Ok(ret)
     }
 }
 
@@ -179,12 +182,12 @@ where
         let ops_len = ops.len();
         let da_gas: u64 = ops
             .iter()
-            .map(|op: &UserOperation| {
+            .map(|op| {
                 op.pre_verification_da_gas_limit(&self.chain_spec, Some(ops_len))
+                    .try_into()
+                    .unwrap_or(u64::MAX)
             })
-            .sum::<u128>()
-            .try_into()
-            .unwrap_or(u64::MAX);
+            .sum::<u64>();
         let ops: Vec<ContractUserOperation> = ops.into_iter().map(Into::into).collect();
 
         let result = aggregator
@@ -216,7 +219,7 @@ where
         user_op: Self::UO,
     ) -> ProviderResult<AggregatorOut> {
         let aggregator = IAggregator::new(aggregator_address, self.i_entry_point.provider());
-        let da_gas: u64 = user_op
+        let da_gas = user_op
             .pre_verification_da_gas_limit(&self.chain_spec, Some(1))
             .try_into()
             .unwrap_or(u64::MAX);
@@ -338,9 +341,11 @@ where
 
     fn decode_ops_from_calldata(
         chain_spec: &ChainSpec,
+        address: Address,
         calldata: &Bytes,
+        _auth_list: &[Eip7702Auth],
     ) -> Vec<UserOpsPerAggregator<UserOperation>> {
-        decode_ops_from_calldata(chain_spec, calldata)
+        decode_ops_from_calldata(chain_spec, address, calldata)
     }
 }
 
@@ -366,6 +371,7 @@ where
         let txn_request = self
             .i_entry_point
             .handleOps(vec![user_op.into()], Address::random())
+            .from(SIMULATION_SENDER)
             .into_transaction_request();
 
         let data = txn_request.inner.input.into_input().unwrap();
@@ -402,13 +408,14 @@ where
         &self,
         user_op: UserOperation,
     ) -> ProviderResult<(TransactionRequest, StateOverride)> {
-        let da_gas: u64 = user_op
+        let da_gas = user_op
             .pre_verification_da_gas_limit(&self.chain_spec, Some(1))
             .try_into()
             .unwrap_or(u64::MAX);
         let call = self
             .i_entry_point
             .simulateValidation(user_op.into())
+            .from(SIMULATION_SENDER)
             .gas(self.max_verification_gas.saturating_add(da_gas))
             .into_transaction_request();
         Ok((call.inner, StateOverride::default()))
@@ -420,13 +427,15 @@ where
         user_op: UserOperation,
         block_id: Option<BlockId>,
     ) -> ProviderResult<Result<ValidationOutput, ValidationRevert>> {
-        let da_gas: u64 = user_op
+        let da_gas = user_op
             .pre_verification_da_gas_limit(&self.chain_spec, Some(1))
             .try_into()
             .unwrap_or(u64::MAX);
+
         let blockless = self
             .i_entry_point
             .simulateValidation(user_op.into())
+            .from(SIMULATION_SENDER)
             .gas(self.max_verification_gas.saturating_add(da_gas));
         let call = match block_id {
             Some(block_id) => blockless.block(block_id),
@@ -544,6 +553,10 @@ where
     fn simulation_should_revert(&self) -> bool {
         true
     }
+
+    fn get_simulations_bytecode(&self) -> &Bytes {
+        &ENTRY_POINT_V0_6_DEPLOYED_BYTECODE
+    }
 }
 
 impl<AP, D> EntryPointProviderTrait<UserOperation> for EntryPointProvider<AP, D>
@@ -586,12 +599,14 @@ fn get_handle_ops_call<AP: AlloyProvider>(
             entry_point
                 .handleOps(ops_per_aggregator.swap_remove(0).userOps, sender_eoa)
                 .chain_id(chain_id)
+                .from(SIMULATION_SENDER)
                 .into_transaction_request()
                 .inner
         } else {
             entry_point
                 .handleAggregatedOps(ops_per_aggregator, sender_eoa)
                 .chain_id(chain_id)
+                .from(SIMULATION_SENDER)
                 .into_transaction_request()
                 .inner
         };
@@ -615,12 +630,16 @@ fn get_handle_ops_call<AP: AlloyProvider>(
 /// Decode user ops from calldata
 pub fn decode_ops_from_calldata(
     chain_spec: &ChainSpec,
+    address: Address,
     calldata: &Bytes,
 ) -> Vec<UserOpsPerAggregator<UserOperation>> {
     let entry_point_calls = match IEntryPointCalls::abi_decode(calldata) {
         Ok(entry_point_calls) => entry_point_calls,
         Err(_) => return vec![],
     };
+    if address != chain_spec.entry_point_address_v0_6 {
+        return vec![];
+    }
 
     match entry_point_calls {
         IEntryPointCalls::handleOps(handle_ops_call) => {
@@ -674,7 +693,7 @@ async fn simulate_handle_op_inner<S: SimulationProvider, AP: AlloyProvider>(
     block_id: BlockId,
     mut state_override: StateOverride,
 ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>> {
-    let da_gas: u64 = op
+    let da_gas = op
         .pre_verification_da_gas_limit(chain_spec, Some(1))
         .try_into()
         .unwrap_or(u64::MAX);
@@ -692,6 +711,7 @@ async fn simulate_handle_op_inner<S: SimulationProvider, AP: AlloyProvider>(
         .block(block_id)
         .gas(execution_gas_limit.saturating_add(da_gas))
         .state(state_override)
+        .from(SIMULATION_SENDER)
         .call()
         .await
         .err()

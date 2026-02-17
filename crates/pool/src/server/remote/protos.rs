@@ -11,10 +11,17 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{Address, B256};
-use anyhow::{anyhow, Context};
-use rundler_task::grpc::protos::{from_bytes, ConversionError, ToProtoBytes};
+use alloy_eips::eip7702::{Authorization, SignedAuthorization};
+use alloy_primitives::{Address, B256, U256};
+use anyhow::{Context, anyhow};
+use rundler_task::grpc::protos::{ConversionError, ToProtoBytes, from_bytes};
 use rundler_types::{
+    BundlerSponsorship as RundlerBundlerSponsorship, Entity as RundlerEntity, EntityInfos,
+    EntityType as RundlerEntityType, EntityUpdate as RundlerEntityUpdate,
+    EntityUpdateType as RundlerEntityUpdateType, EntryPointVersion as RundlerEntryPointVersion,
+    StakeInfo as RundlerStakeInfo, UserOperation as _,
+    UserOperationPermissions as RundlerUserOperationPermissions, UserOperationVariant,
+    ValidTimeRange,
     authorization::Eip7702Auth,
     chain::ChainSpec,
     da::{
@@ -23,15 +30,13 @@ use rundler_types::{
     },
     pool::{
         AddressUpdate as PoolAddressUpdate, NewHead as PoolNewHead,
-        PaymasterMetadata as PoolPaymasterMetadata, PoolOperation,
-        PoolOperationSummary as RundlerPoolOperationSummary, Reputation as PoolReputation,
-        ReputationStatus as PoolReputationStatus, StakeStatus as RundlerStakeStatus,
+        PaymasterMetadata as PoolPaymasterMetadata, PendingBundleInfo as RundlerPendingBundleInfo,
+        PoolOperation, PoolOperationStatus as RundlerPoolOperationStatus,
+        PoolOperationSummary as RundlerPoolOperationSummary, PreconfInfo as RundlerPreconfInfo,
+        Reputation as PoolReputation, ReputationStatus as PoolReputationStatus,
+        StakeStatus as RundlerStakeStatus,
     },
-    v0_6, v0_7, BundlerSponsorship as RundlerBundlerSponsorship, Entity as RundlerEntity,
-    EntityInfos, EntityType as RundlerEntityType, EntityUpdate as RundlerEntityUpdate,
-    EntityUpdateType as RundlerEntityUpdateType, StakeInfo as RundlerStakeInfo, UserOperation as _,
-    UserOperationPermissions as RundlerUserOperationPermissions, UserOperationVariant,
-    ValidTimeRange,
+    v0_6, v0_7,
 };
 
 tonic::include_proto!("op_pool");
@@ -83,26 +88,29 @@ pub trait TryUoFromProto<T>: Sized {
 
 impl From<AuthorizationTuple> for Eip7702Auth {
     fn from(value: AuthorizationTuple) -> Self {
-        Eip7702Auth {
-            chain_id: value.chain_id,
-            address: from_bytes(&value.address).unwrap_or_default(),
-            nonce: value.nonce,
-            y_parity: value.y_parity as u8,
-            r: from_bytes(&value.r).unwrap_or_default(),
-            s: from_bytes(&value.s).unwrap_or_default(),
-        }
+        SignedAuthorization::new_unchecked(
+            Authorization {
+                chain_id: U256::from(value.chain_id),
+                address: from_bytes(&value.address).unwrap_or_default(),
+                nonce: value.nonce,
+            },
+            value.y_parity as u8,
+            from_bytes(&value.r).unwrap_or_default(),
+            from_bytes(&value.s).unwrap_or_default(),
+        )
+        .into()
     }
 }
 
 impl From<Eip7702Auth> for AuthorizationTuple {
     fn from(value: Eip7702Auth) -> Self {
         AuthorizationTuple {
-            chain_id: value.chain_id,
+            chain_id: value.chain_id.try_into().unwrap_or(u64::MAX),
             address: value.address.to_proto_bytes(),
             nonce: value.nonce,
-            y_parity: value.y_parity.into(),
-            r: value.r.to_proto_bytes(),
-            s: value.s.to_proto_bytes(),
+            y_parity: value.y_parity().into(),
+            r: value.r().to_proto_bytes(),
+            s: value.s().to_proto_bytes(),
         }
     }
 }
@@ -172,6 +180,7 @@ impl From<&v0_7::UserOperation> for UserOperation {
                 .aggregator()
                 .map(|a| a.to_proto_bytes())
                 .unwrap_or_default(),
+            entry_point_version: EntryPointVersion::from(op.entry_point_version()).into(),
         };
         UserOperation {
             uo: Some(user_operation::Uo::V07(op)),
@@ -189,8 +198,12 @@ impl TryUoFromProto<UserOperationV07> for v0_7::UserOperation {
             .as_ref()
             .map(|authorization| Eip7702Auth::from(authorization.clone()));
 
+        let ep_version = EntryPointVersion::try_from(op.entry_point_version)
+            .map_err(|_| ConversionError::InvalidEnumValue(op.entry_point_version))?;
+
         let mut builder = v0_7::UserOperationBuilder::new(
             chain_spec,
+            ep_version.try_into()?,
             v0_7::UserOperationRequiredFields {
                 sender: from_bytes(&op.sender)?,
                 nonce: from_bytes(&op.nonce)?,
@@ -440,7 +453,27 @@ impl From<&PoolOperation> for MempoolOp {
             da_gas_data: Some(DaGasData::from(&op.da_gas_data)),
             filter_id: op.filter_id.clone().unwrap_or_default(),
             permissions: Some(op.perms.clone().into()),
+            sender_is_7702: op.sender_is_7702,
         }
+    }
+}
+
+impl From<&RundlerPreconfInfo> for PreconfInfo {
+    fn from(info: &RundlerPreconfInfo) -> Self {
+        PreconfInfo {
+            tx_hash: info.tx_hash.to_proto_bytes(),
+        }
+    }
+}
+
+impl TryFrom<PreconfInfo> for RundlerPreconfInfo {
+    type Error = ConversionError;
+
+    fn try_from(info: PreconfInfo) -> Result<Self, Self::Error> {
+        let ret = RundlerPreconfInfo {
+            tx_hash: from_bytes(&info.tx_hash)?,
+        };
+        Ok(ret)
     }
 }
 
@@ -457,7 +490,7 @@ impl From<&RundlerDAGasData> for DaGasData {
             },
             RundlerDAGasData::Bedrock(data) => DaGasData {
                 data: Some(da_gas_data::Data::Bedrock(BedrockDaGasData {
-                    units: data.units,
+                    units: data.units.to_proto_bytes(),
                 })),
             },
         }
@@ -476,7 +509,9 @@ impl TryFrom<DaGasData> for RundlerDAGasData {
                 })
             }
             Some(da_gas_data::Data::Bedrock(BedrockDaGasData { units })) => {
-                RundlerDAGasData::Bedrock(RundlerBedrockDAGasData { units })
+                RundlerDAGasData::Bedrock(RundlerBedrockDAGasData {
+                    units: from_bytes(&units)?,
+                })
             }
             None => RundlerDAGasData::Empty,
         };
@@ -530,6 +565,7 @@ impl TryUoFromProto<MempoolOp> for PoolOperation {
                 .permissions
                 .context("Permissions should be set")?
                 .try_into()?,
+            sender_is_7702: op.sender_is_7702,
         })
     }
 }
@@ -633,6 +669,7 @@ impl TryFrom<UserOperationPermissions> for RundlerUserOperationPermissions {
                 .bundler_sponsorship
                 .map(|s| s.try_into())
                 .transpose()?,
+            eip7702_disabled: permissions.eip7702_disabled,
         })
     }
 }
@@ -647,6 +684,7 @@ impl From<RundlerUserOperationPermissions> for UserOperationPermissions {
             underpriced_accept_pct: permissions.underpriced_accept_pct,
             underpriced_bundle_pct: permissions.underpriced_bundle_pct,
             bundler_sponsorship: permissions.bundler_sponsorship.map(|s| s.into()),
+            eip7702_disabled: permissions.eip7702_disabled,
         }
     }
 }
@@ -677,6 +715,7 @@ impl From<RundlerPoolOperationSummary> for PoolOperationSummary {
             hash: summary.hash.to_proto_bytes(),
             entry_point: summary.entry_point.to_proto_bytes(),
             sender: summary.sender.to_proto_bytes(),
+            sim_block_number: summary.sim_block_number,
             hc_hash: summary.hc_hash.to_proto_bytes(),
         }
     }
@@ -690,7 +729,107 @@ impl TryFrom<PoolOperationSummary> for RundlerPoolOperationSummary {
             hash: from_bytes(&summary.hash)?,
             entry_point: from_bytes(&summary.entry_point)?,
             sender: from_bytes(&summary.sender)?,
+            sim_block_number: summary.sim_block_number,
             hc_hash: from_bytes(&summary.hc_hash)?,
+        })
+    }
+}
+
+impl From<RundlerEntryPointVersion> for EntryPointVersion {
+    fn from(version: RundlerEntryPointVersion) -> Self {
+        match version {
+            RundlerEntryPointVersion::V0_6 => EntryPointVersion::V06,
+            RundlerEntryPointVersion::V0_7 => EntryPointVersion::V07,
+            RundlerEntryPointVersion::V0_8 => EntryPointVersion::V08,
+            RundlerEntryPointVersion::V0_9 => EntryPointVersion::V09,
+        }
+    }
+}
+
+impl TryFrom<EntryPointVersion> for RundlerEntryPointVersion {
+    type Error = ConversionError;
+
+    fn try_from(version: EntryPointVersion) -> Result<Self, Self::Error> {
+        match version {
+            EntryPointVersion::V06 => Ok(RundlerEntryPointVersion::V0_6),
+            EntryPointVersion::V07 => Ok(RundlerEntryPointVersion::V0_7),
+            EntryPointVersion::V08 => Ok(RundlerEntryPointVersion::V0_8),
+            EntryPointVersion::V09 => Ok(RundlerEntryPointVersion::V0_9),
+            EntryPointVersion::Unspecified => {
+                Err(ConversionError::InvalidEnumValue(version as i32))
+            }
+        }
+    }
+}
+
+impl From<&RundlerPendingBundleInfo> for PendingBundleInfo {
+    fn from(info: &RundlerPendingBundleInfo) -> Self {
+        PendingBundleInfo {
+            tx_hash: info.tx_hash.to_proto_bytes(),
+            sent_at_block: info.sent_at_block,
+            builder_address: info.builder_address.to_proto_bytes(),
+        }
+    }
+}
+
+impl TryFrom<PendingBundleInfo> for RundlerPendingBundleInfo {
+    type Error = ConversionError;
+
+    fn try_from(info: PendingBundleInfo) -> Result<Self, Self::Error> {
+        Ok(RundlerPendingBundleInfo {
+            tx_hash: from_bytes(&info.tx_hash)?,
+            sent_at_block: info.sent_at_block,
+            builder_address: from_bytes(&info.builder_address)?,
+        })
+    }
+}
+
+impl From<&RundlerPoolOperationStatus> for PoolOperationStatus {
+    fn from(status: &RundlerPoolOperationStatus) -> Self {
+        PoolOperationStatus {
+            uo: Some(UserOperation::from(&status.uo)),
+            entry_point: status.entry_point.to_proto_bytes(),
+            added_at_block: status.added_at_block,
+            valid_after: status.valid_time_range.valid_after.seconds_since_epoch(),
+            valid_until: status.valid_time_range.valid_until.seconds_since_epoch(),
+            pending_bundle: status.pending_bundle.as_ref().map(PendingBundleInfo::from),
+            preconf_info: status.preconf_info.as_ref().map(PreconfInfo::from),
+        }
+    }
+}
+
+impl TryUoFromProto<PoolOperationStatus> for RundlerPoolOperationStatus {
+    fn try_uo_from_proto(
+        status: PoolOperationStatus,
+        chain_spec: &ChainSpec,
+    ) -> Result<Self, ConversionError> {
+        let uo = UserOperationVariant::try_uo_from_proto(
+            status
+                .uo
+                .context("Pool operation status should contain user operation")?,
+            chain_spec,
+        )?;
+
+        let pending_bundle = status
+            .pending_bundle
+            .map(RundlerPendingBundleInfo::try_from)
+            .transpose()?;
+
+        let preconf_info = status
+            .preconf_info
+            .map(RundlerPreconfInfo::try_from)
+            .transpose()?;
+
+        Ok(RundlerPoolOperationStatus {
+            uo,
+            entry_point: from_bytes(&status.entry_point)?,
+            added_at_block: status.added_at_block,
+            valid_time_range: ValidTimeRange::new(
+                status.valid_after.into(),
+                status.valid_until.into(),
+            ),
+            pending_bundle,
+            preconf_info,
         })
     }
 }

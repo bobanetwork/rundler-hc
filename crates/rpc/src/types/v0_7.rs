@@ -11,17 +11,22 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{Address, Bytes, B256, U128, U256};
+use alloy_primitives::{Address, Bytes, U128, U256, bytes};
 use rundler_types::{
-    chain::{ChainSpec, FromWithSpec},
+    EntryPointVersion, GasEstimate,
+    authorization::Eip7702Auth,
+    chain::ChainSpec,
     v0_7::{
-        UserOperation, UserOperationBuilder, UserOperationOptionalGas, UserOperationRequiredFields,
+        EIP7702_FACTORY_MARKER, UserOperation, UserOperationBuilder, UserOperationOptionalGas,
+        UserOperationRequiredFields,
     },
-    GasEstimate,
 };
 use serde::{Deserialize, Serialize};
 
-use super::{rpc_authorization::RpcEip7702Auth, RpcAddress};
+use crate::{
+    eth::EthRpcError,
+    utils::{FromRpcType, TryFromRpcType},
+};
 
 /// User operation definition for RPC inputs
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -36,7 +41,7 @@ pub(crate) struct RpcUserOperation {
     max_priority_fee_per_gas: U128,
     max_fee_per_gas: U128,
     #[serde(skip_serializing_if = "Option::is_none")]
-    factory: Option<Address>,
+    factory: Option<Bytes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     factory_data: Option<Bytes>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,9 +54,11 @@ pub(crate) struct RpcUserOperation {
     paymaster_data: Option<Bytes>,
     signature: Bytes,
     #[serde(skip_serializing_if = "Option::is_none")]
-    eip7702_auth: Option<RpcEip7702Auth>,
+    eip7702_auth: Option<Eip7702Auth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     aggregator: Option<Address>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paymaster_signature: Option<Bytes>,
 }
 
 impl From<UserOperation> for RpcUserOperation {
@@ -83,7 +90,7 @@ impl From<UserOperation> for RpcUserOperation {
             pre_verification_gas: U256::from(op.pre_verification_gas),
             max_priority_fee_per_gas: U128::from(op.max_priority_fee_per_gas),
             max_fee_per_gas: U128::from(op.max_fee_per_gas),
-            factory: op.factory,
+            factory: op.factory.map(|f| f.to_vec().into()),
             factory_data,
             paymaster: op.paymaster,
             paymaster_verification_gas_limit: paymaster_verification_gas_limit
@@ -91,16 +98,29 @@ impl From<UserOperation> for RpcUserOperation {
             paymaster_post_op_gas_limit: paymaster_post_op_gas_limit.map(|x| U128::from(x)),
             paymaster_data,
             signature: op.signature,
-            eip7702_auth: op.authorization_tuple.map(|a| a.into()),
+            eip7702_auth: op.authorization_tuple,
             aggregator: op.aggregator,
+            paymaster_signature: op.paymaster_signature,
         }
     }
 }
 
-impl FromWithSpec<RpcUserOperation> for UserOperation {
-    fn from_with_spec(def: RpcUserOperation, chain_spec: &ChainSpec) -> Self {
+impl TryFromRpcType<RpcUserOperation> for UserOperation {
+    fn try_from_rpc_type(
+        def: RpcUserOperation,
+        chain_spec: &ChainSpec,
+        ep_version: EntryPointVersion,
+    ) -> Result<Self, EthRpcError> {
+        if ep_version < EntryPointVersion::V0_7 {
+            return Err(EthRpcError::InvalidParams(format!(
+                "Received v0.7+ user operation payload, but entry point version is {:?} based on the address.",
+                ep_version
+            )));
+        }
+
         let mut builder = UserOperationBuilder::new(
             chain_spec,
+            ep_version,
             UserOperationRequiredFields {
                 sender: def.sender,
                 nonce: def.nonce,
@@ -126,28 +146,39 @@ impl FromWithSpec<RpcUserOperation> for UserOperation {
             );
         }
         if let Some(factory) = def.factory {
+            // special handling for "0x7702" shortened factory marker
+            let factory = if factory == bytes!("7702") {
+                EIP7702_FACTORY_MARKER
+            } else if factory.len() == 20 {
+                Address::from_slice(&factory)
+            } else {
+                return Err(EthRpcError::InvalidParams(format!(
+                    "Invalid factory length. Expected 20 bytes. Got: {:?}",
+                    factory.len()
+                )));
+            };
+
             builder = builder.factory(factory, def.factory_data.unwrap_or_default());
         }
         if let Some(auth) = def.eip7702_auth {
-            builder = builder.authorization_tuple(auth.into());
+            builder = builder.authorization_tuple(auth);
         }
         if let Some(aggregator) = def.aggregator {
             builder = builder.aggregator(aggregator);
         }
+        if let Some(paymaster_signature) = def.paymaster_signature {
+            if ep_version < EntryPointVersion::V0_9 {
+                return Err(EthRpcError::InvalidParams(format!(
+                    "Paymaster signature is only supported for entry point v0.9+ (got: {:?})",
+                    ep_version
+                )));
+            }
 
-        builder.build()
+            builder = builder.paymaster_signature(paymaster_signature);
+        }
+
+        Ok(builder.build())
     }
-}
-
-/// User operation with additional metadata
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RpcUserOperationByHash {
-    user_operation: RpcUserOperation,
-    entry_point: RpcAddress,
-    block_number: Option<U256>,
-    block_hash: Option<B256>,
-    transaction_hash: Option<B256>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -168,12 +199,17 @@ pub(crate) struct RpcUserOperationOptionalGas {
     paymaster_post_op_gas_limit: Option<U128>,
     paymaster_data: Option<Bytes>,
     signature: Bytes,
-    eip7702_auth: Option<RpcEip7702Auth>,
+    eip7702_auth: Option<Eip7702Auth>,
     aggregator: Option<Address>,
+    paymaster_signature: Option<Bytes>,
 }
 
-impl From<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
-    fn from(def: RpcUserOperationOptionalGas) -> Self {
+impl FromRpcType<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
+    fn from_rpc_type(
+        def: RpcUserOperationOptionalGas,
+        _chain_spec: &ChainSpec,
+        ep_version: EntryPointVersion,
+    ) -> Self {
         UserOperationOptionalGas {
             sender: def.sender,
             nonce: def.nonce,
@@ -192,6 +228,8 @@ impl From<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
             signature: def.signature,
             eip7702_auth_address: def.eip7702_auth.map(|a| a.address),
             aggregator: def.aggregator,
+            paymaster_signature: def.paymaster_signature,
+            entry_point_version: ep_version,
         }
     }
 }

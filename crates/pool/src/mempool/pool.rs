@@ -13,7 +13,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, hash_map::Entry},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -25,17 +25,17 @@ use metrics_derive::Metrics;
 use parking_lot::RwLock;
 use rundler_provider::DAGasOracleSync;
 use rundler_types::{
+    Entity, EntityType, GasFees, Timestamp, UserOperation, UserOperationId, UserOperationVariant,
     chain::ChainSpec,
     da::DAGasBlockData,
-    pool::{MempoolError, PoolOperation},
-    Entity, EntityType, GasFees, Timestamp, UserOperation, UserOperationId, UserOperationVariant,
+    pool::{MempoolError, PendingBundleInfo, PoolOperation, PoolOperationStatus, PreconfInfo},
 };
 use rundler_utils::{emit::WithEntryPoint, math};
 use tokio::sync::broadcast;
 use tracing::info;
 
-use super::{entity_tracker::EntityCounter, size::SizeTracker, MempoolResult, PoolConfig};
-use crate::{chain::MinedOp, emit::OpRemovalReason, PoolEvent};
+use super::{MempoolResult, PoolConfig, entity_tracker::EntityCounter, size::SizeTracker};
+use crate::{PoolEvent, chain::MinedOp, emit::OpRemovalReason};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PoolInnerConfig {
@@ -89,6 +89,14 @@ pub(crate) struct PoolInner<D> {
     /// Removed operation hashes sorted by block number, so we can forget them
     /// when enough new blocks have passed.
     mined_hashes_with_block_numbers: BTreeSet<(u64, B256)>,
+    /// Preconfirmed UO to bundle transaction mapping.
+    preconfirmed_uos_bundle_mapping: HashMap<B256, B256>,
+    /// Preconfirmed uos at block number
+    preconfiemed_uos_at_block_number: HashMap<u64, Vec<B256>>,
+    /// Mapping from UO hash to pending bundle info
+    pending_bundles_by_uo: HashMap<B256, PendingBundleInfo>,
+    /// Mapping from builder address to (tx_hash, set of UO hashes) in their pending bundle
+    pending_bundles_by_builder: HashMap<Address, (B256, HashSet<B256>)>,
     /// Count of operations by entity address
     count_by_address: HashMap<Address, EntityCounter>,
     /// Submission ID counter
@@ -124,6 +132,10 @@ where
             time_to_mine: HashMap::new(),
             mined_at_block_number_by_hash: HashMap::new(),
             mined_hashes_with_block_numbers: BTreeSet::new(),
+            preconfirmed_uos_bundle_mapping: HashMap::new(),
+            preconfiemed_uos_at_block_number: HashMap::new(),
+            pending_bundles_by_uo: HashMap::new(),
+            pending_bundles_by_builder: HashMap::new(),
             count_by_address: HashMap::new(),
             submission_id: 0,
             pool_size: SizeTracker::default(),
@@ -220,6 +232,53 @@ where
         self.by_hash.values().map(|o| o.po.clone())
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn preconfirmed_uos(&self) -> impl Iterator<Item = B256> + '_ {
+        self.preconfirmed_uos_bundle_mapping.keys().cloned()
+    }
+
+    pub(crate) fn preconfirm_txns(&mut self, txn_to_uos: &Vec<(B256, Vec<B256>)>) {
+        for (txn, uos) in txn_to_uos {
+            for uo in uos {
+                if self.get_operation_by_hash(*uo).is_some() {
+                    self.preconfirmed_uos_bundle_mapping.insert(*uo, *txn);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn preconfirm_txns_at_block_number(
+        &mut self,
+        txn_to_uos: &[(B256, Vec<B256>)],
+        block_number: u64,
+    ) {
+        self.preconfiemed_uos_at_block_number.insert(
+            block_number,
+            txn_to_uos.iter().flat_map(|(_, uos)| uos.clone()).collect(),
+        );
+    }
+
+    pub(crate) fn remove_out_of_date_preconfirmed_uos(&mut self, block_number: u64) {
+        self.preconfiemed_uos_at_block_number
+            .iter()
+            .for_each(|(bn, uos)| {
+                if *bn <= block_number {
+                    for uo in uos {
+                        self.preconfirmed_uos_bundle_mapping.remove(uo);
+                    }
+                }
+            });
+        self.preconfiemed_uos_at_block_number
+            .retain(|bn, _| *bn > block_number);
+    }
+
+    pub(crate) fn get_pre_confirmed_uo(&self, uo_hash: B256) -> Option<B256> {
+        if let Some(bundle_hash) = self.preconfirmed_uos_bundle_mapping.get(&uo_hash) {
+            return Some(*bundle_hash);
+        }
+        None
+    }
+
     /// Does maintenance on the pool.
     ///
     /// 1) Removes all operations using the given entity, returning the hashes of the removed operations.
@@ -293,16 +352,13 @@ where
             }
 
             // check for eligibility
-            if self.da_gas_oracle.is_some()
-                && block_da_data.is_some()
+            if let Some(da_gas_oracle) = self.da_gas_oracle.as_ref()
+                && let Some(block_da_data) = block_da_data
                 && op.po.perms.bundler_sponsorship.is_none()
             // skip if bundler sponsored
             {
                 // TODO(bundle): assuming a bundle size of 1
                 let bundle_size = 1;
-
-                let da_gas_oracle = self.da_gas_oracle.as_ref().unwrap();
-                let block_da_data = block_da_data.unwrap();
 
                 let required_da_gas = da_gas_oracle.calc_da_gas_sync(
                     &op.po.da_gas_data,
@@ -401,21 +457,21 @@ where
         &self,
         uo: &UserOperationVariant,
     ) -> MempoolResult<()> {
-        if let Some(ec) = self.count_by_address.get(&uo.sender()) {
-            if ec.includes_non_sender() {
-                return Err(MempoolError::SenderAddressUsedAsAlternateEntity(
-                    uo.sender(),
-                ));
-            }
+        if let Some(ec) = self.count_by_address.get(&uo.sender())
+            && ec.includes_non_sender()
+        {
+            return Err(MempoolError::SenderAddressUsedAsAlternateEntity(
+                uo.sender(),
+            ));
         }
 
         for e in uo.entities() {
             match e.kind {
                 EntityType::Factory | EntityType::Paymaster | EntityType::Aggregator => {
-                    if let Some(ec) = self.count_by_address.get(&e.address) {
-                        if ec.sender().gt(&0) {
-                            return Err(MempoolError::MultipleRolesViolation(e));
-                        }
+                    if let Some(ec) = self.count_by_address.get(&e.address)
+                        && ec.sender().gt(&0)
+                    {
+                        return Err(MempoolError::MultipleRolesViolation(e));
                     }
                 }
                 _ => {}
@@ -432,37 +488,16 @@ where
         uo: &UserOperationVariant,
     ) -> MempoolResult<()> {
         for storage_address in accessed_storage {
-            if let Some(ec) = self.count_by_address.get(storage_address) {
-                if ec.sender().gt(&0) && storage_address.ne(&uo.sender()) {
-                    // Reject UO if the sender is also an entity in another UO in the mempool
-                    for entity in uo.entities() {
-                        if storage_address.eq(&entity.address) {
-                            return Err(MempoolError::AssociatedStorageIsAlternateSender);
-                        }
-                    }
-                }
+            if let Some(ec) = self.count_by_address.get(storage_address)
+                && ec.sender().gt(&0)
+                && storage_address.ne(&uo.sender())
+            {
+                // Reject UO if the sender is also an entity in another UO in the mempool
+                return Err(MempoolError::AssociatedStorageIsAlternateSender);
             }
         }
 
         Ok(())
-    }
-
-    pub(crate) fn check_eip7702(&self, uo: &UserOperationVariant) -> MempoolResult<()> {
-        if let Some(auth) = uo.authorization_tuple() {
-            if self
-                .config
-                .chain_spec
-                .supports_eip7702(self.config.entry_point)
-            {
-                auth.validate(uo.sender())
-                    .map_err(|err| MempoolError::Invalid7702AuthSignature(err.to_string()))?;
-                Ok(())
-            } else {
-                Err(MempoolError::EIPNotSupported("EIP-7702".to_string()))
-            }
-        } else {
-            Ok(())
-        }
     }
 
     pub(crate) fn mine_operation(
@@ -570,10 +605,94 @@ where
         self.time_to_mine.clear();
         self.mined_at_block_number_by_hash.clear();
         self.mined_hashes_with_block_numbers.clear();
+        self.pending_bundles_by_uo.clear();
+        self.pending_bundles_by_builder.clear();
         self.count_by_address.clear();
         self.pool_size = SizeTracker::default();
         self.cache_size = SizeTracker::default();
         self.update_metrics();
+    }
+
+    /// Set pending bundle info for user operations.
+    /// First clears any existing bundle for the same builder, then sets the new mapping.
+    pub(crate) fn set_pending_bundle(
+        &mut self,
+        tx_hash: B256,
+        sent_at_block: u64,
+        builder_address: Address,
+        uo_hashes: Vec<B256>,
+    ) {
+        // Clear any existing bundle for this builder first
+        self.clear_pending_bundle_for_builder(builder_address);
+
+        let bundle_info = PendingBundleInfo {
+            tx_hash,
+            sent_at_block,
+            builder_address,
+        };
+
+        // Only add mappings for UO hashes that exist in the pool
+        let mut valid_uo_hashes = HashSet::new();
+        for uo_hash in uo_hashes {
+            if self.by_hash.contains_key(&uo_hash) {
+                self.pending_bundles_by_uo
+                    .insert(uo_hash, bundle_info.clone());
+                valid_uo_hashes.insert(uo_hash);
+            }
+        }
+
+        if !valid_uo_hashes.is_empty() {
+            self.pending_bundles_by_builder
+                .insert(builder_address, (tx_hash, valid_uo_hashes));
+        }
+    }
+
+    /// Clear pending bundle info for a specific builder.
+    fn clear_pending_bundle_for_builder(&mut self, builder_address: Address) {
+        if let Some((_, uo_hashes)) = self.pending_bundles_by_builder.remove(&builder_address) {
+            for uo_hash in uo_hashes {
+                self.pending_bundles_by_uo.remove(&uo_hash);
+            }
+        }
+    }
+
+    /// Clear pending bundles for mined transactions.
+    /// Called from on_chain_update when transactions are mined.
+    pub(crate) fn clear_pending_bundles_for_mined_txs(&mut self, mined_tx_hashes: &[B256]) {
+        let mined_set: HashSet<_> = mined_tx_hashes.iter().collect();
+
+        // Find builders whose pending bundle tx was mined
+        let builders_to_clear: Vec<Address> = self
+            .pending_bundles_by_builder
+            .iter()
+            .filter(|(_, (tx_hash, _))| mined_set.contains(tx_hash))
+            .map(|(builder, _)| *builder)
+            .collect();
+
+        // Clear each builder's pending bundle
+        for builder in builders_to_clear {
+            self.clear_pending_bundle_for_builder(builder);
+        }
+    }
+
+    /// Get extended status for a user operation.
+    pub(crate) fn get_operation_status(&self, hash: B256) -> Option<PoolOperationStatus> {
+        let op = self.by_hash.get(&hash)?;
+        let pending_bundle = self.pending_bundles_by_uo.get(&hash).cloned();
+        let preconf_info = self
+            .get_pre_confirmed_uo(hash)
+            .map(|bundle_hash| PreconfInfo {
+                tx_hash: bundle_hash,
+            });
+
+        Some(PoolOperationStatus {
+            uo: op.uo().clone(),
+            entry_point: op.po.entry_point,
+            added_at_block: op.added_at_block,
+            valid_time_range: op.po.valid_time_range,
+            pending_bundle,
+            preconf_info,
+        })
     }
 
     fn enforce_size(&mut self) -> anyhow::Result<Vec<B256>> {
@@ -600,8 +719,15 @@ where
     ) -> MempoolResult<B256> {
         // Check if operation already known or replacing an existing operation
         // if replacing, remove the existing operation
-        if let Some(hash) = self.check_replacement(pool_op.uo())? {
-            self.remove_operation_by_hash(hash);
+        if let Some(old_hash) = self.check_replacement(pool_op.uo())? {
+            let new_hash = pool_op.uo().hash();
+            self.emit(PoolEvent::RemovedOp {
+                op_hash: old_hash,
+                reason: OpRemovalReason::Replaced {
+                    replaced_by: new_hash,
+                },
+            });
+            self.remove_operation_by_hash(old_hash);
         }
 
         // update counts
@@ -663,6 +789,9 @@ where
             self.decrement_address_count(e.address, &e.kind);
         }
 
+        self.preconfirmed_uos_bundle_mapping.remove(&hash);
+        self.pending_bundles_by_uo.remove(&hash);
+
         self.pool_size -= op.mem_size();
         self.update_metrics();
         Some(op.po.clone())
@@ -716,6 +845,8 @@ struct OrderedPoolOperation {
     insertion_time: Instant,
     gas_price: RwLock<u128>,
     time_to_mine: RwLock<Option<TimeToMineInfo>>,
+    /// The block number at which the operation was added to the pool
+    added_at_block: u64,
 }
 
 impl OrderedPoolOperation {
@@ -733,6 +864,7 @@ impl OrderedPoolOperation {
             eligible: RwLock::new(eligible),
             insertion_time: Instant::now(),
             time_to_mine: RwLock::new(Some(TimeToMineInfo::new(current_block_number))),
+            added_at_block: current_block_number,
         }
     }
 
@@ -856,9 +988,9 @@ mod tests {
     use alloy_primitives::U256;
     use rundler_provider::MockDAGasOracleSync;
     use rundler_types::{
-        v0_6::{UserOperationBuilder, UserOperationRequiredFields},
         BundlerSponsorship, EntityInfo, EntityInfos, GasFees, UserOperation as UserOperationTrait,
         UserOperationPermissions, ValidTimeRange,
+        v0_6::{UserOperationBuilder, UserOperationRequiredFields},
     };
 
     use super::*;
@@ -935,7 +1067,7 @@ mod tests {
         let mut pool = pool();
         let addr_a = Address::random();
         let addr_b = Address::random();
-        let ops = vec![
+        let ops = [
             create_op(addr_a, 0, 1),
             create_op(addr_a, 1, 2),
             create_op(addr_b, 0, 3),
@@ -957,7 +1089,7 @@ mod tests {
     #[test]
     fn best_ties() {
         let mut pool = pool();
-        let ops = vec![
+        let ops = [
             create_op(Address::random(), 0, 1),
             create_op(Address::random(), 0, 1),
             create_op(Address::random(), 0, 1),
@@ -978,7 +1110,7 @@ mod tests {
     #[test]
     fn remove_op() {
         let mut pool = pool();
-        let ops = vec![
+        let ops = [
             create_op(Address::random(), 0, 3),
             create_op(Address::random(), 0, 2),
             create_op(Address::random(), 0, 1),
@@ -1628,6 +1760,177 @@ mod tests {
         assert_eq!(pool.best_operations().collect::<Vec<_>>().len(), 1);
     }
 
+    #[test]
+    fn test_set_pending_bundle() {
+        let mut pool = pool();
+        let op1 = create_op(Address::random(), 0, 1);
+        let op2 = create_op(Address::random(), 0, 2);
+
+        let hash1 = pool.add_operation(op1.clone(), 0, 0).unwrap();
+        let hash2 = pool.add_operation(op2.clone(), 0, 0).unwrap();
+
+        let builder = Address::random();
+        let tx_hash = B256::random();
+        let sent_at_block = 100;
+
+        pool.set_pending_bundle(tx_hash, sent_at_block, builder, vec![hash1, hash2]);
+
+        // Check pending bundle info is set for both ops
+        assert!(pool.pending_bundles_by_uo.contains_key(&hash1));
+        assert!(pool.pending_bundles_by_uo.contains_key(&hash2));
+
+        let bundle_info = pool.pending_bundles_by_uo.get(&hash1).unwrap();
+        assert_eq!(bundle_info.tx_hash, tx_hash);
+        assert_eq!(bundle_info.sent_at_block, sent_at_block);
+        assert_eq!(bundle_info.builder_address, builder);
+
+        // Check builder mapping
+        let (stored_tx_hash, uo_hashes) = pool.pending_bundles_by_builder.get(&builder).unwrap();
+        assert_eq!(*stored_tx_hash, tx_hash);
+        assert!(uo_hashes.contains(&hash1));
+        assert!(uo_hashes.contains(&hash2));
+    }
+
+    #[test]
+    fn test_set_pending_bundle_ignores_unknown_ops() {
+        let mut pool = pool();
+        let op1 = create_op(Address::random(), 0, 1);
+        let hash1 = pool.add_operation(op1.clone(), 0, 0).unwrap();
+        let unknown_hash = B256::random();
+
+        let builder = Address::random();
+        let tx_hash = B256::random();
+
+        pool.set_pending_bundle(tx_hash, 100, builder, vec![hash1, unknown_hash]);
+
+        // Only the known hash should be tracked
+        assert!(pool.pending_bundles_by_uo.contains_key(&hash1));
+        assert!(!pool.pending_bundles_by_uo.contains_key(&unknown_hash));
+
+        let (_, uo_hashes) = pool.pending_bundles_by_builder.get(&builder).unwrap();
+        assert!(uo_hashes.contains(&hash1));
+        assert!(!uo_hashes.contains(&unknown_hash));
+    }
+
+    #[test]
+    fn test_set_pending_bundle_replaces_for_same_builder() {
+        let mut pool = pool();
+        let op1 = create_op(Address::random(), 0, 1);
+        let op2 = create_op(Address::random(), 0, 2);
+
+        let hash1 = pool.add_operation(op1.clone(), 0, 0).unwrap();
+        let hash2 = pool.add_operation(op2.clone(), 0, 0).unwrap();
+
+        let builder = Address::random();
+        let tx_hash1 = B256::random();
+        let tx_hash2 = B256::random();
+
+        // First bundle with op1
+        pool.set_pending_bundle(tx_hash1, 100, builder, vec![hash1]);
+        assert!(pool.pending_bundles_by_uo.contains_key(&hash1));
+        assert_eq!(
+            pool.pending_bundles_by_uo.get(&hash1).unwrap().tx_hash,
+            tx_hash1
+        );
+
+        // Second bundle with op2 (replaces first)
+        pool.set_pending_bundle(tx_hash2, 101, builder, vec![hash2]);
+
+        // First bundle should be cleared
+        assert!(!pool.pending_bundles_by_uo.contains_key(&hash1));
+        // Second bundle should be set
+        assert!(pool.pending_bundles_by_uo.contains_key(&hash2));
+        assert_eq!(
+            pool.pending_bundles_by_uo.get(&hash2).unwrap().tx_hash,
+            tx_hash2
+        );
+
+        // Only one entry for builder
+        assert_eq!(pool.pending_bundles_by_builder.len(), 1);
+    }
+
+    #[test]
+    fn test_clear_pending_bundles_for_mined_txs() {
+        let mut pool = pool();
+        let op1 = create_op(Address::random(), 0, 1);
+        let op2 = create_op(Address::random(), 0, 2);
+
+        let hash1 = pool.add_operation(op1.clone(), 0, 0).unwrap();
+        let hash2 = pool.add_operation(op2.clone(), 0, 0).unwrap();
+
+        let builder1 = Address::random();
+        let builder2 = Address::random();
+        let tx_hash1 = B256::random();
+        let tx_hash2 = B256::random();
+
+        pool.set_pending_bundle(tx_hash1, 100, builder1, vec![hash1]);
+        pool.set_pending_bundle(tx_hash2, 100, builder2, vec![hash2]);
+
+        // Clear bundle 1 (tx_hash1 was mined)
+        pool.clear_pending_bundles_for_mined_txs(&[tx_hash1]);
+
+        // Bundle 1 should be cleared
+        assert!(!pool.pending_bundles_by_uo.contains_key(&hash1));
+        assert!(!pool.pending_bundles_by_builder.contains_key(&builder1));
+
+        // Bundle 2 should remain
+        assert!(pool.pending_bundles_by_uo.contains_key(&hash2));
+        assert!(pool.pending_bundles_by_builder.contains_key(&builder2));
+    }
+
+    #[test]
+    fn test_get_operation_status() {
+        let mut pool = pool();
+        let op1 = create_op(Address::random(), 0, 1);
+        let hash1 = pool.add_operation(op1.clone(), 0, 0).unwrap();
+
+        // Status without pending bundle
+        // added_at_block is set from pool.prev_block_number which defaults to 0
+        let status = pool.get_operation_status(hash1).unwrap();
+        assert_eq!(status.uo.hash(), hash1);
+        assert_eq!(status.added_at_block, 0);
+        assert!(status.pending_bundle.is_none());
+
+        // Add pending bundle
+        let builder = Address::random();
+        let tx_hash = B256::random();
+        pool.set_pending_bundle(tx_hash, 101, builder, vec![hash1]);
+
+        // Status with pending bundle
+        let status = pool.get_operation_status(hash1).unwrap();
+        assert!(status.pending_bundle.is_some());
+        let bundle = status.pending_bundle.unwrap();
+        assert_eq!(bundle.tx_hash, tx_hash);
+        assert_eq!(bundle.sent_at_block, 101);
+        assert_eq!(bundle.builder_address, builder);
+    }
+
+    #[test]
+    fn test_get_operation_status_unknown_hash() {
+        let pool = pool();
+        let status = pool.get_operation_status(B256::random());
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn test_remove_operation_clears_pending_bundle() {
+        let mut pool = pool();
+        let op1 = create_op(Address::random(), 0, 1);
+        let hash1 = pool.add_operation(op1.clone(), 0, 0).unwrap();
+
+        let builder = Address::random();
+        let tx_hash = B256::random();
+        pool.set_pending_bundle(tx_hash, 100, builder, vec![hash1]);
+
+        assert!(pool.pending_bundles_by_uo.contains_key(&hash1));
+
+        // Remove operation
+        pool.remove_operation_by_hash(hash1);
+
+        // Pending bundle mapping should be cleared for this op
+        assert!(!pool.pending_bundles_by_uo.contains_key(&hash1));
+    }
+
     const MAX_POOL_SIZE_OPS: usize = 20;
 
     fn conf() -> PoolInnerConfig {
@@ -1719,6 +2022,7 @@ mod tests {
             da_gas_data: Default::default(),
             filter_id: None,
             perms: UserOperationPermissions::default(),
+            sender_is_7702: false,
         }
     }
 

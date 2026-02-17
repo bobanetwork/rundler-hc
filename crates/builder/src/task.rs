@@ -20,16 +20,18 @@ use std::{
 
 use alloy_primitives::{Address, B256};
 use anyhow::Context;
-use rundler_provider::{EntryPoint, Providers as ProvidersT, ProvidersWithEntryPointT};
+use rundler_provider::{
+    AlloyNetworkConfig, EntryPoint, Providers as ProvidersT, ProvidersWithEntryPointT,
+};
 use rundler_signer::{SignerManager, SigningScheme};
 use rundler_sim::{
-    simulation::{self, UnsafeSimulator},
     MempoolConfig, SimulationSettings, Simulator,
+    simulation::{self, UnsafeSimulator},
 };
 use rundler_task::TaskSpawnerExt;
 use rundler_types::{
-    chain::ChainSpec, hybrid_compute, pool::Pool as PoolT, EntryPointVersion, UserOperation,
-    UserOperationVariant,
+    EntryPointAbiVersion, EntryPointVersion, UserOperation, UserOperationVariant, chain::ChainSpec,
+    hybrid_compute, pool::Pool as PoolT,
 };
 use rundler_utils::emit::WithEntryPoint;
 use tokio::sync::{broadcast, mpsc};
@@ -44,8 +46,6 @@ use crate::{
     server::{self, LocalBuilderBuilder},
     transaction_tracker::{self, TransactionTrackerImpl},
 };
-
-const MAX_POOL_OPS_PER_REQUEST: u64 = 1024;
 
 /// Builder task arguments
 #[derive(Debug)]
@@ -84,12 +84,14 @@ pub struct Args {
     pub entry_points: Vec<EntryPointBuilderSettings>,
     /// Enable DA tracking
     pub da_gas_tracking_enabled: bool,
-    /// Provider client timeout
-    pub provider_client_timeout_seconds: u64,
+    /// Alloy network config
+    pub alloy_network_config: AlloyNetworkConfig,
     /// Maximum number of expected storage slots in a bundle
     pub max_expected_storage_slots: usize,
     /// Rejects user operations with a verification gas limit efficiency below this threshold.
     pub verification_gas_limit_efficiency_reject_threshold: f64,
+    /// Maximum ops requested from mempool
+    pub assigner_max_ops_per_request: u64,
 }
 
 /// Builder settings
@@ -198,14 +200,14 @@ where
 
         let assigner = Arc::new(Assigner::new(
             Box::new(self.pool.clone()),
-            MAX_POOL_OPS_PER_REQUEST,
+            self.args.assigner_max_ops_per_request,
             self.args.max_bundle_size,
         ));
 
         let mut supported_entry_points = HashSet::new();
         for ep in &self.args.entry_points {
-            match ep.version {
-                EntryPointVersion::V0_6 => {
+            match ep.version.abi_version() {
+                EntryPointAbiVersion::V0_6 => {
                     let actions = self
                         .create_builders_v0_6(
                             &task_spawner,
@@ -215,9 +217,9 @@ where
                         )
                         .await?;
                     bundle_sender_actions.extend(actions);
-                    supported_entry_points.insert(self.args.chain_spec.entry_point_address_v0_6);
+                    supported_entry_points.insert(ep.address);
                 }
-                EntryPointVersion::V0_7 => {
+                EntryPointAbiVersion::V0_7 => {
                     let actions = self
                         .create_builders_v0_7(
                             &task_spawner,
@@ -227,10 +229,7 @@ where
                         )
                         .await?;
                     bundle_sender_actions.extend(actions);
-                    supported_entry_points.insert(self.args.chain_spec.entry_point_address_v0_7);
-                }
-                EntryPointVersion::Unspecified => {
-                    panic!("Unspecified entry point version")
+                    supported_entry_points.insert(ep.address);
                 }
             }
         }
@@ -292,6 +291,7 @@ where
                     UnsafeSimulator::new(
                         ep_providers.entry_point().clone(),
                         self.args.sim_settings.clone(),
+                        &ep.mempool_configs,
                     ),
                     signer_manager,
                     assigner.clone(),
@@ -328,12 +328,18 @@ where
     where
         T: TaskSpawnerExt,
     {
-        info!("Mempool config for ep v0.7: {:?}", ep.mempool_configs);
+        info!(
+            "Mempool config for ep {:?}: {:?}",
+            ep.version, ep.mempool_configs
+        );
         let ep_providers = self
             .providers
-            .ep_v0_7_providers()
+            .ep_v0_7_providers(ep.version)
             .clone()
-            .context("entry point v0.7 not supplied")?;
+            .context(format!(
+                "entry point v0.7 abi providers not supplied for entry point version: {:?}",
+                ep.version
+            ))?;
         let mut bundle_sender_actions = vec![];
         for settings in &ep.builders {
             let bundle_sender_action = if self.args.unsafe_mode {
@@ -344,6 +350,7 @@ where
                     UnsafeSimulator::new(
                         ep_providers.entry_point().clone(),
                         self.args.sim_settings.clone(),
+                        &ep.mempool_configs,
                     ),
                     signer_manager,
                     assigner.clone(),
@@ -420,10 +427,11 @@ where
             submission_proxy: submission_proxy.cloned(),
         };
 
-        let transaction_sender = self.args.sender_args.clone().into_sender(
-            &self.args.rpc_url,
-            self.args.provider_client_timeout_seconds,
-        )?;
+        let transaction_sender = self
+            .args
+            .sender_args
+            .clone()
+            .into_sender(&self.args.alloy_network_config)?;
 
         let tracker_settings = transaction_tracker::Settings {
             replacement_fee_percent_increase: self.args.replacement_fee_percent_increase,

@@ -14,36 +14,39 @@
 use alloy_contract::Error as ContractError;
 use alloy_eips::eip7702::SignedAuthorization;
 //use alloy_json_rpc::ErrorPayload;
-use alloy_primitives::{aliases::U192, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, aliases::U192};
 use alloy_provider::network::{AnyNetwork, TransactionBuilder7702};
 //use alloy_provider::Provider as AlloyProvider;
 use alloy_rpc_types_eth::{
-    state::{AccountOverride, StateOverride},
     BlockId,
+    state::{AccountOverride, StateOverride},
 };
-use alloy_sol_types::{ContractError as SolContractError, SolError, SolInterface, SolValue};
+use alloy_sol_types::{ContractError as SolContractError, SolInterface, SolValue};
 use alloy_transport::TransportError;
 use anyhow::Context;
-use rundler_contracts::v0_7::{
-    DepositInfo as DepositInfoV0_7,
-    GetBalances::{self, GetBalancesResult},
-    IAggregator,
-    IEntryPoint::{
-        FailedOp, FailedOpWithRevert, IEntryPointCalls, IEntryPointErrors, IEntryPointInstance,
+use rundler_contracts::{
+    v0_7::{
+        DepositInfo as DepositInfoV0_7, ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE,
+        GetEntryPointBalances, IAggregator,
+        IEntryPoint::{
+            FailedOp, FailedOpWithRevert, IEntryPointCalls, IEntryPointErrors, IEntryPointInstance,
+        },
+        IEntryPointSimulations::{
+            self, ExecutionResult as ExecutionResultV0_7, IEntryPointSimulationsInstance,
+        },
+        UserOpsPerAggregator as UserOpsPerAggregatorV0_7, ValidationResult as ValidationResultV0_7,
     },
-    IEntryPointSimulations::{
-        self, ExecutionResult as ExecutionResultV0_7, IEntryPointSimulationsInstance,
-    },
-    UserOpsPerAggregator as UserOpsPerAggregatorV0_7, ValidationResult as ValidationResultV0_7,
-    ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE,
+    v0_8::ENTRY_POINT_SIMULATIONS_V0_8_DEPLOYED_BYTECODE,
+    v0_9::ENTRY_POINT_SIMULATIONS_V0_9_DEPLOYED_BYTECODE,
 };
 use rundler_types::{
-    authorization::Eip7702Auth,
-    chain::ChainSpec,
-    da::{DAGasBlockData, DAGasData},
-    v0_7::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
     EntryPointVersion, GasFees, UserOperation as _, UserOpsPerAggregator, ValidationOutput,
     ValidationRevert,
+    authorization::Eip7702Auth,
+    chain::ChainSpec,
+    constants::SIMULATION_SENDER,
+    da::{DAGasBlockData, DAGasData},
+    v0_7::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
 };
 use rundler_utils::authorization_utils;
 use tracing::instrument;
@@ -65,15 +68,19 @@ pub struct EntryPointProvider<AP, D> {
     max_gas_estimation_gas: u64,
     max_aggregation_gas: u64,
     chain_spec: ChainSpec,
+    ep_version: EntryPointVersion,
 }
 
 impl<AP, D> EntryPointProvider<AP, D>
 where
     AP: AlloyProvider + Clone,
 {
-    /// Create a new `EntryPoint` instance for v0.7
+    /// Create a new `EntryPoint` instance for v0.7 ABI
+    /// PANICS if entry point version is < v0.7
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain_spec: ChainSpec,
+        ep_version: EntryPointVersion,
         max_verification_gas: u64,
         max_simulate_handle_ops_gas: u64,
         max_gas_estimation_gas: u64,
@@ -81,9 +88,13 @@ where
         provider: AP,
         da_gas_oracle: D,
     ) -> Self {
+        if ep_version < EntryPointVersion::V0_7 {
+            panic!("entry point version must be >= v0.7")
+        }
+
         Self {
             i_entry_point: IEntryPointInstance::new(
-                chain_spec.entry_point_address_v0_7,
+                chain_spec.entry_point_address(ep_version),
                 provider.clone(),
             ),
             da_gas_oracle,
@@ -92,6 +103,7 @@ where
             max_gas_estimation_gas,
             max_aggregation_gas,
             chain_spec,
+            ep_version,
         }
     }
 }
@@ -143,24 +155,29 @@ where
 
     #[instrument(skip_all)]
     async fn get_balances(&self, addresses: Vec<Address>) -> ProviderResult<Vec<U256>> {
-        let provider = self.i_entry_point.provider();
-        let call = GetBalances::deploy_builder(provider, *self.address(), addresses)
-            .into_transaction_request();
-        let out = provider
-            .call(call)
-            .await
-            .err()
-            .context("get balances call should revert")?;
+        let helper_addr = Address::random();
+        let helper = GetEntryPointBalances::new(helper_addr, self.i_entry_point.provider());
+        let mut overrides = StateOverride::default();
+        let account = AccountOverride {
+            code: Some(GetEntryPointBalances::DEPLOYED_BYTECODE.clone()),
+            ..Default::default()
+        };
+        overrides.insert(helper_addr, account);
+        let ret = helper
+            .getBalances(*self.address(), addresses.clone())
+            .state(overrides)
+            .call()
+            .await?;
 
-        let out = GetBalancesResult::abi_decode(
-            &out.as_error_resp()
-                .context("get balances call should revert")?
-                .as_revert_data()
-                .context("should get revert data from get balances call")?,
-        )
-        .context("should decode revert data from get balances call")?;
-
-        Ok(out.balances)
+        if ret.len() != addresses.len() {
+            return Err(anyhow::anyhow!(
+                "expected {} balances, got {}",
+                addresses.len(),
+                ret.len()
+            )
+            .into());
+        }
+        Ok(ret)
     }
 }
 
@@ -183,12 +200,12 @@ where
         let ops_len = ops.len();
         let da_gas: u64 = ops
             .iter()
-            .map(|op: &UserOperation| {
+            .map(|op| {
                 op.pre_verification_da_gas_limit(&self.chain_spec, Some(ops_len))
+                    .try_into()
+                    .unwrap_or(u64::MAX)
             })
-            .sum::<u128>()
-            .try_into()
-            .unwrap_or(u64::MAX);
+            .sum::<u64>();
 
         let packed_ops = ops.into_iter().map(|op| op.pack()).collect();
 
@@ -222,7 +239,7 @@ where
         user_op: Self::UO,
     ) -> ProviderResult<AggregatorOut> {
         let aggregator = IAggregator::new(aggregator_address, self.i_entry_point.provider());
-        let da_gas: u64 = user_op
+        let da_gas = user_op
             .pre_verification_da_gas_limit(&self.chain_spec, Some(1))
             .try_into()
             .unwrap_or(u64::MAX);
@@ -285,8 +302,9 @@ where
                 // Trigger an AA10 error
                 UserOperationBuilder::new(
                     &self.chain_spec,
+                    self.ep_version,
                     UserOperationRequiredFields {
-                        sender: self.chain_spec.entry_point_address_v0_7,
+                        sender: self.chain_spec.entry_point_address(self.ep_version),
                         nonce: U256::ZERO,
                         call_data: Bytes::new(),
                         call_gas_limit: 0,
@@ -297,7 +315,10 @@ where
                         signature: Bytes::new(),
                     },
                 )
-                .factory(self.chain_spec.entry_point_address_v0_7, Bytes::new())
+                .factory(
+                    self.chain_spec.entry_point_address(self.ep_version),
+                    Bytes::new(),
+                )
                 .build(),
             );
         }
@@ -399,9 +420,11 @@ where
 
     fn decode_ops_from_calldata(
         chain_spec: &ChainSpec,
+        address: Address,
         calldata: &Bytes,
+        auth_list: &[Eip7702Auth],
     ) -> Vec<UserOpsPerAggregator<UserOperation>> {
-        decode_ops_from_calldata(chain_spec, calldata)
+        decode_ops_from_calldata(chain_spec, address, calldata, auth_list)
     }
 }
 
@@ -427,6 +450,7 @@ where
         let txn_req = self
             .i_entry_point
             .handleOps(vec![user_op.pack()], Address::random())
+            .from(SIMULATION_SENDER)
             .into_transaction_request();
 
         let data = txn_req.inner.input.into_input().unwrap();
@@ -464,13 +488,17 @@ where
         user_op: Self::UO,
     ) -> ProviderResult<(TransactionRequest, StateOverride)> {
         let addr = *self.i_entry_point.address();
-        let da_gas: u64 = user_op
+        let da_gas = user_op
             .pre_verification_da_gas_limit(&self.chain_spec, Some(1))
             .try_into()
             .unwrap_or(u64::MAX);
 
         let mut override_ep = StateOverride::default();
-        add_simulations_override(&mut override_ep, addr);
+        add_simulations_override(
+            self.get_simulations_bytecode().clone(),
+            &mut override_ep,
+            addr,
+        );
 
         add_authorization_tuple(
             user_op.sender(),
@@ -484,6 +512,7 @@ where
         let call = ep_simulations
             .simulateValidation(user_op.pack())
             .gas(self.max_verification_gas.saturating_add(da_gas))
+            .from(SIMULATION_SENDER)
             .into_transaction_request();
 
         Ok((call.inner, override_ep))
@@ -531,6 +560,7 @@ where
     ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>> {
         simulate_handle_op_inner(
             &self.chain_spec,
+            self.get_simulations_bytecode().clone(),
             self.max_simulate_handle_ops_gas,
             &self.i_entry_point,
             op,
@@ -554,6 +584,7 @@ where
     ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>> {
         simulate_handle_op_inner(
             &self.chain_spec,
+            self.get_simulations_bytecode().clone(),
             self.max_gas_estimation_gas,
             &self.i_entry_point,
             op,
@@ -577,6 +608,17 @@ where
     fn simulation_should_revert(&self) -> bool {
         false
     }
+
+    fn get_simulations_bytecode(&self) -> &Bytes {
+        match self.ep_version {
+            EntryPointVersion::V0_6 => {
+                unreachable!("v0.7 entry point ABI created with v0.6 entry point version")
+            }
+            EntryPointVersion::V0_7 => &ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE,
+            EntryPointVersion::V0_8 => &ENTRY_POINT_SIMULATIONS_V0_8_DEPLOYED_BYTECODE,
+            EntryPointVersion::V0_9 => &ENTRY_POINT_SIMULATIONS_V0_9_DEPLOYED_BYTECODE,
+        }
+    }
 }
 
 impl<AP, D> EntryPointProviderTrait<UserOperation> for EntryPointProvider<AP, D>
@@ -586,7 +628,11 @@ where
 {
 }
 
-fn add_simulations_override(state_override: &mut StateOverride, addr: Address) {
+fn add_simulations_override(
+    simulations_bytecode: Bytes,
+    state_override: &mut StateOverride,
+    addr: Address,
+) {
     // Do nothing if the caller has already overridden the entry point code.
     // We'll trust they know what they're doing and not replace their code.
     // This is needed for call gas estimation, where the entry point is
@@ -594,7 +640,7 @@ fn add_simulations_override(state_override: &mut StateOverride, addr: Address) {
     state_override
         .entry(addr)
         .or_insert_with(|| AccountOverride {
-            code: Some(ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE.clone()),
+            code: Some(simulations_bytecode),
             ..Default::default()
         });
 }
@@ -632,12 +678,14 @@ fn get_handle_ops_call<AP: AlloyProvider>(
             entry_point
                 .handleOps(ops_per_aggregator.swap_remove(0).userOps, sender_eoa)
                 .chain_id(chain_id)
+                .from(SIMULATION_SENDER)
                 .into_transaction_request()
                 .inner
         } else {
             entry_point
                 .handleAggregatedOps(ops_per_aggregator, sender_eoa)
                 .chain_id(chain_id)
+                .from(SIMULATION_SENDER)
                 .into_transaction_request()
                 .inner
         };
@@ -681,11 +729,16 @@ pub fn decode_validation_revert(err_bytes: &Bytes) -> ValidationRevert {
 /// Decode user ops from calldata
 pub fn decode_ops_from_calldata(
     chain_spec: &ChainSpec,
+    address: Address,
     calldata: &Bytes,
+    tx_auth_list: &[Eip7702Auth],
 ) -> Vec<UserOpsPerAggregator<UserOperation>> {
     let entry_point_calls = match IEntryPointCalls::abi_decode(calldata) {
         Ok(entry_point_calls) => entry_point_calls,
         Err(_) => return vec![],
+    };
+    let Some(ep_version) = chain_spec.entry_point_version(address) else {
+        return vec![];
     };
 
     match entry_point_calls {
@@ -694,7 +747,12 @@ pub fn decode_ops_from_calldata(
                 .ops
                 .into_iter()
                 .filter_map(|op| {
-                    UserOperationBuilder::from_packed(op, chain_spec)
+                    let maybe_auth = tx_auth_list
+                        .iter()
+                        .find(|auth| auth.recover_authority().is_ok_and(|addr| addr == op.sender))
+                        .cloned();
+
+                    UserOperationBuilder::from_packed(op, chain_spec, ep_version, maybe_auth)
                         .ok()
                         .map(|uo| uo.build())
                 })
@@ -715,9 +773,18 @@ pub fn decode_ops_from_calldata(
                         .userOps
                         .into_iter()
                         .filter_map(|op| {
-                            UserOperationBuilder::from_packed(op, chain_spec)
-                                .ok()
-                                .map(|uo| uo.build())
+                            let maybe_auth = tx_auth_list
+                                .iter()
+                                .find(|auth| {
+                                    auth.recover_authority().is_ok_and(|addr| addr == op.sender)
+                                })
+                                .cloned();
+
+                            UserOperationBuilder::from_packed(
+                                op, chain_spec, ep_version, maybe_auth,
+                            )
+                            .ok()
+                            .map(|uo| uo.build())
                         })
                         .collect(),
                     aggregator: ops.aggregator,
@@ -732,6 +799,7 @@ pub fn decode_ops_from_calldata(
 #[allow(clippy::too_many_arguments)]
 async fn simulate_handle_op_inner<AP: AlloyProvider>(
     chain_spec: &ChainSpec,
+    simulations_bytecode: Bytes,
     execution_gas_limit: u64,
     entry_point: &IEntryPointInstance<AP, AnyNetwork>,
     op: UserOperation,
@@ -741,12 +809,16 @@ async fn simulate_handle_op_inner<AP: AlloyProvider>(
     mut state_override: StateOverride,
     skip_post_op: bool,
 ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>> {
-    let da_gas: u64 = op
+    let da_gas = op
         .pre_verification_da_gas_limit(chain_spec, Some(1))
         .try_into()
         .unwrap_or(u64::MAX);
 
-    add_simulations_override(&mut state_override, *entry_point.address());
+    add_simulations_override(
+        simulations_bytecode,
+        &mut state_override,
+        *entry_point.address(),
+    );
 
     add_authorization_tuple(op.sender(), op.authorization_tuple(), &mut state_override);
 
@@ -759,6 +831,7 @@ async fn simulate_handle_op_inner<AP: AlloyProvider>(
             .block(block_id)
             .gas(execution_gas_limit.saturating_add(da_gas))
             .state(state_override)
+            .from(SIMULATION_SENDER)
             .call()
             .await
     } else {
@@ -767,6 +840,7 @@ async fn simulate_handle_op_inner<AP: AlloyProvider>(
             .block(block_id)
             .gas(execution_gas_limit.saturating_add(da_gas))
             .state(state_override)
+            .from(SIMULATION_SENDER)
             .call()
             .await
     };

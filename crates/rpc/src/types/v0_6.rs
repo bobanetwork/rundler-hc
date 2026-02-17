@@ -13,15 +13,20 @@
 
 use alloy_primitives::{Address, Bytes, U128, U256};
 use rundler_types::{
-    chain::{ChainSpec, FromWithSpec},
+    EntryPointVersion, GasEstimate,
+    authorization::Eip7702Auth,
+    chain::ChainSpec,
     v0_6::{
         UserOperation, UserOperationBuilder, UserOperationOptionalGas, UserOperationRequiredFields,
     },
-    GasEstimate,
 };
 use serde::{Deserialize, Serialize};
 
-use super::{rpc_authorization::RpcEip7702Auth, RpcAddress};
+use super::RpcAddress;
+use crate::{
+    eth::EthRpcError,
+    utils::{FromRpcType, TryFromRpcType},
+};
 
 /// User operation definition for RPC
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -39,7 +44,7 @@ pub(crate) struct RpcUserOperation {
     paymaster_and_data: Bytes,
     signature: Bytes,
     #[serde(skip_serializing_if = "Option::is_none")]
-    eip7702_auth: Option<RpcEip7702Auth>,
+    eip7702_auth: Option<Eip7702Auth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     aggregator: Option<Address>,
 }
@@ -59,14 +64,25 @@ impl From<UserOperation> for RpcUserOperation {
             max_priority_fee_per_gas: U128::from(op.max_priority_fee_per_gas),
             paymaster_and_data: op.paymaster_and_data,
             signature: op.signature,
-            eip7702_auth: op.authorization_tuple.map(|a| a.into()),
+            eip7702_auth: op.authorization_tuple,
             aggregator: op.aggregator,
         }
     }
 }
 
-impl FromWithSpec<RpcUserOperation> for UserOperation {
-    fn from_with_spec(def: RpcUserOperation, chain_spec: &ChainSpec) -> Self {
+impl TryFromRpcType<RpcUserOperation> for UserOperation {
+    fn try_from_rpc_type(
+        def: RpcUserOperation,
+        chain_spec: &ChainSpec,
+        ep_version: EntryPointVersion,
+    ) -> Result<Self, EthRpcError> {
+        if ep_version != EntryPointVersion::V0_6 {
+            return Err(EthRpcError::InvalidParams(format!(
+                "Received v0.6 user operation payload, but entry point version is {:?} based on the address.",
+                ep_version
+            )));
+        }
+
         let mut builder = UserOperationBuilder::new(
             chain_spec,
             UserOperationRequiredFields {
@@ -85,14 +101,14 @@ impl FromWithSpec<RpcUserOperation> for UserOperation {
         );
 
         if let Some(auth) = def.eip7702_auth {
-            builder = builder.authorization_tuple(auth.into());
+            builder = builder.authorization_tuple(auth);
         }
 
         if let Some(agg) = def.aggregator {
             builder = builder.aggregator(agg);
         }
 
-        builder.build()
+        Ok(builder.build())
     }
 }
 
@@ -114,8 +130,12 @@ pub(crate) struct RpcUserOperationOptionalGas {
     aggregator: Option<Address>,
 }
 
-impl From<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
-    fn from(def: RpcUserOperationOptionalGas) -> Self {
+impl FromRpcType<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
+    fn from_rpc_type(
+        def: RpcUserOperationOptionalGas,
+        _chain_spec: &ChainSpec,
+        _ep_version: EntryPointVersion,
+    ) -> Self {
         UserOperationOptionalGas {
             sender: def.sender,
             nonce: def.nonce,

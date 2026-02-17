@@ -13,19 +13,20 @@
 
 use std::{fmt::Debug, time::Duration};
 
-use alloy_primitives::{Address, Bytes, B256, /*U128,*/ U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolValue;
 
 /// User operation permissions
 mod permissions;
 pub use permissions::{BundlerSponsorship, UserOperationPermissions};
+use strum::{EnumCount, EnumString};
 
 /// User Operation types for Entry Point v0.6
 pub mod v0_6;
 /// User Operation types for Entry Point v0.7
 pub mod v0_7;
 
-use crate::{aggregator::AggregatorCosts, authorization::Eip7702Auth, chain::ChainSpec, Entity};
+use crate::{Entity, aggregator::AggregatorCosts, authorization::Eip7702Auth, chain::ChainSpec};
 
 /// A user op must be valid for at least this long into the future to be included.
 pub const TIME_RANGE_BUFFER: Duration = Duration::from_secs(60);
@@ -43,15 +44,43 @@ pub const BUNDLE_BYTE_OVERHEAD: usize = 4 + 32 + 32 + 32;
 /// within handleOps `ops` array
 pub const USER_OP_OFFSET_WORD_SIZE: usize = 32;
 
-/// ERC-4337 Entry point version
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum EntryPointVersion {
-    /// Unspecified version
-    Unspecified,
+/// Entry point ABI version
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
+pub enum EntryPointAbiVersion {
     /// Version 0.6
     V0_6,
     /// Version 0.7
+    /// Same ABI for v0.8 and v0.9
     V0_7,
+}
+
+/// ERC-4337 Entry point version
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, EnumString, EnumCount)]
+pub enum EntryPointVersion {
+    /// Version 0.6
+    #[strum(serialize = "v0.6", serialize = "v0.6.0")]
+    V0_6,
+    /// Version 0.7
+    #[strum(serialize = "v0.7", serialize = "v0.7.0")]
+    V0_7,
+    /// Version 0.8
+    #[strum(serialize = "v0.8", serialize = "v0.8.0")]
+    V0_8,
+    /// Version 0.9
+    #[strum(serialize = "v0.9", serialize = "v0.9.0")]
+    V0_9,
+}
+
+impl EntryPointVersion {
+    /// Get the ABI version for the entry point version
+    pub fn abi_version(&self) -> EntryPointAbiVersion {
+        match self {
+            EntryPointVersion::V0_6 => EntryPointAbiVersion::V0_6,
+            EntryPointVersion::V0_7 | EntryPointVersion::V0_8 | EntryPointVersion::V0_9 => {
+                EntryPointAbiVersion::V0_7
+            }
+        }
+    }
 }
 
 /// Unique identifier for a user operation from a given sender
@@ -70,8 +99,8 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     /// Associated type for the version of a user operation that has optional gas and fee fields
     type OptionalGas;
 
-    /// Get the entry point version for this UO
-    fn entry_point_version() -> EntryPointVersion;
+    /// Get the entry point version
+    fn entry_point_version(&self) -> EntryPointVersion;
 
     /// Get the entry point address
     fn entry_point(&self) -> Address;
@@ -229,7 +258,12 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     /// `bundle_size` is the size of the bundle if applying shared gas to the gas limit, otherwise `None`.
     fn bundle_gas_limit(&self, chain_spec: &ChainSpec, bundle_size: Option<usize>) -> u128 {
         self.pre_verification_bundle_gas_limit(chain_spec, bundle_size)
-            + self.total_verification_gas_limit()
+            + self.bundle_gas_limit_without_pvg()
+    }
+
+    /// Returns the combined gas limit for a user operation.
+    fn bundle_gas_limit_without_pvg(&self) -> u128 {
+        self.total_verification_gas_limit()
             + self.required_pre_execution_buffer()
             + self.call_gas_limit()
     }
@@ -250,9 +284,7 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
         bundle_size: Option<usize>,
     ) -> u128 {
         self.pre_verification_execution_gas_limit(chain_spec, bundle_size)
-            + self.total_verification_gas_limit()
-            + self.required_pre_execution_buffer()
-            + self.call_gas_limit()
+            + self.bundle_gas_limit_without_pvg()
     }
 
     /// Returns the portion of pre-verification gas the applies to the DA portion of a bundle's gas limit
@@ -319,7 +351,6 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     ///
     /// `bundle_size` is the size of the bundle
     /// `da_gas` is the DA gas cost for the user operation, calculated elsewhere
-    ///
     /// `verification_efficiency_accept_threshold` is the threshold for the verification efficiency
     /// If set - the PVG will be increased to account for the calldata floor gas, else calldata floor gas is ignored
     fn required_pre_verification_gas(
@@ -329,7 +360,7 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
         da_gas: u128,
         verification_gas_limit_efficiency_reject_threshold: Option<f64>,
     ) -> u128 {
-        if let Some(thresh) = verification_gas_limit_efficiency_reject_threshold {
+        let base_pvg = if let Some(thresh) = verification_gas_limit_efficiency_reject_threshold {
             increase_required_pvg_with_calldata_floor_gas(
                 self,
                 self.pre_verification_execution_gas_limit(chain_spec, Some(bundle_size)),
@@ -339,6 +370,16 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
             )
         } else {
             self.pre_verification_execution_gas_limit(chain_spec, Some(bundle_size)) + da_gas
+        };
+
+        if chain_spec.charge_gas_limit_via_pvg {
+            let total_vgl = self.total_verification_gas_limit();
+            let cgl = self.call_gas_limit();
+
+            let gas_limits = total_vgl + self.required_pre_execution_buffer() + cgl;
+            base_pvg.saturating_add(gas_limits)
+        } else {
+            base_pvg
         }
     }
 
@@ -374,8 +415,7 @@ pub trait UserOperation: Debug + Clone + Send + Sync + 'static {
     /// Returns the gas limit for the authorization
     fn authorization_gas_limit(&self) -> u128 {
         if self.authorization_tuple().is_some() {
-            alloy_eips::eip7702::constants::PER_AUTH_BASE_COST as u128
-                + alloy_eips::eip7702::constants::PER_EMPTY_ACCOUNT_COST as u128
+            alloy_eips::eip7702::constants::PER_EMPTY_ACCOUNT_COST as u128
         } else {
             0
         }
@@ -484,8 +524,11 @@ pub enum UserOperationVariant {
 impl UserOperation for UserOperationVariant {
     type OptionalGas = UserOperationOptionalGas;
 
-    fn entry_point_version() -> EntryPointVersion {
-        EntryPointVersion::Unspecified
+    fn entry_point_version(&self) -> EntryPointVersion {
+        match self {
+            UserOperationVariant::V0_6(_) => EntryPointVersion::V0_6,
+            UserOperationVariant::V0_7(op) => op.entry_point_version(),
+        }
     }
 
     fn entry_point(&self) -> Address {

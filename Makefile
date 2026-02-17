@@ -23,13 +23,14 @@ test: test-unit test-spec-integrated test-spec-modular
 
 .PHONY: test-unit
 test-unit: ## Run unit tests.
-	cargo install cargo-nextest@0.9.109 --locked # newer needs a rustc version bump
+#	cargo install cargo-nextest@0.9.109 --locked # newer needs a rustc version bump
 	cargo nextest run $(UNIT_TEST_ARGS)
 
 .PHONY: test-spec-integrated
 test-spec-integrated: ## Run spec tests in integrated mode
 	$(MAKE) test-spec-integrated-v0_6
 	$(MAKE) test-spec-integrated-v0_7
+	$(MAKE) test-spec-integrated-v0_8
 
 .PHONY: test-spec-integrated-v0_6
 test-spec-integrated-v0_6: ## Run v0.6 spec tests in integrated mode
@@ -39,10 +40,15 @@ test-spec-integrated-v0_6: ## Run v0.6 spec tests in integrated mode
 test-spec-integrated-v0_7: ## Run v0.7 spec tests in integrated mode
 	test/spec-tests/local/run-spec-tests-v0_7.sh
 
+.PHONY: test-spec-integrated-v0_8
+test-spec-integrated-v0_8: ## Run v0.8 spec tests in integrated mode
+	test/spec-tests/local/run-spec-tests-v0_8.sh
+
 .PHONY: test-spec-modular
 test-spec-modular: ## Run spec tests in modular mode
 	$(MAKE) test-spec-modular-v0_6
 	$(MAKE) test-spec-modular-v0_7
+	$(MAKE) test-spec-modular-v0_8
 
 .PHONY: test-spec-modular-v0_6
 test-spec-modular-v0_6: ## Run v0.6 spec tests in modular mode
@@ -52,12 +58,20 @@ test-spec-modular-v0_6: ## Run v0.6 spec tests in modular mode
 test-spec-modular-v0_7: ## Run v0.7 spec tests in modular mode
 	test/spec-tests/remote/run-spec-tests-v0_7.sh
 
+.PHONY: test-spec-modular-v0_8
+test-spec-modular-v0_8: ## Run v0.8 spec tests in modular mode
+	test/spec-tests/remote/run-spec-tests-v0_8.sh
+
 .PHONY: submodule-update
 submodule-update: ## Update git submodules
 	git submodule update
 
-build-%:
-	cross build --target $* --profile "$(PROFILE)"
+# Use cargo directly for Darwin targets, cross for Linux targets
+build-%-apple-darwin:
+	cargo build --target $*-apple-darwin --profile "$(PROFILE)"
+
+build-%-linux-gnu:
+	CROSS_CONTAINER_UID=0 CROSS_CONTAINER_GID=0 cross build --target $*-linux-gnu --profile "$(PROFILE)"
 	
 .PHONY: fmt
 fmt: ## format code with nightly rust

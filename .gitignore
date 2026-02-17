@@ -19,9 +19,4 @@
 
 # Release artifacts
 dist/
-
-# Hybrid Compute
-__pycache__
-hybrid-compute/.env.old
-hybrid-compute/contracts.json
-crates/types/contracts/broadcast/
+.tool-versions

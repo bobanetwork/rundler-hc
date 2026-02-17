@@ -1,20 +1,21 @@
 use alloy_primitives::{
+    Address, B256, Bytes, U128, U256,
     aliases::U192,
     hex,
     map::{FbBuildHasher, HashMap},
-    Address, Bytes, B256, U128, U256,
 };
 use alloy_rpc_types_eth::state::AccountOverride;
 use alloy_sol_types::SolValue;
 use jsonrpsee::{
-    core::{client::ClientT, params::ObjectParams, JsonValue},
+    core::{JsonValue, client::ClientT, params::ObjectParams},
     http_client::HttpClientBuilder,
 };
 use rundler_contracts::v0_7::{IHCHelper, ISimpleAccount};
-use rundler_provider::StateOverride;
+use rundler_provider::{AlloyNetworkConfig, StateOverride};
 use rundler_types::{
-    hybrid_compute, UserOperation, UserOperationOptionalGas, UserOperationVariant,
+    UserOperation, UserOperationOptionalGas, UserOperationVariant, hybrid_compute,
 };
+use url::Url;
 
 use crate::{
     eth::{EntryPointRouter, EthResult, EthRpcError},
@@ -77,10 +78,10 @@ impl HcApi {
             .await;
 
         //println!("HC result_v {:?}", result_v);
-        if let Err(EthRpcError::ExecutionReverted(ref msg)) = result_v {
-            if *msg == "_HC_VRFY" {
-                return true;
-            }
+        if let Err(EthRpcError::ExecutionReverted(ref msg)) = result_v
+            && *msg == "_HC_VRFY"
+        {
+            return true;
         }
 
         false
@@ -117,7 +118,13 @@ impl HcApi {
             .await
             .unwrap();
 
-        let p2 = rundler_provider::new_alloy_provider(&self.cfg.node_http, 120)?;
+        let config = AlloyNetworkConfig {
+            rpc_url: Url::parse(&self.cfg.node_http).unwrap(),
+            client_timeout_seconds: 120,
+            ..Default::default()
+        };
+
+        let p2 = rundler_provider::new_alloy_provider(&config)?;
         let m = hex::encode(hybrid_compute::hc_selector(revert_data));
 
         let sub_key = hybrid_compute::hc_sub_key(revert_data);
@@ -190,19 +197,11 @@ impl HcApi {
         // V6 EP -> 0.2 REQ_VERSION was removed; only V7 is presently supported.
         const REQ_VERSION_V7: &str = "0.3";
 
-        let _is_v7 = match self.router.get_ep_version(&entry_point)? {
-            rundler_types::EntryPointVersion::V0_7 => true,
-            rundler_types::EntryPointVersion::V0_6 => {
-                return Err(EthRpcError::Internal(anyhow::anyhow!(
-                    "HC04: EntryPoint version 0.6 is not supported"
-                )))
-            }
-            rundler_types::EntryPointVersion::Unspecified => {
-                return Err(EthRpcError::Internal(anyhow::anyhow!(
-                    "HC04: Unknown EntryPoint version"
-                )))
-            }
-        };
+        if !matches!(op, UserOperationOptionalGas::V0_7(_)) {
+            return Err(EthRpcError::Internal(anyhow::anyhow!(
+                "HC04: Only v0.7 EntryPointABI is supported"
+            )));
+        }
 
         let mut params = ObjectParams::new();
         let _ = params.insert("ver", REQ_VERSION_V7);
@@ -344,8 +343,7 @@ impl HcApi {
         //println!("HC api.rs estimate_gas 2 for hc_hash {:?} = {:?}", hh, result2);
 
         let r3: RpcGasEstimateV0_7;
-        if result2.is_ok() {
-            let r3a = result2.unwrap();
+        if let Ok(r3a) = result2 {
             match r3a {
                 RpcGasEstimate::V0_6(_est) => {
                     let msg = "HC04: Internal error".to_owned();

@@ -19,20 +19,20 @@ use anyhow::Context;
 use rundler_contracts::v0_6::IEntryPoint::FailedOp;
 use rundler_provider::{BlockId, EvmProvider, SimulationProvider};
 use rundler_types::{
-    pool::SimulationViolation, v0_6::UserOperation, EntityType,
-    UserOperation as UserOperationTrait, ValidationOutput,
+    EntityType, UserOperation as UserOperationTrait, ValidationOutput, pool::SimulationViolation,
+    v0_6::UserOperation,
 };
 
 use super::{
-    tracer::{SimulateValidationTracer, SimulateValidationTracerImpl},
     REQUIRED_VERIFICATION_GAS_LIMIT_BUFFER,
+    tracer::{SimulateValidationTracer, SimulateValidationTracerImpl},
 };
 use crate::{
+    SimulationSettings, ViolationError,
     simulation::context::{
         self as sim_context, ValidationContext,
         ValidationContextProvider as ValidationContextProviderTrait,
     },
-    SimulationSettings, ViolationError,
 };
 
 /// A provider for creating `ValidationContext` for entry point v0.6.
@@ -142,14 +142,6 @@ where
         } = &context;
         println!("HC trace entry_point_out {:?}", entry_point_out);
 
-        if context.op.paymaster().is_some()
-            && !entry_point_out.return_info.paymaster_context.is_empty()
-            && !context.entity_infos.paymaster.unwrap().is_staked
-        {
-            // [EREP-050] (only v0.6)
-            violations.push(SimulationViolation::UnstakedPaymasterContext);
-        }
-
         // v0.6 doesn't distinguish between the different types of signature failures
         // both of these will be set to true if the signature failed.
         if entry_point_out.return_info.account_sig_failed
@@ -199,13 +191,13 @@ where
 mod tests {
     use std::collections::HashMap;
 
-    use alloy_primitives::{address, bytes, hex, Bytes, U256};
+    use alloy_primitives::{Bytes, U256, address, bytes, hex};
     use alloy_sol_types::SolError;
     use rundler_contracts::v0_6::IEntryPoint::FailedOp;
     use rundler_types::{
+        Opcode,
         chain::ChainSpec,
         v0_6::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
-        Opcode,
     };
     use sim_context::ContractInfo;
 

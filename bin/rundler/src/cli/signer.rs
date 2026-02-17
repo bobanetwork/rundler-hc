@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use alloy_primitives::U256;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use clap::Args;
 use rundler_signer::{FundingSettings, KmsLockingSettings, LocalKmsSettings, SigningScheme};
 use secrecy::SecretString;
@@ -176,9 +176,10 @@ impl SignerArgs {
         if !self.private_keys.is_empty() {
             if num_signers.is_some_and(|num_signers| num_signers > self.private_keys.len()) {
                 bail!(
-                        "Found {} private keys, but need {} keys for the number of builders. You may need to disable one of the entry points.",
-                        self.private_keys.len(), num_signers.unwrap()
-                    );
+                    "Found {} private keys, but need {} keys for the number of builders. You may need to disable one of the entry points.",
+                    self.private_keys.len(),
+                    num_signers.unwrap()
+                );
             }
 
             return Ok(SigningScheme::PrivateKeys {
@@ -196,9 +197,10 @@ impl SignerArgs {
         if !self.aws_kms_key_ids.is_empty() {
             if num_signers.is_some_and(|num_signers| num_signers > self.aws_kms_key_ids.len()) {
                 bail!(
-                        "Not enough AWS KMS key IDs for the number of builders. Need {} keys, found {}. You may need to disable one of the entry points.",
-                        num_signers.unwrap(), self.aws_kms_key_ids.len()
-                    );
+                    "Not enough AWS KMS key IDs for the number of builders. Need {} keys, found {}. You may need to disable one of the entry points.",
+                    num_signers.unwrap(),
+                    self.aws_kms_key_ids.len()
+                );
             }
 
             if self.enable_kms_locking {
@@ -225,12 +227,16 @@ impl SignerArgs {
             }
         }
 
-        bail!("No signing scheme provided (unfunded). Provide either signer.private_keys, signer.mnemonic, or signer.aws_kms_key_ids");
+        bail!(
+            "No signing scheme provided (unfunded). Provide either signer.private_keys, signer.mnemonic, or signer.aws_kms_key_ids"
+        );
     }
 
     fn funding_signer_scheme(&self, num_signers: Option<usize>) -> anyhow::Result<SigningScheme> {
         if self.aws_kms_key_ids.is_empty() {
-            bail!("AWS KMS key IDs are not set and KMS funding is enabled. Please set signer.aws_kms_key_ids");
+            bail!(
+                "AWS KMS key IDs are not set and KMS funding is enabled. Please set signer.aws_kms_key_ids"
+            );
         };
         let lock_settings = if self.enable_kms_locking {
             Some(KmsLockingSettings {
@@ -249,7 +255,12 @@ impl SignerArgs {
             }
 
             if self.aws_kms_grouped_keys.len() / num_signers < self.aws_kms_key_ids.len() {
-                bail!("Number of AWS KMS key groups ({} / {}) is less than the number of AWS KMS key IDs ({}).", self.aws_kms_grouped_keys.len(), num_signers, self.aws_kms_key_ids.len());
+                bail!(
+                    "Number of AWS KMS key groups ({} / {}) is less than the number of AWS KMS key IDs ({}).",
+                    self.aws_kms_grouped_keys.len(),
+                    num_signers,
+                    self.aws_kms_key_ids.len()
+                );
             }
 
             let aws_kms_key_groups = self
@@ -301,7 +312,9 @@ impl SignerArgs {
                 .map(|key_id| (key_id.to_string(), keys.clone()))
                 .collect()
         } else {
-            bail!("No signing scheme provided (funded). Provide either signer.private_keys, signer.mnemonic, signer.aws_kms_key_groups");
+            bail!(
+                "No signing scheme provided (funded). Provide either signer.private_keys, signer.mnemonic, signer.aws_kms_key_groups"
+            );
         };
 
         Ok(SigningScheme::KmsFunding {

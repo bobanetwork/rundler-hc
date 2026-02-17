@@ -20,7 +20,7 @@ use std::{
 
 //use alloy_sol_types::SolType;
 use alloy_primitives::map::FbBuildHasher;
-use alloy_primitives::{keccak256, Address, Bytes, Signature, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, U256, keccak256};
 use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
 use alloy_signer::{/* Signature / *, SignerSync,*/ Signer};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
@@ -28,11 +28,12 @@ use alloy_sol_types::{/*SolCall, SolStruct,*/ SolValue};
 use once_cell::sync::Lazy;
 
 use crate::{
+    EntryPointVersion,
     chain::ChainSpec,
     user_operation::{
+        UserOperation, UserOperationOptionalGas,
         v0_6::UserOperationOptionalGas as UserOperationOptionalGasV0_6,
-        v0_7::UserOperationOptionalGas as UserOperationOptionalGasV0_7, UserOperation,
-        UserOperationOptionalGas,
+        v0_7::UserOperationOptionalGas as UserOperationOptionalGasV0_7,
     },
 };
 
@@ -311,11 +312,13 @@ fn make_external_op(
             max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature: Bytes::new(),
+            entry_point_version: EntryPointVersion::V0_7,
             paymaster: None,
             factory: None,
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            paymaster_signature: None,
             eip7702_auth_address: None,
             aggregator: None,
         };
@@ -472,11 +475,13 @@ async fn make_err_op(
             max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature: Bytes::new(),
+            entry_point_version: EntryPointVersion::V0_7,
             paymaster: None,
             factory: None,
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            paymaster_signature: None,
             eip7702_auth_address: None,
             aggregator: None,
         };
@@ -586,11 +591,13 @@ pub async fn rr_op(
             max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature: Bytes::new(),
+            entry_point_version: EntryPointVersion::V0_7,
             paymaster: None,
             factory: None,
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            paymaster_signature: None,
             eip7702_auth_address: None,
             aggregator: None,
         };
@@ -670,8 +677,7 @@ pub fn get_hc_op_payload(key: B256) -> Bytes {
 
 /// Retrieve the map_key for a cached op
 pub fn get_hc_map_key(key: B256) -> B256 {
-    let map_key = HC_MAP.lock().unwrap().get(&key).cloned().unwrap().map_key;
-    map_key
+    HC_MAP.lock().unwrap().get(&key).cloned().unwrap().map_key
 }
 
 /// Retrieve a stateDiff object containing the encoded payload
@@ -881,11 +887,13 @@ mod test {
             max_priority_fee_per_gas: Some(0),
             paymaster_data: Bytes::new(),
             signature: "0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c".parse::<Bytes>().unwrap(),
+            entry_point_version: EntryPointVersion::V0_7,
             paymaster: None,
             factory: None,
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            paymaster_signature: None,
             eip7702_auth_address: None,
             aggregator: None,
         };
@@ -956,11 +964,13 @@ mod test {
             signature:"0xfe10d7b74cc08f195b44caa8ce3dbd084941c5b26231f456d54cd101efe4e1ea37793d70c6732bbea5f10e9214ea2596fd5dfaf3f7c162b0c4d41a5d5eca64af1b"
                 .parse::<Bytes>()
                 .unwrap(),
+            entry_point_version: EntryPointVersion::V0_7,
             paymaster: None,
             factory: None,
             factory_data: Bytes::new(),
             paymaster_verification_gas_limit: None,
             paymaster_post_op_gas_limit: None,
+            paymaster_signature: None,
             eip7702_auth_address: None,
             aggregator: None,
         };

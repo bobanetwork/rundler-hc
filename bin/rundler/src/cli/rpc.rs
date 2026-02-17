@@ -18,8 +18,8 @@ use clap::Args;
 use rundler_builder::RemoteBuilderClient;
 use rundler_pool::RemotePoolClient;
 use rundler_provider::Providers;
-use rundler_rpc::{EthApiSettings, RpcTask, RpcTaskArgs};
-use rundler_task::{server::connect_with_retries_shutdown, TaskSpawnerExt};
+use rundler_rpc::{EthApiSettings, RpcTask, RpcTaskArgs, RundlerApiSettings};
+use rundler_task::{TaskSpawnerExt, server::connect_with_retries_shutdown};
 use rundler_types::chain::{ChainSpec, TryIntoWithSpec};
 
 use super::CommonArgs;
@@ -98,6 +98,26 @@ pub struct RpcArgs {
         default_value = "false"
     )]
     permissions_enabled: bool,
+
+    /// Priority fee buffer percent for gas price suggestions.
+    /// The suggested priority fee will be this percent above the current required priority fee.
+    #[arg(
+        long = "rpc.priority_fee_suggested_buffer_percent",
+        name = "rpc.priority_fee_suggested_buffer_percent",
+        env = "RPC_PRIORITY_FEE_SUGGESTED_BUFFER_PERCENT",
+        default_value = "30"
+    )]
+    priority_fee_suggested_buffer_percent: u64,
+
+    /// Base fee buffer percent for gas price suggestions.
+    /// The suggested max fee will use a base fee multiplied by (100 + this value) / 100.
+    #[arg(
+        long = "rpc.base_fee_suggested_buffer_percent",
+        name = "rpc.base_fee_suggested_buffer_percent",
+        env = "RPC_BASE_FEE_SUGGESTED_BUFFER_PERCENT",
+        default_value = "50"
+    )]
+    base_fee_suggested_buffer_percent: u64,
 }
 
 impl RpcArgs {
@@ -121,19 +141,23 @@ impl RpcArgs {
                 .user_operation_event_block_distance_fallback,
         };
 
+        let rundler_api_settings = RundlerApiSettings {
+            priority_fee_buffer_percent: self.priority_fee_suggested_buffer_percent,
+            base_fee_buffer_percent: self.base_fee_suggested_buffer_percent,
+        };
+
         Ok(RpcTaskArgs {
             unsafe_mode: common.unsafe_mode,
             port: self.port,
             host: self.host.clone(),
             rpc_url: common.node_http.clone().context("must provide node_http")?,
             api_namespaces: apis,
-            precheck_settings: common.try_into_with_spec(&chain_spec)?,
             eth_api_settings,
+            rundler_api_settings,
             estimation_settings: common.try_into_with_spec(&chain_spec)?,
             rpc_timeout: Duration::from_secs(self.timeout_seconds.parse()?),
             max_connections: self.max_connections,
-            entry_point_v0_6_enabled: !common.disable_entry_point_v0_6,
-            entry_point_v0_7_enabled: !common.disable_entry_point_v0_7,
+            enabled_entry_points: common.enabled_entry_points.clone(),
             corsdomain: self.corsdomain.clone(),
             chain_spec,
         })
