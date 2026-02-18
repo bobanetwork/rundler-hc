@@ -111,65 +111,6 @@ where
                 as Pin<Box<dyn Future<Output = Result<Bytes, GasEstimationError>> + Send>>
         };
 
-        /* FIXME
-                // Make one attempt at max gas, to see if success is possible.
-                // Capture the gas usage of this attempt and use as the initial guess in the binary search
-                let initial_op = get_op(max_guess);
-                println!(
-                    "HC estimate_verification initial_op {:?}",
-                    initial_op.clone()
-                );
-                let call = self
-                    .entry_point
-                    .get_simulate_handle_op_call(initial_op, local_state_override.clone());
-
-                let gas_used = self
-                    .provider
-                    .get_gas_used(call.clone())
-                    .await
-                    .context("failed to run initial guess")?;
-                println!(
-                    "HC estimate_verification SimulateHandleOp initial guess gas_used UNKNOWN" //,
-                                                                                               //gas_used
-                );
-
-                if gas_used.success {
-                    if self.entry_point.simulation_should_revert() {
-                        Err(anyhow!(
-                            "simulateHandleOp succeeded but should always revert. Make sure the entry point contract is deployed and the address is correct"
-                        ))?;
-                    }
-                } else if let Some(revert) = E::decode_simulate_handle_ops_revert(&gas_used.result)?.err() {
-                    println!("HC estimate_verification GasEstimationError {}", revert);
-                    tracing::debug!(
-                        " simulation reverted with evm call: {}, error: {}",
-                        call,
-                        revert
-                    );
-                    return Err(GasEstimationError::RevertInValidation(revert));
-                }
-
-                let run_attempt_returning_error = |gas: u128, state_override: StateOverride| async move {
-                    let op = get_op(gas);
-                    let revert = self
-                        .entry_point
-                        .simulate_handle_op(
-                            op,
-                            Address::ZERO,
-                            Bytes::new(),
-                            block_hash.into(),
-                            state_override.clone(),
-                        )
-                        .await?
-                        .err();
-
-                    if let Some(revert) = revert {
-                        if let Some(error_code) = revert.entry_point_error_code() {
-                            if OUT_OF_GAS_ERROR_CODES.contains(&error_code) {
-                                // This error occurs when out of gas, return false.
-                                return Ok(false);
-                            }
-        */
         let timer = std::time::Instant::now();
         let result = super::run_binary_search(
             round_fn,
@@ -177,8 +118,6 @@ where
             self.settings.max_gas_estimation_rounds,
         )
         .await?;
-
-        //println!("HC estimate_verification_gas result {:?}", result);
 
         match result {
             BinarySearchResult::Success(estimate, num_rounds) => {
@@ -197,28 +136,6 @@ where
                 Err(self.specialization.decode_revert(&revert_data))
             }
         }
-
-        /* FIXME
-                println!(
-                    "HC after verification gas estimation loop max_fail {:?} min_success {:?}",
-                    max_failure_gas, min_success_gas
-                );
-
-                tracing::debug!(
-                    "binary search for verification gas took {num_rounds} rounds, {}ms",
-                    timer.elapsed().as_millis()
-                );
-
-                // If not using a paymaster, always add the cost of a native transfer to the verification gas.
-                // This may cause an over estimation when the account does have enough deposit to pay for the
-                // max cost, but it is better to overestimate than underestimate.
-                if op.paymaster().is_none() {
-                    min_success_gas += self.chain_spec.deposit_transfer_overhead();
-                }
-                println!("HC verification min_success_gas {:?}", min_success_gas);
-
-                Ok(min_success_gas)
-        */
     }
 }
 

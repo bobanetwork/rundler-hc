@@ -77,7 +77,6 @@ where
         &self,
         op: UserOperationOptionalGas,
         state_override: StateOverride,
-        _at_price: Option<u128>, // used for HybridCompute, but it no longer supports the v0.6 EP
     ) -> Result<GasEstimate, GasEstimationError> {
         let _timer = CustomTimerGuard::new(self.metrics.total_gas_estimate_ms.clone());
         self.check_provided_limits(&op)?;
@@ -1109,7 +1108,7 @@ mod tests {
         let optional_op = demo_user_op_optional_gas(Some(10000));
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default(), None)
+            .estimate_op_gas(optional_op, StateOverride::default())
             .await
             .unwrap();
 
@@ -1168,7 +1167,7 @@ mod tests {
         optional_op.verification_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default(), None)
+            .estimate_op_gas(optional_op, StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -1188,7 +1187,7 @@ mod tests {
         optional_op.call_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default(), None)
+            .estimate_op_gas(optional_op, StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -1230,7 +1229,7 @@ mod tests {
         optional_op.verification_gas_limit = Some(10000);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op.clone(), StateOverride::default(), None)
+            .estimate_op_gas(optional_op.clone(), StateOverride::default())
             .await
             .unwrap();
 
@@ -1284,7 +1283,7 @@ mod tests {
         optional_op.verification_gas_limit = Some(10000);
 
         let estimation_error = estimator
-            .estimate_op_gas(optional_op.clone(), StateOverride::default(), None)
+            .estimate_op_gas(optional_op.clone(), StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -1326,7 +1325,7 @@ mod tests {
         optional_op.verification_gas_limit = Some(TEST_MAX_GAS_LIMITS);
 
         let err = estimator
-            .estimate_op_gas(optional_op.clone(), StateOverride::default(), None)
+            .estimate_op_gas(optional_op.clone(), StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -1346,7 +1345,7 @@ mod tests {
         op.aggregator = Some(unsupported);
 
         let err = estimator
-            .estimate_op_gas(op, StateOverride::default(), None)
+            .estimate_op_gas(op, StateOverride::default())
             .await
             .err()
             .unwrap();

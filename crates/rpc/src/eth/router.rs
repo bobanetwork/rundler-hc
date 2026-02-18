@@ -169,7 +169,6 @@ impl EntryPointRouter {
         entry_point: &Address,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
-        at_price: Option<u128>,
     ) -> EthResult<RpcGasEstimate> {
         let route = self.get_route(entry_point)?;
 
@@ -181,7 +180,7 @@ impl EntryPointRouter {
                         route.address()
                     )));
                 }
-                let e = route.estimate_gas(uo, state_override, at_price).await?;
+                let e = route.estimate_gas(uo, state_override).await?;
                 Ok(RpcGasEstimateV0_6::from(e).into())
             }
             EntryPointAbiVersion::V0_7 => {
@@ -191,7 +190,7 @@ impl EntryPointRouter {
                         route.address()
                     )));
                 }
-                let e = route.estimate_gas(uo, state_override, at_price).await?;
+                let e = route.estimate_gas(uo, state_override).await?;
                 Ok(RpcGasEstimateV0_7::from(e).into())
             }
         }
@@ -280,7 +279,6 @@ pub(crate) trait EntryPointRoute: Send + Sync {
         &self,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
-        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError>;
 
     async fn check_signature(&self, uo: UserOperationVariant) -> anyhow::Result<bool>;
@@ -367,10 +365,9 @@ where
         &self,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
-        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
         self.gas_estimator
-            .estimate_op_gas(uo.into(), state_override.unwrap_or_default(), at_price)
+            .estimate_op_gas(uo.into(), state_override.unwrap_or_default())
             .await
     }
 

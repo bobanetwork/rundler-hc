@@ -74,7 +74,7 @@ impl HcApi {
         s2.insert(hc_addr, ao);
         let result_v = self
             .router
-            .estimate_gas(&entry_point, op.clone(), Some(s2), None)
+            .estimate_gas(&entry_point, op.clone(), Some(s2))
             .await;
 
         //println!("HC result_v {:?}", result_v);
@@ -105,7 +105,6 @@ impl HcApi {
         let ep_addr = hybrid_compute::hc_ha_addr(revert_data);
 
         let n_key: U256 = op_t.nonce() >> 64;
-        let at_price = Some(op_t.max_priority_fee_per_gas());
         let hc_nonce = self
             .router
             .get_nonce(&entry_point, op_t.sender(), n_key.to::<U192>())
@@ -338,7 +337,7 @@ impl HcApi {
         let s2 = hybrid_compute::get_hc_op_statediff(hh, s2);
         let result2 = self
             .router
-            .estimate_gas(&entry_point, op.clone(), Some(s2), None)
+            .estimate_gas(&entry_point, op.clone(), Some(s2))
             .await;
         //println!("HC api.rs estimate_gas 2 for hc_hash {:?} = {:?}", hh, result2);
 
@@ -370,7 +369,6 @@ impl HcApi {
                     &entry_point,
                     op_tmp_2.clone(),
                     Some(StateOverride::default()),
-                    at_price,
                 )
                 .await;
 
@@ -421,7 +419,6 @@ impl HcApi {
                     // rundler_types::UserOperationOptionalGas::V0_6(op_tmp_4),
                     cleanup_op,
                     Some(StateOverride::default()),
-                    at_price,
                 )
                 .await;
             let r4: RpcGasEstimateV0_7 = match r4a? {
@@ -506,7 +503,7 @@ impl HcApi {
 
         let mut result = self
             .router
-            .estimate_gas(&entry_point, op.clone(), state_override.clone(), None)
+            .estimate_gas(&entry_point, op.clone(), state_override.clone())
             .await;
 
         match result {
