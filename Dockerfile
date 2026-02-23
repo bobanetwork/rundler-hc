@@ -45,7 +45,7 @@ RUN rm -r recipe-original
 RUN cargo build --profile $BUILD_PROFILE --locked --bin rundler
 
 # Use Ubuntu as the release image
-FROM ubuntu AS runtime
+FROM ubuntu:noble AS runtime
 WORKDIR /app
 # Install system dependencies for the runtime
 # install curl for healthcheck

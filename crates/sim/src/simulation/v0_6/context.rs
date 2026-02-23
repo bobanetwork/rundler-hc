@@ -56,7 +56,6 @@ where
         let factory_address = op.factory();
         let sender_address = op.sender();
         let paymaster_address = op.paymaster();
-        println!("HC simulation get_context op {:?}", op.clone());
         let tracer_out = self
             .simulate_validation_tracer
             .trace_simulate_validation(op.clone(), block_id)
@@ -140,7 +139,6 @@ where
             op,
             ..
         } = &context;
-        println!("HC trace entry_point_out {:?}", entry_point_out);
 
         // v0.6 doesn't distinguish between the different types of signature failures
         // both of these will be set to true if the signature failed.

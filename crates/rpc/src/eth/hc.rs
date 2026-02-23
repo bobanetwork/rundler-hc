@@ -19,7 +19,7 @@ use url::Url;
 
 use crate::{
     eth::{EntryPointRouter, EthResult, EthRpcError},
-    types::{RpcGasEstimate, RpcGasEstimateV0_6, RpcGasEstimateV0_7},
+    types::{RpcGasEstimate, RpcGasEstimateV0_7},
 };
 // Can't track down what's causing the gas differences between
 // simulateHandleOps and SimulateValidation, so pad it and
@@ -341,23 +341,7 @@ impl HcApi {
             .await;
         //println!("HC api.rs estimate_gas 2 for hc_hash {:?} = {:?}", hh, result2);
 
-        let r3: RpcGasEstimateV0_7;
-        if let Ok(r3a) = result2 {
-            match r3a {
-                RpcGasEstimate::V0_6(_est) => {
-                    let msg = "HC04: Internal error".to_owned();
-                    return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
-                }
-                RpcGasEstimate::V0_7(est) => {
-                    r3 = RpcGasEstimateV0_7 {
-                        pre_verification_gas: est.pre_verification_gas,
-                        call_gas_limit: est.call_gas_limit,
-                        verification_gas_limit: est.verification_gas_limit,
-                        paymaster_verification_gas_limit: est.paymaster_verification_gas_limit,
-                    };
-                }
-            }
-
+        if let Ok(RpcGasEstimate::V0_7(r3)) = result2 {
             let op_tmp_2 = hybrid_compute::get_hc_ent(hh).unwrap().user_op;
 
             // The op_tmp_2 below specifies a 0 gas price, but we need to estimate the L1 fee at the
@@ -376,108 +360,102 @@ impl HcApi {
                 // FIXME
                 println!("HC op_tmp_2 gas estimation failed (RevertInValidation)");
                 let msg = "HC04: Offchain validation failed: ".to_string() + r2_err;
-                return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
-            };
+                Err(EthRpcError::Internal(anyhow::anyhow!(msg)))
+            } else if let Ok(RpcGasEstimate::V0_7(r2)) = r2a {
+                // The current formula used to estimate gas usage in the offchain_rpc service
+                // sometimes underestimates the true cost. For now all we can do is error here.
+                if r2.call_gas_limit.to::<u128>()
+                    > op_tmp_2.into_variant(&self.cfg.chain_spec).call_gas_limit()
+                {
+                    println!("HC op_tmp_2 failed, call_gas_limit too low");
+                    let msg = "HC04: Offchain call_gas_limit too low".to_string();
+                    return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
+                }
 
-            let r2: RpcGasEstimateV0_7 = match r2a? {
-                RpcGasEstimate::V0_7(est) => est,
-                RpcGasEstimate::V0_6(est) => RpcGasEstimateV0_7 {
-                    pre_verification_gas: est.pre_verification_gas,
-                    call_gas_limit: est.call_gas_limit,
-                    verification_gas_limit: est.verification_gas_limit,
-                    paymaster_verification_gas_limit: None,
-                },
-            };
+                let offchain_gas =
+                    r2.pre_verification_gas + r2.verification_gas_limit + r2.call_gas_limit;
 
-            // The current formula used to estimate gas usage in the offchain_rpc service
-            // sometimes underestimates the true cost. For now all we can do is error here.
-            if r2.call_gas_limit.to::<u128>()
-                > op_tmp_2.into_variant(&self.cfg.chain_spec).call_gas_limit()
-            {
-                println!("HC op_tmp_2 failed, call_gas_limit too low");
-                let msg = "HC04: Offchain call_gas_limit too low".to_string();
-                return Err(EthRpcError::Internal(anyhow::anyhow!(msg)));
+                let cleanup_keys: Vec<B256> = vec![map_key];
+                let c_nonce = self
+                    .router
+                    .get_nonce(&entry_point, self.cfg.sys_account, U192::ZERO)
+                    .await
+                    .unwrap();
+                let cleanup_op =
+                    hybrid_compute::rr_op(&self.cfg, entry_point, c_nonce, cleanup_keys.clone())
+                        .await;
+
+                //println!("HC cleanup_op {:?} {:?}", cleanup_op, cleanup_keys);
+                let r4a = self
+                    .router
+                    .estimate_gas(
+                        &entry_point,
+                        // rundler_types::UserOperationOptionalGas::V0_6(op_tmp_4),
+                        cleanup_op,
+                        Some(StateOverride::default()),
+                    )
+                    .await;
+                if let Ok(RpcGasEstimate::V0_7(r4)) = r4a {
+                    let cleanup_gas =
+                        r4.pre_verification_gas + r4.verification_gas_limit + r4.call_gas_limit;
+                    let op_gas =
+                        r3.pre_verification_gas + r3.verification_gas_limit + r3.call_gas_limit;
+                    println!(
+                        "HC api.rs offchain_gas estimate {:?} sum {:?}",
+                        r2, offchain_gas
+                    );
+                    println!("HC api.rs userop_gas estimate   {:?} sum {:?}", r3, op_gas);
+                    println!(
+                        "HC api.rs cleanup_gas estimate  {:?} sum {:?}",
+                        r4, cleanup_gas
+                    );
+
+                    let needed_pvg = r3.pre_verification_gas + offchain_gas;
+                    println!(
+                        "HC api.rs needed_pvg for hc_hash {:?} is {:?} ({:?} + {:?})",
+                        hh, needed_pvg, r3.pre_verification_gas, offchain_gas
+                    );
+
+                    let offchain_pvg = offchain_gas
+                        .saturating_add(offchain_gas)
+                        .saturating_add(cleanup_gas);
+
+                    hybrid_compute::hc_set_pvg(
+                        hh,
+                        needed_pvg.to::<u128>(),
+                        offchain_pvg.to::<u128>(),
+                    );
+
+                    if err_hc.code != 0 {
+                        return Err(EthRpcError::Internal(anyhow::anyhow!(err_hc.message)));
+                    }
+
+                    let total_gas = needed_pvg
+                        .saturating_add(r3.verification_gas_limit)
+                        .saturating_add(U128::from(VG_PAD))
+                        .saturating_add(r3.call_gas_limit);
+                    if total_gas > U128::from(25_000_000) {
+                        // Approaching the block gas limit
+                        let err_msg: String = "Excessive HC total_gas estimate = ".to_owned()
+                            + &total_gas.to_string();
+                        return Err(EthRpcError::Internal(anyhow::anyhow!(err_msg)));
+                    }
+
+                    Ok(RpcGasEstimateV0_7 {
+                        pre_verification_gas: needed_pvg.saturating_add(U128::from(PVG_PAD)),
+                        verification_gas_limit: r3.verification_gas_limit,
+                        call_gas_limit: r3.call_gas_limit,
+                        paymaster_verification_gas_limit: r3.paymaster_verification_gas_limit,
+                    }
+                    .into())
+                } else {
+                    let err_msg: String = "Gas estimation failed r4".to_string();
+                    Err(EthRpcError::Internal(anyhow::anyhow!(err_msg)))
+                }
+            } else {
+                let err_msg: String = "Gas estimation failed".to_string();
+                Err(EthRpcError::Internal(anyhow::anyhow!(err_msg)))
             }
-
-            let offchain_gas =
-                r2.pre_verification_gas + r2.verification_gas_limit + r2.call_gas_limit;
-
-            let cleanup_keys: Vec<B256> = vec![map_key];
-            let c_nonce = self
-                .router
-                .get_nonce(&entry_point, self.cfg.sys_account, U192::ZERO)
-                .await
-                .unwrap();
-            let cleanup_op =
-                hybrid_compute::rr_op(&self.cfg, entry_point, c_nonce, cleanup_keys.clone()).await;
-
-            //println!("HC cleanup_op {:?} {:?}", cleanup_op, cleanup_keys);
-            let r4a = self
-                .router
-                .estimate_gas(
-                    &entry_point,
-                    // rundler_types::UserOperationOptionalGas::V0_6(op_tmp_4),
-                    cleanup_op,
-                    Some(StateOverride::default()),
-                )
-                .await;
-            let r4: RpcGasEstimateV0_7 = match r4a? {
-                RpcGasEstimate::V0_7(est) => est,
-                RpcGasEstimate::V0_6(est) => RpcGasEstimateV0_7 {
-                    pre_verification_gas: est.pre_verification_gas,
-                    call_gas_limit: est.call_gas_limit,
-                    verification_gas_limit: est.verification_gas_limit,
-                    paymaster_verification_gas_limit: None,
-                },
-            };
-
-            let cleanup_gas =
-                r4.pre_verification_gas + r4.verification_gas_limit + r4.call_gas_limit;
-            let op_gas = r3.pre_verification_gas + r3.verification_gas_limit + r3.call_gas_limit;
-            println!(
-                "HC api.rs offchain_gas estimate {:?} sum {:?}",
-                r2, offchain_gas
-            );
-            println!("HC api.rs userop_gas estimate   {:?} sum {:?}", r3, op_gas);
-            println!(
-                "HC api.rs cleanup_gas estimate  {:?} sum {:?}",
-                r4, cleanup_gas
-            );
-
-            let needed_pvg = r3.pre_verification_gas + offchain_gas;
-            println!(
-                "HC api.rs needed_pvg for hc_hash {:?} is {:?} ({:?} + {:?})",
-                hh, needed_pvg, r3.pre_verification_gas, offchain_gas
-            );
-
-            let offchain_pvg = offchain_gas
-                .saturating_add(offchain_gas)
-                .saturating_add(cleanup_gas);
-
-            hybrid_compute::hc_set_pvg(hh, needed_pvg.to::<u128>(), offchain_pvg.to::<u128>());
-
-            if err_hc.code != 0 {
-                return Err(EthRpcError::Internal(anyhow::anyhow!(err_hc.message)));
-            }
-
-            let total_gas = needed_pvg
-                .saturating_add(r3.verification_gas_limit)
-                .saturating_add(U128::from(VG_PAD))
-                .saturating_add(r3.call_gas_limit);
-            if total_gas > U128::from(25_000_000) {
-                // Approaching the block gas limit
-                let err_msg: String =
-                    "Excessive HC total_gas estimate = ".to_owned() + &total_gas.to_string();
-                return Err(EthRpcError::Internal(anyhow::anyhow!(err_msg)));
-            }
-
-            Ok(RpcGasEstimateV0_7 {
-                pre_verification_gas: needed_pvg.saturating_add(U128::from(PVG_PAD)),
-                verification_gas_limit: r3.verification_gas_limit,
-                call_gas_limit: r3.call_gas_limit,
-                paymaster_verification_gas_limit: r3.paymaster_verification_gas_limit,
-            }
-            .into())
         } else {
             println!(
                 "HC WARNING api.rs estimate_gas result2 for hc_hash {:?} = {:?}",
@@ -512,18 +490,7 @@ impl HcApi {
                     "HC api.rs estimate_gas Ok for hc_hash {:?}: {:?}",
                     hc_hash, result
                 );
-                if let RpcGasEstimate::V0_6(estimate6) = estimate {
-                    return Ok(RpcGasEstimateV0_6 {
-                        pre_verification_gas: estimate6
-                            .pre_verification_gas
-                            .saturating_add(U128::from(PVG_PAD)),
-                        verification_gas_limit: estimate6
-                            .verification_gas_limit
-                            .saturating_add(U128::from(VG_PAD)),
-                        call_gas_limit: estimate6.call_gas_limit,
-                    }
-                    .into());
-                } else if let RpcGasEstimate::V0_7(estimate7) = estimate {
+                if let RpcGasEstimate::V0_7(estimate7) = estimate {
                     return Ok(RpcGasEstimateV0_7 {
                         pre_verification_gas: estimate7
                             .pre_verification_gas
@@ -537,6 +504,7 @@ impl HcApi {
                     }
                     .into());
                 }
+                // a V0_6 estimate will fall through and return "result" unmodified
             }
             Err(EthRpcError::ExecutionRevertedWithBytes(ref r)) => {
                 if hybrid_compute::check_trigger(&r.revert_data) {

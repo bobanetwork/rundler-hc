@@ -32,7 +32,6 @@ use crate::{
     chain::ChainSpec,
     user_operation::{
         UserOperation, UserOperationOptionalGas,
-        v0_6::UserOperationOptionalGas as UserOperationOptionalGasV0_6,
         v0_7::UserOperationOptionalGas as UserOperationOptionalGasV0_7,
     },
 };
@@ -300,52 +299,31 @@ fn make_external_op(
     //    call_gas,
     //    call_data
     //);
-    if true {
-        let mut new_op = UserOperationOptionalGasV0_7 {
-            sender: ha_addr,
-            nonce: oo_nonce,
-            call_data: call_data.clone(),
-            call_gas_limit: Some(call_gas.try_into().unwrap()),
-            verification_gas_limit: Some(0x10000),
-            pre_verification_gas: Some(0x10000),
-            max_fee_per_gas: Some(0),
-            max_priority_fee_per_gas: Some(0),
-            paymaster_data: Bytes::new(),
-            signature: Bytes::new(),
-            entry_point_version: EntryPointVersion::V0_7,
-            paymaster: None,
-            factory: None,
-            factory_data: Bytes::new(),
-            paymaster_verification_gas_limit: None,
-            paymaster_post_op_gas_limit: None,
-            paymaster_signature: None,
-            eip7702_auth_address: None,
-            aggregator: None,
-        };
 
-        new_op.signature = sig_hex.parse::<Bytes>().unwrap();
-        (UserOperationOptionalGas::V0_7(new_op), call_data)
-    } else {
-        let mut new_op = UserOperationOptionalGasV0_6 {
-            sender: ha_addr,
-            nonce: oo_nonce,
-            init_code: Bytes::new(),
-            call_data: call_data.clone(),
-            call_gas_limit: Some(call_gas.try_into().unwrap()),
-            verification_gas_limit: Some(0x10000),
-            pre_verification_gas: Some(0x10000),
-            max_fee_per_gas: Some(0),
-            max_priority_fee_per_gas: Some(0),
-            paymaster_and_data: Bytes::new(),
-            signature: Bytes::new(),
-            eip7702_auth_address: None,
-            aggregator: None,
-        };
+    let mut new_op = UserOperationOptionalGasV0_7 {
+        sender: ha_addr,
+        nonce: oo_nonce,
+        call_data: call_data.clone(),
+        call_gas_limit: Some(call_gas.try_into().unwrap()),
+        verification_gas_limit: Some(0x10000),
+        pre_verification_gas: Some(0x10000),
+        max_fee_per_gas: Some(0),
+        max_priority_fee_per_gas: Some(0),
+        paymaster_data: Bytes::new(),
+        signature: Bytes::new(),
+        entry_point_version: EntryPointVersion::V0_7,
+        paymaster: None,
+        factory: None,
+        factory_data: Bytes::new(),
+        paymaster_verification_gas_limit: None,
+        paymaster_post_op_gas_limit: None,
+        paymaster_signature: None,
+        eip7702_auth_address: None,
+        aggregator: None,
+    };
 
-        new_op.signature = sig_hex.parse::<Bytes>().unwrap();
-
-        (UserOperationOptionalGas::V0_6(new_op), call_data)
-    }
+    new_op.signature = sig_hex.parse::<Bytes>().unwrap();
+    (UserOperationOptionalGas::V0_7(new_op), call_data)
 }
 
 /// Processes an external hybrid compute op.
@@ -463,63 +441,36 @@ async fn make_err_op(
         Bytes::from(response_payload.to_vec()),
     );
 
-    if true {
-        let mut new_op = UserOperationOptionalGasV0_7 {
-            sender: cfg.sys_account,
-            nonce: oo_nonce,
-            call_data: call_data.clone(),
-            call_gas_limit: Some(0x40000),
-            verification_gas_limit: Some(0x10000),
-            pre_verification_gas: Some(0x10000),
-            max_fee_per_gas: Some(0),
-            max_priority_fee_per_gas: Some(0),
-            paymaster_data: Bytes::new(),
-            signature: Bytes::new(),
-            entry_point_version: EntryPointVersion::V0_7,
-            paymaster: None,
-            factory: None,
-            factory_data: Bytes::new(),
-            paymaster_verification_gas_limit: None,
-            paymaster_post_op_gas_limit: None,
-            paymaster_signature: None,
-            eip7702_auth_address: None,
-            aggregator: None,
-        };
-        let hh = UserOperationOptionalGas::V0_7(new_op.clone())
-            .into_variant(&cfg.chain_spec)
-            .hash(/*entry_point, cfg.chain_spec.id*/);
-        let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
-        let sig_bytes: Bytes = signature.as_bytes().into();
-        println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
-        new_op.signature = sig_bytes;
+    let mut new_op = UserOperationOptionalGasV0_7 {
+        sender: cfg.sys_account,
+        nonce: oo_nonce,
+        call_data: call_data.clone(),
+        call_gas_limit: Some(0x40000),
+        verification_gas_limit: Some(0x10000),
+        pre_verification_gas: Some(0x10000),
+        max_fee_per_gas: Some(0),
+        max_priority_fee_per_gas: Some(0),
+        paymaster_data: Bytes::new(),
+        signature: Bytes::new(),
+        entry_point_version: EntryPointVersion::V0_7,
+        paymaster: None,
+        factory: None,
+        factory_data: Bytes::new(),
+        paymaster_verification_gas_limit: None,
+        paymaster_post_op_gas_limit: None,
+        paymaster_signature: None,
+        eip7702_auth_address: None,
+        aggregator: None,
+    };
+    let hh = UserOperationOptionalGas::V0_7(new_op.clone())
+        .into_variant(&cfg.chain_spec)
+        .hash(/*entry_point, cfg.chain_spec.id*/);
+    let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
+    let sig_bytes: Bytes = signature.as_bytes().into();
+    println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
+    new_op.signature = sig_bytes;
 
-        (UserOperationOptionalGas::V0_7(new_op), call_data)
-    } else {
-        let mut new_op = UserOperationOptionalGasV0_6 {
-            sender: cfg.sys_account,
-            nonce: oo_nonce,
-            init_code: Bytes::new(),
-            call_data: call_data.clone(),
-            call_gas_limit: Some(0x40000),
-            verification_gas_limit: Some(0x10000),
-            pre_verification_gas: Some(0x10000),
-            max_fee_per_gas: Some(0),
-            max_priority_fee_per_gas: Some(0),
-            paymaster_and_data: Bytes::new(),
-            signature: Bytes::new(),
-            eip7702_auth_address: None,
-            aggregator: None,
-        };
-        let hh = UserOperationOptionalGas::V0_6(new_op.clone())
-            .into_variant(&cfg.chain_spec)
-            .hash(/*entry_point, cfg.chain_spec.id*/);
-        let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
-        let sig_bytes: Bytes = signature.as_bytes().into();
-        println!("HC err_op signed {:?} {:?}", signature, sig_bytes);
-        new_op.signature = sig_bytes;
-
-        (UserOperationOptionalGas::V0_6(new_op), call_data)
-    }
+    (UserOperationOptionalGas::V0_7(new_op), call_data)
 }
 
 /// Encapsulate an error code into a UserOperation
@@ -579,72 +530,40 @@ pub async fn rr_op(
     let call_data = make_rr_calldata(keys);
     //println!("HC rr_op call_data {:?}", call_data);
 
-    if true {
-        let mut new_op = UserOperationOptionalGasV0_7 {
-            sender: cfg.sys_account,
-            nonce: oo_nonce,
-            call_data: call_data.clone(),
-            call_gas_limit: Some(0x6000),
-            verification_gas_limit: Some(0x10000),
-            pre_verification_gas: Some(0x10000),
-            max_fee_per_gas: Some(0),
-            max_priority_fee_per_gas: Some(0),
-            paymaster_data: Bytes::new(),
-            signature: Bytes::new(),
-            entry_point_version: EntryPointVersion::V0_7,
-            paymaster: None,
-            factory: None,
-            factory_data: Bytes::new(),
-            paymaster_verification_gas_limit: None,
-            paymaster_post_op_gas_limit: None,
-            paymaster_signature: None,
-            eip7702_auth_address: None,
-            aggregator: None,
-        };
+    let mut new_op = UserOperationOptionalGasV0_7 {
+        sender: cfg.sys_account,
+        nonce: oo_nonce,
+        call_data: call_data.clone(),
+        call_gas_limit: Some(0x6000),
+        verification_gas_limit: Some(0x10000),
+        pre_verification_gas: Some(0x10000),
+        max_fee_per_gas: Some(0),
+        max_priority_fee_per_gas: Some(0),
+        paymaster_data: Bytes::new(),
+        signature: Bytes::new(),
+        entry_point_version: EntryPointVersion::V0_7,
+        paymaster: None,
+        factory: None,
+        factory_data: Bytes::new(),
+        paymaster_verification_gas_limit: None,
+        paymaster_post_op_gas_limit: None,
+        paymaster_signature: None,
+        eip7702_auth_address: None,
+        aggregator: None,
+    };
 
-        let key_bytes: B256 = cfg.sys_privkey;
-        let wallet = LocalSigner::from_bytes(&key_bytes).unwrap();
+    let key_bytes: B256 = cfg.sys_privkey;
+    let wallet = LocalSigner::from_bytes(&key_bytes).unwrap();
 
-        let hh = UserOperationOptionalGas::V0_7(new_op.clone())
-            .into_variant(&cfg.chain_spec)
-            .hash(/*entry_point, cfg.chain_spec.id*/);
+    let hh = UserOperationOptionalGas::V0_7(new_op.clone())
+        .into_variant(&cfg.chain_spec)
+        .hash(/*entry_point, cfg.chain_spec.id*/);
 
-        let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
-        new_op.signature = signature.as_bytes().into();
-        //println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
+    let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
+    new_op.signature = signature.as_bytes().into();
+    //println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
 
-        UserOperationOptionalGas::V0_7(new_op)
-    } else {
-        let mut new_op = UserOperationOptionalGasV0_6 {
-            sender: cfg.sys_account,
-            nonce: oo_nonce,
-            init_code: Bytes::new(),
-            call_data: call_data.clone(),
-            call_gas_limit: Some(0x6000),
-            verification_gas_limit: Some(0x10000),
-            pre_verification_gas: Some(0x10000),
-            max_fee_per_gas: Some(0), // Some(U256::zero()),
-            max_priority_fee_per_gas: Some(0),
-            paymaster_and_data: Bytes::new(),
-            signature: Bytes::new(),
-            eip7702_auth_address: None,
-            aggregator: None,
-        };
-
-        let key_bytes: B256 = cfg.sys_privkey;
-        let wallet = LocalSigner::from_bytes(&key_bytes).unwrap();
-
-        let hh = UserOperationOptionalGas::V0_6(new_op.clone())
-            .into_variant(&cfg.chain_spec)
-            .hash(/*entry_point, cfg.chain_spec.id*/);
-        println!("HC pre_sign hash {:?}", hh);
-
-        let signature = wallet.sign_message(hh.as_slice()).await.unwrap();
-        new_op.signature = signature.as_bytes().into();
-        //println!("HC rr_op signed {:?} {:?}", signature, new_op.signature);
-
-        UserOperationOptionalGas::V0_6(new_op)
-    }
+    UserOperationOptionalGas::V0_7(new_op)
 }
 
 /// Retrieve a cached HC operation, checking for staleness

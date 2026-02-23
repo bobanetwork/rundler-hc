@@ -157,9 +157,9 @@ impl FromRpcType<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RpcGasEstimate {
-    pub(crate) pre_verification_gas: U128,
-    pub(crate) call_gas_limit: U128,
-    pub(crate) verification_gas_limit: U128,
+    pre_verification_gas: U128,
+    call_gas_limit: U128,
+    verification_gas_limit: U128,
 }
 
 impl From<GasEstimate> for RpcGasEstimate {
