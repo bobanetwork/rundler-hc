@@ -56,6 +56,8 @@ RUN apt-get install -y redis-server # for KMS
 # Copy rundler over from the build stage
 COPY --from=builder /app/target/release/rundler /usr/local/bin
 COPY docker-wrapper.sh /docker-wrapper.sh
+# This chain_spec is also used for local devnets
+COPY bin/rundler/chain_specs/boba_sepolia.toml /chain_specs/boba_sepolia.toml
 
 EXPOSE 3000 8080
 ENTRYPOINT ["/docker-wrapper.sh"]
