@@ -59,5 +59,5 @@ COPY docker-wrapper.sh /docker-wrapper.sh
 # This chain_spec is also used for local devnets
 COPY bin/rundler/chain_specs/boba_sepolia.toml /chain_specs/boba_sepolia.toml
 
-EXPOSE 3000 8080
+EXPOSE 3000 3300 8080
 ENTRYPOINT ["/docker-wrapper.sh"]
