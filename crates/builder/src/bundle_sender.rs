@@ -13,12 +13,12 @@
 
 use std::{pin::Pin, sync::Arc, time::Duration};
 
-use alloy_primitives::{Address, B256};
-use anyhow::{bail, Context};
+use alloy_primitives::{Address, B256, hex};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use futures::Stream;
 use futures_util::StreamExt;
-use metrics::Counter;
+use metrics::{Counter, Histogram};
 use metrics_derive::Metrics;
 #[cfg(test)]
 use mockall::automock;
@@ -29,14 +29,15 @@ use rundler_provider::{
 };
 use rundler_task::TaskSpawner;
 use rundler_types::{
+    EntityUpdate, ExpectedStorage, UserOperation,
+    authorization::Eip7702Auth,
     builder::BundlingMode,
     chain::ChainSpec,
     hybrid_compute,
     pool::{AddressUpdate, NewHead, Pool, PoolOperation},
     proxy::SubmissionProxy,
-    EntityUpdate, ExpectedStorage, UserOperation,
 };
-use rundler_utils::emit::WithEntryPoint;
+use rundler_utils::{emit::WithEntryPoint, eth};
 use tokio::{
     join,
     sync::{
@@ -48,13 +49,13 @@ use tokio::{
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
+    BuilderSettings,
     assigner::Assigner,
     bundle_proposer::{Bundle, BundleProposer, BundleProposerError},
     emit::{BuilderEvent, BundleTxDetails},
     transaction_tracker::{
         TrackerState, TrackerUpdate, TransactionTracker, TransactionTrackerError,
     },
-    BuilderSettings,
 };
 
 #[async_trait]
@@ -310,10 +311,19 @@ where
                     if block_number.saturating_sub(underpriced_info.since_block)
                         >= self.settings.max_replacement_underpriced_blocks
                     {
-                        warn!("No operations available, but last replacement underpriced, moving to cancelling state. Round: {}. Since block {}. Current block {}. Max underpriced blocks: {}", underpriced_info.rounds, underpriced_info.since_block, block_number, self.settings.max_replacement_underpriced_blocks);
+                        warn!(
+                            "No operations available, but last replacement underpriced, moving to cancelling state. Round: {}. Since block {}. Current block {}. Max underpriced blocks: {}",
+                            underpriced_info.rounds,
+                            underpriced_info.since_block,
+                            block_number,
+                            self.settings.max_replacement_underpriced_blocks
+                        );
                         state.update(InnerState::Cancelling(inner.to_cancelling()));
                     } else {
-                        info!("No operations available, but last replacement underpriced, starting over and waiting for next trigger. Round: {}. Since block {}. Current block {}", underpriced_info.rounds, underpriced_info.since_block, block_number);
+                        info!(
+                            "No operations available, but last replacement underpriced, starting over and waiting for next trigger. Round: {}. Since block {}. Current block {}",
+                            underpriced_info.rounds, underpriced_info.since_block, block_number
+                        );
                         // Abandon the transaction tracker when we start the next bundle attempt fresh, may cause a `ReplacementUnderpriced` in next round
                         state.transaction_tracker.abandon();
                         state.update(InnerState::Building(inner.underpriced_round()));
@@ -349,7 +359,10 @@ where
                 state.update(InnerState::Building(inner.underpriced(block_number)));
             }
             Ok(SendBundleAttemptResult::ReplacementUnderpriced) => {
-                info!("Replacement transaction underpriced, marking as underpriced. Num fee increases {:?}", inner.fee_increase_count);
+                info!(
+                    "Replacement transaction underpriced, marking as underpriced. Num fee increases {:?}",
+                    inner.fee_increase_count
+                );
                 // unabandon to allow fee estimation to consider any submitted transactions, wait for next trigger
                 state.transaction_tracker.unabandon();
                 state.update(InnerState::Building(inner.underpriced(block_number)));
@@ -361,7 +374,9 @@ where
             }
             Ok(SendBundleAttemptResult::InsufficientFunds) => {
                 // Insufficient funds
-                info!("Insufficient funds sending bundle, resetting state and starting new bundle attempt");
+                info!(
+                    "Insufficient funds sending bundle, resetting state and starting new bundle attempt"
+                );
                 state.reset();
             }
             Ok(SendBundleAttemptResult::Rejected) => {
@@ -403,15 +418,17 @@ where
                     is_success,
                     ..
                 } => {
-                    info!("Bundle transaction mined: block number {block_number}, attempt number {attempt_number}, gas limit {gas_limit:?}, gas used {gas_used:?}, tx hash {tx_hash}, nonce {nonce}, success {is_success}");
+                    info!(
+                        "Bundle transaction mined: block number {block_number}, attempt number {attempt_number}, gas limit {gas_limit:?}, gas used {gas_used:?}, tx hash {tx_hash}, nonce {nonce}, success {is_success}"
+                    );
 
                     self.metrics
                         .process_bundle_txn_mined(gas_limit, gas_used, is_success);
 
-                    if !is_success {
-                        if let Err(e) = self.process_revert(tx_hash).await {
-                            warn!("Failed to process revert for bundle transaction {tx_hash:?}: {e:#?}");
-                        }
+                    if !is_success && let Err(e) = self.process_revert(tx_hash).await {
+                        warn!(
+                            "Failed to process revert for bundle transaction {tx_hash:?}: {e:#?}"
+                        );
                     }
 
                     self.emit(BuilderEvent::transaction_mined(
@@ -504,10 +521,15 @@ where
             Err(TransactionTrackerError::Rejected)
             | Err(TransactionTrackerError::Underpriced)
             | Err(TransactionTrackerError::ReplacementUnderpriced) => {
-                info!("Transaction underpriced/rejected during cancellation, trying again. {cancel_res:?}");
+                info!(
+                    "Transaction underpriced/rejected during cancellation, trying again. {cancel_res:?}"
+                );
                 if inner.fee_increase_count >= self.settings.max_cancellation_fee_increases {
                     // abandon the cancellation
-                    warn!("Abandoning cancellation after max fee increases {}, starting new bundle attempt", inner.fee_increase_count);
+                    warn!(
+                        "Abandoning cancellation after max fee increases {}, starting new bundle attempt",
+                        inner.fee_increase_count
+                    );
                     self.metrics.cancellations_abandoned.increment(1);
                     state.reset();
                 } else {
@@ -588,7 +610,10 @@ where
                 // abandon the cancellation
                 // release all operations after the cancellation abandonment
                 self.assigner.release_all(self.sender_eoa);
-                warn!("Abandoning cancellation after max fee increases {}, starting new bundle attempt", inner.fee_increase_count);
+                warn!(
+                    "Abandoning cancellation after max fee increases {}, starting new bundle attempt",
+                    inner.fee_increase_count
+                );
                 self.metrics.cancellations_abandoned.increment(1);
                 state.reset();
             } else {
@@ -609,11 +634,11 @@ where
     /// have gone stale, and removes them. TODO: pass an error back to the submitter.
     async fn filter_hc_stale(&mut self, ops: &mut Vec<PoolOperation>) -> bool {
         let hc_stale: Vec<B256> = ops.iter().filter_map(|op| {
-            if let Some(hc_ent) = hybrid_compute::get_hc_ent(op.uo.hc_hash()) {
-                if !hc_ent.valid {
-                    println!("HC WARN Removing sender {:?} op_hash {:?} hc_hash {:?} with stale cache entry", op.uo.sender(), op.uo.hash(), op.uo.hc_hash());
-                    return Some(op.uo.hash());
-                }
+            if let Some(hc_ent) = hybrid_compute::get_hc_ent(op.uo.hc_hash())
+                && !hc_ent.valid
+            {
+                println!("HC WARN Removing sender {:?} op_hash {:?} hc_hash {:?} with stale cache entry", op.uo.sender(), op.uo.hash(), op.uo.hc_hash());
+                return Some(op.uo.hash());
             }
             None
         }).collect();
@@ -640,6 +665,7 @@ where
                 self.sender_eoa,
                 self.ep_address,
                 self.builder_settings.filter_id.clone(),
+                state.block_number(),
             )
             .await?;
 
@@ -714,7 +740,6 @@ where
             }
             Err(e) => bail!("Failed to make bundle: {e:?}"),
         };
-
         let Some(bundle_tx) = self.get_bundle_tx(nonce, bundle).await? else {
             self.emit(BuilderEvent::formed_bundle(
                 self.builder_tag.clone(),
@@ -731,7 +756,6 @@ where
             expected_storage,
             ops,
         } = bundle_tx;
-
         let send_result = state
             .transaction_tracker
             .send_transaction(tx.clone(), &expected_storage, state.block_number())
@@ -742,6 +766,15 @@ where
             "HC bundle_sender got result {:?} for tx {:?}",
             send_result, tx
         );
+
+        let bundle_data_size = tx.input.input().map_or(0, |data| data.len());
+
+        let tx_size = eth::calculate_transaction_size(
+            bundle_data_size,
+            tx.authorization_list.as_ref().map_or(0, |list| list.len()),
+        );
+
+        self.metrics.bundle_txn_size_bytes.record(tx_size as f64);
 
         match send_result {
             Ok(tx_hash) => {
@@ -757,6 +790,22 @@ where
                     fee_increase_count,
                     required_fees,
                 ));
+
+                // Notify the pool about the pending bundle
+                let uo_hashes: Vec<B256> = ops.iter().map(|(_, hash)| *hash).collect();
+                if let Err(e) = self
+                    .pool
+                    .notify_pending_bundle(
+                        self.ep_address,
+                        tx_hash,
+                        state.block_number(),
+                        self.sender_eoa,
+                        uo_hashes,
+                    )
+                    .await
+                {
+                    warn!("Failed to notify pool of pending bundle: {e:?}");
+                }
 
                 Ok(SendBundleAttemptResult::Success(ops))
             }
@@ -792,9 +841,24 @@ where
             }
             Err(TransactionTrackerError::Other(e)) => {
                 error!("Failed to send bundle with unexpected error: {e:?}");
+                if Self::is_intrinsic_gas_too_low_error(&e) {
+                    let tx_bytes = tx.input.input().map_or_else(
+                        || String::from("0x"),
+                        |data| format!("0x{}", hex::encode(data)),
+                    );
+                    error!(
+                        "Bundle transaction bytes for intrinsic gas too low: tx_bytes={tx_bytes}"
+                    );
+                }
                 Err(e)
             }
         }
+    }
+
+    fn is_intrinsic_gas_too_low_error(error: &anyhow::Error) -> bool {
+        format!("{error:#}")
+            .to_lowercase()
+            .contains("intrinsic gas too low")
     }
 
     /// Builds a bundle and returns some metadata and the transaction to send
@@ -831,19 +895,13 @@ where
         if bundle.is_empty() {
             if !bundle.rejected_ops.is_empty() || !bundle.entity_updates.is_empty() {
                 info!(
-                "Empty bundle with {} rejected ops and {} rejected entities. Removing them from pool.",
-                bundle.rejected_ops.len(),
-                bundle.entity_updates.len()
-            );
+                    "Empty bundle with {} rejected ops and {} rejected entities. Removing them from pool.",
+                    bundle.rejected_ops.len(),
+                    bundle.entity_updates.len()
+                );
             }
             return Ok(None);
         }
-        info!(
-            "Selected bundle with {} op(s), with {} rejected op(s) and {} updated entities",
-            bundle.len(),
-            bundle.rejected_ops.len(),
-            bundle.entity_updates.len()
-        );
         let ops: Vec<_> = bundle
             .iter_ops()
             .map(|op| (op.sender(), op.hash()))
@@ -857,8 +915,16 @@ where
             bundle.gas_fees,
             self.submission_proxy.as_ref().map(|p| p.address()),
         );
-
         tx = tx.nonce(nonce);
+
+        info!(
+            "Selected bundle: nonce: {:?}. Ops: {:?}. Num rejected ops: {:?}. Num updated entities: {:?}",
+            nonce,
+            ops,
+            bundle.rejected_ops.len(),
+            bundle.entity_updates.len()
+        );
+
         Ok(Some(BundleTx {
             tx,
             expected_storage: bundle.expected_storage,
@@ -895,18 +961,28 @@ where
         )
         .with_call_config(GethDebugTracerCallConfig::default().only_top_call());
 
-        let trace = self
+        let trace_fut = self
             .ep_providers
             .evm()
-            .debug_trace_transaction(tx_hash, trace_options)
-            .await
-            .context("should have fetched trace from provider")?;
+            .debug_trace_transaction(tx_hash, trace_options);
+        let get_fut = self.ep_providers.evm().get_transaction_by_hash(tx_hash);
+        let (trace, tx) = tokio::try_join!(trace_fut, get_fut)
+            .context("should have fetched trace and tx from provider")?;
+
+        let auth_list: Vec<Eip7702Auth> = tx
+            .map(|tx| rundler_provider::get_auth_list_from_transaction(&tx))
+            .unwrap_or_default();
 
         let frame = trace
             .try_into_call_frame()
             .context("trace is not a call tracer")?;
 
-        let ops = EP::EntryPoint::decode_ops_from_calldata(&self.chain_spec, &frame.input);
+        let ops = EP::EntryPoint::decode_ops_from_calldata(
+            &self.chain_spec,
+            self.ep_address,
+            &frame.input,
+            &auth_list,
+        );
 
         let Some(revert_data) = frame.output else {
             tracing::error!("revert has not output, removing all ops from bundle from pool");
@@ -1120,10 +1196,10 @@ impl<T: TransactionTracker, TRIG: Trigger> SenderMachineState<T, TRIG> {
     }
 
     fn send_result(&mut self, result: SendBundleResult) {
-        if let Some(r) = self.send_bundle_response.take() {
-            if r.send(result).is_err() {
-                error!("Failed to send bundle result to manual caller");
-            }
+        if let Some(r) = self.send_bundle_response.take()
+            && r.send(result).is_err()
+        {
+            error!("Failed to send bundle result to manual caller");
         }
     }
 
@@ -1540,6 +1616,8 @@ struct BuilderMetric {
     cancellation_txns_failed: Counter,
     #[metric(describe = "the count of state machine errors.")]
     state_machine_errors: Counter,
+    #[metric(describe = "the distribution of bundle transaction sizes in bytes.")]
+    bundle_txn_size_bytes: Histogram,
 }
 
 impl BuilderMetric {
@@ -1566,18 +1644,18 @@ impl BuilderMetric {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{address, bytes, Bytes, U256};
+    use alloy_primitives::{Bytes, U256, address, bytes};
     use mockall::Sequence;
     use rundler_provider::{
         GethDebugTracerCallFrame, MockDAGasOracleSync, MockEntryPointV0_6, MockEvmProvider,
         MockFeeEstimator, ProvidersWithEntryPoint,
     };
     use rundler_types::{
+        EntityInfos, GasFees, UserOperation as _, UserOperationPermissions, UserOpsPerAggregator,
+        ValidTimeRange,
         chain::ChainSpec,
         pool::{AddressUpdate, MockPool, PoolOperationSummary},
         v0_6::UserOperation,
-        EntityInfos, GasFees, UserOperation as _, UserOperationPermissions, UserOpsPerAggregator,
-        ValidTimeRange,
     };
     use tokio::sync::{broadcast, mpsc};
 
@@ -1629,6 +1707,7 @@ mod tests {
                     hash: B256::ZERO,
                     sender: Address::ZERO,
                     entry_point: ENTRY_POINT_ADDRESS_V0_6,
+                    sim_block_number: 0,
                     hc_hash: B256::ZERO,
                 }])
             });
@@ -1696,6 +1775,7 @@ mod tests {
                     hash: B256::ZERO,
                     sender: Address::ZERO,
                     entry_point: ENTRY_POINT_ADDRESS_V0_6,
+                    sim_block_number: 0,
                     hc_hash: B256::ZERO,
                 }])
             });
@@ -1703,6 +1783,10 @@ mod tests {
             .expect_get_ops_by_hashes()
             .times(1)
             .returning(|_, _| Ok(vec![demo_pool_op()]));
+        mock_pool
+            .expect_notify_pending_bundle()
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
 
         // bundle with one op
         mock_proposer
@@ -1919,6 +2003,7 @@ mod tests {
                     hash: B256::ZERO,
                     sender: Address::ZERO,
                     entry_point: ENTRY_POINT_ADDRESS_V0_6,
+                    sim_block_number: 0,
                     hc_hash: B256::ZERO,
                 }])
             });
@@ -2096,6 +2181,7 @@ mod tests {
                     hash: B256::ZERO,
                     sender: Address::ZERO,
                     entry_point: ENTRY_POINT_ADDRESS_V0_6,
+                    sim_block_number: 0,
                     hc_hash: B256::ZERO,
                 }])
             });
@@ -2235,10 +2321,14 @@ mod tests {
                 .into())
             });
 
+        mock_evm
+            .expect_get_transaction_by_hash()
+            .returning(move |_| Ok(None));
+
         let ctx = MockEntryPointV0_6::decode_ops_from_calldata_context();
         ctx.expect()
-            .withf(move |_, data| *data == input_clone)
-            .returning(move |_, _| {
+            .withf(move |_, _, data, _| *data == input_clone)
+            .returning(move |_, _, _, _| {
                 vec![UserOpsPerAggregator {
                     user_ops: vec![op.clone()],
                     ..Default::default()
@@ -2444,6 +2534,7 @@ mod tests {
             da_gas_data: rundler_types::da::DAGasData::Empty,
             filter_id: None,
             perms: UserOperationPermissions::default(),
+            sender_is_7702: false,
         }
     }
 }

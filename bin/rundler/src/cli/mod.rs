@@ -16,15 +16,18 @@ use std::{sync::Arc, time::Duration};
 use admin::AdminCliArgs;
 use aggregator::AggregatorType;
 use alloy_primitives::{Address, B256, U256};
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use clap::{
-    builder::{PossibleValuesParser, ValueParser},
     Args, Parser, Subcommand,
+    builder::{PossibleValuesParser, ValueParser},
 };
 use rundler_contracts::v0_7::IHCHelper;
+use strum::EnumCount;
+use url::Url;
 
 mod admin;
 mod aggregator;
+mod backend;
 mod builder;
 mod chain_spec;
 mod json;
@@ -36,6 +39,7 @@ mod rpc;
 mod signer;
 mod tracing;
 
+use backend::BackendCliArgs;
 use builder::{BuilderCliArgs, EntryPointBuilderConfigs};
 use json::get_json_config;
 use node::NodeCliArgs;
@@ -43,19 +47,19 @@ use pool::PoolCliArgs;
 use reth_tasks::TaskManager;
 use rpc::RpcCliArgs;
 use rundler_provider::{
-    AlloyEntryPointV0_6, AlloyEntryPointV0_7, AlloyEvmProvider, DAGasOracle, DAGasOracleSync,
-    EntryPointProvider, EvmProvider, FeeEstimator, Providers,
+    AlloyEntryPointV0_6, AlloyEntryPointV0_7, AlloyEvmProvider, AlloyNetworkConfig, DAGasOracle,
+    DAGasOracleSync, EntryPointProvider, EvmProvider, FeeEstimator, Providers,
 };
 use rundler_sim::{
-    EstimationSettings, MempoolConfigs, PrecheckSettings, SimulationSettings, MIN_CALL_GAS_LIMIT,
+    EstimationSettings, MIN_CALL_GAS_LIMIT, MempoolConfigs, PrecheckSettings, SimulationSettings,
 };
 use rundler_types::{
+    EntryPointAbiVersion, EntryPointVersion, PriorityFeeMode,
     chain::{ChainSpec, TryFromWithSpec},
     da::DAGasOracleType,
     hybrid_compute,
     v0_6::UserOperation as UserOperationV0_6,
     v0_7::UserOperation as UserOperationV0_7,
-    PriorityFeeMode,
 };
 use secrecy::SecretString;
 
@@ -101,7 +105,12 @@ pub async fn run() -> anyhow::Result<()> {
     if opt.common.hc_helper_addr.is_zero() {
         println!("HC helper_addr is 0; Hybrid Compute is disabled");
     } else {
-        let p2 = rundler_provider::new_alloy_provider(&node_http, 120)?;
+        let config = AlloyNetworkConfig {
+            rpc_url: Url::parse(&node_http).unwrap(),
+            client_timeout_seconds: 120,
+            ..Default::default()
+        };
+        let p2 = rundler_provider::new_alloy_provider(&config)?;
         let hx = IHCHelper::new(opt.common.hc_helper_addr, p2);
         let slot_idx = hx
             .ResponseSlot()
@@ -155,6 +164,18 @@ pub async fn run() -> anyhow::Result<()> {
             // admin CLI should not wait for ctrl-c
             return Ok(());
         }
+        Command::Backend(args) => {
+            backend::spawn_tasks(
+                task_spawner.clone(),
+                cs,
+                args,
+                opt.common,
+                providers,
+                mempool_configs,
+                entry_point_builders,
+            )
+            .await?
+        }
     }
 
     // wait for ctrl-c or the task manager to panic
@@ -206,6 +227,13 @@ enum Command {
     /// Runs the admin commands
     #[command(name = "admin")]
     Admin(AdminCliArgs),
+
+    /// Backend command
+    ///
+    /// Runs both Pool and Builder in a single process with gRPC endpoints exposed.
+    /// Useful for running a single-chain backend that a gateway can connect to.
+    #[command(name = "backend")]
+    Backend(BackendCliArgs),
 }
 
 /// CLI common options
@@ -263,24 +291,24 @@ pub struct CommonArgs {
     max_uo_cost: Option<U256>,
 
     #[arg(
-        long = "target_bundle_block_gas_limit_ratio",
-        name = "target_bundle_block_gas_limit_ratio",
+        long = "target_bundle_transaction_gas_limit_ratio",
+        name = "target_bundle_transaction_gas_limit_ratio",
         default_value = "0.5",
-        env = "TARGET_BUNDLE_BLOCK_GAS_LIMIT_RATIO",
+        env = "TARGET_BUNDLE_TRANSACTION_GAS_LIMIT_RATIO",
         value_parser = verify_f64_less_than_one,
         global = true
     )]
-    target_bundle_block_gas_limit_ratio: f64,
+    target_bundle_transaction_gas_limit_ratio: f64,
 
     #[arg(
-        long = "max_bundle_block_gas_limit_ratio",
-        name = "max_bundle_block_gas_limit_ratio",
+        long = "max_bundle_transaction_gas_limit_ratio",
+        name = "max_bundle_transaction_gas_limit_ratio",
         default_value = "0.9",
-        env = "MAX_BUNDLE_BLOCK_GAS_LIMIT_RATIO",
+        env = "MAX_BUNDLE_TRANSACTION_GAS_LIMIT_RATIO",
         value_parser = verify_f64_less_than_one,
         global = true
     )]
-    max_bundle_block_gas_limit_ratio: f64,
+    max_bundle_transaction_gas_limit_ratio: f64,
 
     #[arg(
         long = "min_stake_value",
@@ -295,7 +323,7 @@ pub struct CommonArgs {
         long = "min_unstake_delay",
         name = "min_unstake_delay",
         env = "MIN_UNSTAKE_DELAY",
-        default_value = "84600",
+        default_value = "86400",
         global = true
     )]
     min_unstake_delay: u32,
@@ -473,24 +501,16 @@ pub struct CommonArgs {
     builders_config_path: Option<String>,
 
     #[arg(
-        long = "disable_entry_point_v0_6",
-        name = "disable_entry_point_v0_6",
-        env = "DISABLE_ENTRY_POINT_V0_6",
-        default_value = "false",
+        long = "enabled_entry_points",
+        name = "enabled_entry_points",
+        env = "ENABLED_ENTRY_POINTS",
+        value_delimiter = ',',
+        default_value = "v0.7",
         global = true
     )]
-    pub disable_entry_point_v0_6: bool,
+    pub enabled_entry_points: Vec<EntryPointVersion>,
 
-    #[arg(
-        long = "disable_entry_point_v0_7",
-        name = "disable_entry_point_v0_7",
-        env = "DISABLE_ENTRY_POINT_V0_7",
-        default_value = "false",
-        global = true
-    )]
-    pub disable_entry_point_v0_7: bool,
-
-    // Ignored if disable_entry_point_v0_6 is true
+    // Ignored if v0.6 is not enabled
     // Ignored if entry_point_builders_path is set
     #[arg(
         long = "num_builders_v0_6",
@@ -501,7 +521,7 @@ pub struct CommonArgs {
     )]
     pub num_builders_v0_6: u64,
 
-    // Ignored if disable_entry_point_v0_7 is true
+    // Ignored if v0.7 is not enabled
     // Ignored if entry_point_builders_path is set
     #[arg(
         long = "num_builders_v0_7",
@@ -511,6 +531,28 @@ pub struct CommonArgs {
         global = true
     )]
     pub num_builders_v0_7: u64,
+
+    // Ignored if v0.8 is not enabled
+    // Ignored if entry_point_builders_path is set
+    #[arg(
+        long = "num_builders_v0_8",
+        name = "num_builders_v0_8",
+        env = "NUM_BUILDERS_V0_8",
+        default_value = "1",
+        global = true
+    )]
+    pub num_builders_v0_8: u64,
+
+    // Ignored if v0.9 is not enabled
+    // Ignored if entry_point_builders_path is set
+    #[arg(
+        long = "num_builders_v0_9",
+        name = "num_builders_v0_9",
+        env = "NUM_BUILDERS_V0_9",
+        default_value = "1",
+        global = true
+    )]
+    pub num_builders_v0_9: u64,
 
     #[arg(
         long = "da_gas_tracking_enabled",
@@ -529,6 +571,24 @@ pub struct CommonArgs {
         global = true
     )]
     pub provider_client_timeout_seconds: u64,
+
+    #[arg(
+        long = "provider_rate_limit_retry_enabled",
+        name = "provider_rate_limit_retry_enabled",
+        env = "PROVIDER_RATE_LIMIT_RETRY_ENABLED",
+        default_value = "false",
+        global = true
+    )]
+    pub provider_rate_limit_retry_enabled: bool,
+
+    #[arg(
+        long = "provider_consistency_retry_enabled",
+        name = "provider_consistency_retry_enabled",
+        env = "PROVIDER_CONSISTENCY_RETRY_ENABLED",
+        default_value = "false",
+        global = true
+    )]
+    pub provider_consistency_retry_enabled: bool,
 
     #[arg(
         long = "max_expected_storage_slots",
@@ -586,6 +646,40 @@ pub struct CommonArgs {
         value_parser = ValueParser::new(parse_key_val)
     )]
     pub aggregator_options: Vec<(String, String)>,
+
+    #[arg(
+        long = "eip7702_authority_pending_check_enabled",
+        name = "eip7702_authority_pending_check_enabled",
+        env = "EIP7702_AUTHORITY_PENDING_CHECK_ENABLED",
+        default_value = "false",
+        global = true
+    )]
+    pub eip7702_authority_pending_check_enabled: bool,
+}
+
+impl CommonArgs {
+    pub fn bundle_limits(&self, chain_spec: &ChainSpec) -> BundleLimits {
+        BundleLimits {
+            target_bundle_execution_gas_limit: chain_spec
+                .transaction_gas_limit_mult(self.target_bundle_transaction_gas_limit_ratio),
+            max_bundle_execution_gas_limit: chain_spec
+                .transaction_gas_limit_mult(self.max_bundle_transaction_gas_limit_ratio),
+        }
+    }
+
+    pub fn num_builders_for_entry_point(&self, entry_point_version: EntryPointVersion) -> u64 {
+        match entry_point_version {
+            EntryPointVersion::V0_6 => self.num_builders_v0_6,
+            EntryPointVersion::V0_7 => self.num_builders_v0_7,
+            EntryPointVersion::V0_8 => self.num_builders_v0_8,
+            EntryPointVersion::V0_9 => self.num_builders_v0_9,
+        }
+    }
+}
+
+pub struct BundleLimits {
+    pub target_bundle_execution_gas_limit: u128,
+    pub max_bundle_execution_gas_limit: u128,
 }
 
 /// Converts a &str into a SecretString
@@ -617,24 +711,25 @@ impl TryFromWithSpec<&CommonArgs> for EstimationSettings {
     type Error = anyhow::Error;
 
     fn try_from_with_spec(value: &CommonArgs, chain_spec: &ChainSpec) -> Result<Self, Self::Error> {
-        let max_bundle_execution_gas =
-            chain_spec.block_gas_limit_mult(value.max_bundle_block_gas_limit_ratio);
+        let bundle_limits = value.bundle_limits(chain_spec);
 
         if value.max_verification_gas
-            > max_bundle_execution_gas.saturating_sub(SIMULATION_GAS_OVERHEAD) as u64
+            > bundle_limits
+                .max_bundle_execution_gas_limit
+                .saturating_sub(SIMULATION_GAS_OVERHEAD) as u64
         {
             anyhow::bail!(
                 "max_verification_gas ({}) must be less than max_bundle_execution_gas ({}) by at least {}",
                 value.max_verification_gas,
-                max_bundle_execution_gas,
+                bundle_limits.max_bundle_execution_gas_limit,
                 SIMULATION_GAS_OVERHEAD
             );
         }
 
-        if max_bundle_execution_gas < MIN_CALL_GAS_LIMIT {
+        if bundle_limits.max_bundle_execution_gas_limit < MIN_CALL_GAS_LIMIT {
             anyhow::bail!(
                 "max_bundle_execution_gas ({}) must be greater than or equal to {}",
-                max_bundle_execution_gas,
+                bundle_limits.max_bundle_execution_gas_limit,
                 MIN_CALL_GAS_LIMIT
             );
         }
@@ -642,8 +737,8 @@ impl TryFromWithSpec<&CommonArgs> for EstimationSettings {
         Ok(Self {
             max_verification_gas: value.max_verification_gas as u128,
             max_paymaster_verification_gas: value.max_verification_gas as u128,
-            max_paymaster_post_op_gas: max_bundle_execution_gas,
-            max_bundle_execution_gas,
+            max_paymaster_post_op_gas: bundle_limits.max_bundle_execution_gas_limit,
+            max_bundle_execution_gas: bundle_limits.max_bundle_execution_gas_limit,
             max_gas_estimation_gas: value.max_gas_estimation_gas,
             verification_estimation_gas_fee: value.verification_estimation_gas_fee,
             verification_gas_limit_efficiency_reject_threshold: value
@@ -659,10 +754,11 @@ impl TryFromWithSpec<&CommonArgs> for PrecheckSettings {
     type Error = anyhow::Error;
 
     fn try_from_with_spec(value: &CommonArgs, chain_spec: &ChainSpec) -> Result<Self, Self::Error> {
+        let bundle_limits = value.bundle_limits(chain_spec);
+
         Ok(Self {
             max_verification_gas: value.max_verification_gas as u128,
-            max_bundle_execution_gas: chain_spec
-                .block_gas_limit_mult(value.max_bundle_block_gas_limit_ratio),
+            max_bundle_execution_gas: bundle_limits.max_bundle_execution_gas_limit,
             max_uo_cost: value.max_uo_cost.unwrap_or(U256::MAX),
             bundle_priority_fee_overhead_percent: value.bundle_priority_fee_overhead_percent,
             priority_fee_mode: PriorityFeeMode::try_from(
@@ -673,6 +769,7 @@ impl TryFromWithSpec<&CommonArgs> for PrecheckSettings {
             pre_verification_gas_accept_percent: value.pre_verification_gas_accept_percent,
             verification_gas_limit_efficiency_reject_threshold: value
                 .verification_gas_limit_efficiency_reject_threshold,
+            eip7702_authority_pending_check_enabled: value.eip7702_authority_pending_check_enabled,
         })
     }
 }
@@ -682,7 +779,9 @@ impl TryFrom<&CommonArgs> for SimulationSettings {
 
     fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
         if go_parse_duration::parse_duration(&value.tracer_timeout).is_err() {
-            bail!("Invalid value for tracer_timeout, must be parsable by the ParseDuration function. See docs https://pkg.go.dev/time#ParseDuration")
+            bail!(
+                "Invalid value for tracer_timeout, must be parsable by the ParseDuration function. See docs https://pkg.go.dev/time#ParseDuration"
+            )
         }
 
         Ok(Self {
@@ -690,6 +789,20 @@ impl TryFrom<&CommonArgs> for SimulationSettings {
             min_stake_value: U256::from(value.min_stake_value),
             tracer_timeout: value.tracer_timeout.clone(),
             enable_unsafe_fallback: value.enable_unsafe_fallback,
+        })
+    }
+}
+
+impl TryFrom<&CommonArgs> for AlloyNetworkConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &CommonArgs) -> Result<Self, Self::Error> {
+        Ok(Self {
+            rpc_url: Url::parse(value.node_http.as_ref().context("must provide node_http")?)?,
+            client_timeout_seconds: value.provider_client_timeout_seconds,
+            rate_limit_retry_enabled: value.provider_rate_limit_retry_enabled,
+            consistency_retry_enabled: value.provider_consistency_retry_enabled,
+            ..Default::default()
         })
     }
 }
@@ -821,7 +934,7 @@ pub struct Cli {
 pub struct RundlerProviders<P, EP06, EP07, D, DS, F> {
     provider: P,
     ep_v0_6: Option<EP06>,
-    ep_v0_7: Option<EP07>,
+    ep_v0_7_abi: [Option<EP07>; EntryPointVersion::COUNT],
     da_gas_oracle: D,
     da_gas_oracle_sync: Option<DS>,
     fee_estimator: F,
@@ -851,8 +964,8 @@ where
         &self.ep_v0_6
     }
 
-    fn ep_v0_7(&self) -> &Option<Self::EntryPointV0_7> {
-        &self.ep_v0_7
+    fn ep_v0_7(&self, ep_version: EntryPointVersion) -> &Option<Self::EntryPointV0_7> {
+        &self.ep_v0_7_abi[ep_version as usize]
     }
 
     fn da_gas_oracle(&self) -> &Self::DAGasOracle {
@@ -872,46 +985,49 @@ pub fn construct_providers(
     args: &CommonArgs,
     chain_spec: &ChainSpec,
 ) -> anyhow::Result<impl Providers + 'static> {
-    let provider = Arc::new(rundler_provider::new_alloy_provider(
-        args.node_http.as_ref().context("must provide node_http")?,
-        args.provider_client_timeout_seconds,
-    )?);
+    let alloy_network_config = AlloyNetworkConfig::try_from(args)?;
+    let provider = Arc::new(rundler_provider::new_alloy_provider(&alloy_network_config)?);
+
     let (da_gas_oracle, da_gas_oracle_sync) =
         rundler_provider::new_alloy_da_gas_oracle(chain_spec, provider.clone());
-    let max_bundle_execution_gas = chain_spec
-        .block_gas_limit_mult(args.max_bundle_block_gas_limit_ratio)
+    let bundle_limits = args.bundle_limits(chain_spec);
+    let max_bundle_execution_gas = bundle_limits
+        .max_bundle_execution_gas_limit
         .try_into()
         .expect("max_bundle_execution_gas is too large for u64");
 
     let evm = AlloyEvmProvider::new(provider.clone());
 
-    let ep_v0_6 = if args.disable_entry_point_v0_6 {
-        None
-    } else {
-        Some(AlloyEntryPointV0_6::new(
-            chain_spec.clone(),
-            args.max_verification_gas,
-            max_bundle_execution_gas,
-            args.max_gas_estimation_gas,
-            max_bundle_execution_gas,
-            provider.clone(),
-            da_gas_oracle.clone(),
-        ))
-    };
+    let mut ep_v0_7_abi = [const { None }; EntryPointVersion::COUNT];
+    let mut ep_v0_6 = None;
 
-    let ep_v0_7 = if args.disable_entry_point_v0_7 {
-        None
-    } else {
-        Some(AlloyEntryPointV0_7::new(
-            chain_spec.clone(),
-            args.max_verification_gas,
-            max_bundle_execution_gas,
-            args.max_gas_estimation_gas,
-            max_bundle_execution_gas,
-            provider.clone(),
-            da_gas_oracle.clone(),
-        ))
-    };
+    for ep_version in &args.enabled_entry_points {
+        match ep_version.abi_version() {
+            EntryPointAbiVersion::V0_6 => {
+                ep_v0_6 = Some(AlloyEntryPointV0_6::new(
+                    chain_spec.clone(),
+                    args.max_verification_gas,
+                    max_bundle_execution_gas,
+                    args.max_gas_estimation_gas,
+                    max_bundle_execution_gas,
+                    provider.clone(),
+                    da_gas_oracle.clone(),
+                ))
+            }
+            EntryPointAbiVersion::V0_7 => {
+                ep_v0_7_abi[*ep_version as usize] = Some(AlloyEntryPointV0_7::new(
+                    chain_spec.clone(),
+                    *ep_version,
+                    args.max_verification_gas,
+                    max_bundle_execution_gas,
+                    args.max_gas_estimation_gas,
+                    max_bundle_execution_gas,
+                    provider.clone(),
+                    da_gas_oracle.clone(),
+                ))
+            }
+        }
+    }
 
     let priority_fee_mode = PriorityFeeMode::try_from(
         args.priority_fee_mode_kind.as_str(),
@@ -928,7 +1044,7 @@ pub fn construct_providers(
     Ok(RundlerProviders {
         provider: evm,
         ep_v0_6,
-        ep_v0_7,
+        ep_v0_7_abi,
         da_gas_oracle,
         da_gas_oracle_sync,
         fee_estimator,
@@ -946,7 +1062,10 @@ fn lint_da_gas_tracking(da_gas_tracking_enabled: bool, chain_spec: &ChainSpec) -
     } else if !(chain_spec.da_gas_oracle_type == DAGasOracleType::CachedNitro
         || chain_spec.da_gas_oracle_type == DAGasOracleType::LocalBedrock)
     {
-        tracing::warn!("DA tracking is disabled because DA gas oracle contract type {:?} does not support caching", chain_spec.da_gas_oracle_type);
+        tracing::warn!(
+            "DA tracking is disabled because DA gas oracle contract type {:?} does not support caching",
+            chain_spec.da_gas_oracle_type
+        );
         false
     } else {
         true

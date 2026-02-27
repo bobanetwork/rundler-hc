@@ -1,11 +1,12 @@
 # Adapted from https://github.com/paradigmxyz/reth/blob/main/Dockerfile
 # syntax=docker/dockerfile:1.4
 
-FROM rust:1.87.0 AS chef-builder
+FROM rust:1.92.0-bookworm AS chef-builder
 
 # Install system dependencies
-RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - && echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
 RUN mkdir -p /etc/apt/keyrings
+RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | gpg --dearmor -o /etc/apt/keyrings/yarn.gpg
+RUN echo "deb [signed-by=/etc/apt/keyrings/yarn.gpg] https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
 RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
 RUN echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
 RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-config protobuf-compiler nodejs yarn rsync
@@ -13,7 +14,7 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-
 SHELL ["/bin/bash", "-c"]
 RUN curl -L https://foundry.paradigm.xyz | bash
 ENV PATH="/root/.foundry/bin:${PATH}"
-RUN foundryup -i v1.0.0
+RUN foundryup -i v1.5.1
 
 RUN cargo install cargo-chef --locked
 
@@ -44,7 +45,7 @@ RUN rm -r recipe-original
 RUN cargo build --profile $BUILD_PROFILE --locked --bin rundler
 
 # Use Ubuntu as the release image
-FROM ubuntu AS runtime
+FROM ubuntu:noble AS runtime
 WORKDIR /app
 # Install system dependencies for the runtime
 # install curl for healthcheck
@@ -55,6 +56,8 @@ RUN apt-get install -y redis-server # for KMS
 # Copy rundler over from the build stage
 COPY --from=builder /app/target/release/rundler /usr/local/bin
 COPY docker-wrapper.sh /docker-wrapper.sh
+# This chain_spec is also used for local devnets
+COPY bin/rundler/chain_specs/boba_sepolia.toml /chain_specs/boba_sepolia.toml
 
-EXPOSE 3000 8080
+EXPOSE 3000 3300 8080
 ENTRYPOINT ["/docker-wrapper.sh"]

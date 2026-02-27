@@ -16,8 +16,8 @@
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -25,43 +25,45 @@ use alloy_primitives::{Address, B256};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use rundler_task::{
-    grpc::{grpc_metrics::GrpcMetricsLayer, protos::from_bytes},
     GracefulShutdown, TaskSpawner,
+    grpc::{grpc_metrics::GrpcMetricsLayer, protos::from_bytes},
 };
 use rundler_types::{
+    EntityUpdate, UserOperationId, UserOperationVariant,
     chain::ChainSpec,
     pool::{Pool, Reputation},
-    EntityUpdate, UserOperationId, UserOperationVariant,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tonic::{transport::Server, Request, Response, Result, Status};
+use tonic::{Request, Response, Result, Status, transport::Server};
 
 use super::protos::{
-    add_op_response, admin_set_tracking_response, debug_clear_state_response,
-    debug_dump_mempool_response, debug_dump_paymaster_balances_response,
-    debug_dump_reputation_response, debug_set_reputation_response, get_op_by_hash_response,
-    get_op_by_id_response, get_ops_by_hashes_response, get_ops_response,
-    get_ops_summaries_response, get_reputation_status_response, get_stake_status_response,
-    op_pool_server::{OpPool, OpPoolServer},
-    remove_op_by_id_response, remove_ops_response, update_entities_response, AddOpRequest,
-    AddOpResponse, AddOpSuccess, AdminSetTrackingRequest, AdminSetTrackingResponse,
+    AddOpRequest, AddOpResponse, AddOpSuccess, AdminSetTrackingRequest, AdminSetTrackingResponse,
     AdminSetTrackingSuccess, DebugClearStateRequest, DebugClearStateResponse,
     DebugClearStateSuccess, DebugDumpMempoolRequest, DebugDumpMempoolResponse,
     DebugDumpMempoolSuccess, DebugDumpPaymasterBalancesRequest, DebugDumpPaymasterBalancesResponse,
     DebugDumpPaymasterBalancesSuccess, DebugDumpReputationRequest, DebugDumpReputationResponse,
     DebugDumpReputationSuccess, DebugSetReputationRequest, DebugSetReputationResponse,
     DebugSetReputationSuccess, GetOpByHashRequest, GetOpByHashResponse, GetOpByHashSuccess,
-    GetOpByIdRequest, GetOpByIdResponse, GetOpByIdSuccess, GetOpsByHashesRequest,
-    GetOpsByHashesResponse, GetOpsByHashesSuccess, GetOpsRequest, GetOpsResponse, GetOpsSuccess,
-    GetOpsSummariesRequest, GetOpsSummariesResponse, GetOpsSummariesSuccess,
-    GetReputationStatusRequest, GetReputationStatusResponse, GetReputationStatusSuccess,
-    GetStakeStatusRequest, GetStakeStatusResponse, GetStakeStatusSuccess,
-    GetSupportedEntryPointsRequest, GetSupportedEntryPointsResponse, MempoolOp,
-    PoolOperationSummary, RemoveOpByIdRequest, RemoveOpByIdResponse, RemoveOpByIdSuccess,
-    RemoveOpsRequest, RemoveOpsResponse, RemoveOpsSuccess, ReputationStatus,
-    SubscribeNewHeadsRequest, SubscribeNewHeadsResponse, TryUoFromProto, UpdateEntitiesRequest,
-    UpdateEntitiesResponse, UpdateEntitiesSuccess, OP_POOL_FILE_DESCRIPTOR_SET,
+    GetOpByIdRequest, GetOpByIdResponse, GetOpByIdSuccess, GetOpStatusRequest, GetOpStatusResponse,
+    GetOpStatusSuccess, GetOpsByHashesRequest, GetOpsByHashesResponse, GetOpsByHashesSuccess,
+    GetOpsRequest, GetOpsResponse, GetOpsSuccess, GetOpsSummariesRequest, GetOpsSummariesResponse,
+    GetOpsSummariesSuccess, GetReputationStatusRequest, GetReputationStatusResponse,
+    GetReputationStatusSuccess, GetStakeStatusRequest, GetStakeStatusResponse,
+    GetStakeStatusSuccess, GetSupportedEntryPointsRequest, GetSupportedEntryPointsResponse,
+    MempoolOp, NotifyPendingBundleRequest, NotifyPendingBundleResponse, NotifyPendingBundleSuccess,
+    OP_POOL_FILE_DESCRIPTOR_SET, PoolOperationStatus, PoolOperationSummary, RemoveOpByIdRequest,
+    RemoveOpByIdResponse, RemoveOpByIdSuccess, RemoveOpsRequest, RemoveOpsResponse,
+    RemoveOpsSuccess, ReputationStatus, SubscribeNewHeadsRequest, SubscribeNewHeadsResponse,
+    TryUoFromProto, UpdateEntitiesRequest, UpdateEntitiesResponse, UpdateEntitiesSuccess,
+    add_op_response, admin_set_tracking_response, debug_clear_state_response,
+    debug_dump_mempool_response, debug_dump_paymaster_balances_response,
+    debug_dump_reputation_response, debug_set_reputation_response, get_op_by_hash_response,
+    get_op_by_id_response, get_op_status_response, get_ops_by_hashes_response, get_ops_response,
+    get_ops_summaries_response, get_reputation_status_response, get_stake_status_response,
+    notify_pending_bundle_response,
+    op_pool_server::{OpPool, OpPoolServer},
+    remove_op_by_id_response, remove_ops_response, update_entities_response,
 };
 use crate::server::local::LocalPoolHandle;
 
@@ -696,5 +698,72 @@ impl OpPool for OpPoolImpl {
         }));
 
         Ok(Response::new(UnboundedReceiverStream::new(rx)))
+    }
+
+    async fn notify_pending_bundle(
+        &self,
+        request: Request<NotifyPendingBundleRequest>,
+    ) -> Result<Response<NotifyPendingBundleResponse>> {
+        let req = request.into_inner();
+        let entry_point = self.get_entry_point(&req.entry_point)?;
+        let tx_hash: B256 = from_bytes(&req.tx_hash)
+            .map_err(|e| Status::invalid_argument(format!("Invalid tx_hash: {e}")))?;
+        let builder_address = self.get_address(&req.builder_address)?;
+        let uo_hashes: Vec<B256> = req
+            .uo_hashes
+            .into_iter()
+            .map(|h| {
+                from_bytes(&h).map_err(|e| Status::invalid_argument(format!("Invalid hash: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let resp = match self
+            .local_pool
+            .notify_pending_bundle(
+                entry_point,
+                tx_hash,
+                req.sent_at_block,
+                builder_address,
+                uo_hashes,
+            )
+            .await
+        {
+            Ok(_) => NotifyPendingBundleResponse {
+                result: Some(notify_pending_bundle_response::Result::Success(
+                    NotifyPendingBundleSuccess {},
+                )),
+            },
+            Err(error) => NotifyPendingBundleResponse {
+                result: Some(notify_pending_bundle_response::Result::Failure(
+                    error.into(),
+                )),
+            },
+        };
+
+        Ok(Response::new(resp))
+    }
+
+    async fn get_op_status(
+        &self,
+        request: Request<GetOpStatusRequest>,
+    ) -> Result<Response<GetOpStatusResponse>> {
+        let req = request.into_inner();
+        let hash: B256 = from_bytes(&req.hash)
+            .map_err(|e| Status::invalid_argument(format!("Invalid hash: {e}")))?;
+
+        let resp = match self.local_pool.get_op_status(hash).await {
+            Ok(status) => GetOpStatusResponse {
+                result: Some(get_op_status_response::Result::Success(
+                    GetOpStatusSuccess {
+                        status: status.as_ref().map(PoolOperationStatus::from),
+                    },
+                )),
+            },
+            Err(error) => GetOpStatusResponse {
+                result: Some(get_op_status_response::Result::Failure(error.into())),
+            },
+        };
+
+        Ok(Response::new(resp))
     }
 }

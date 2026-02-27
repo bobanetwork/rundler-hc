@@ -15,7 +15,7 @@ use std::{future::Future, pin::Pin};
 
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolInterface;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use metrics::Histogram;
 use metrics_derive::Metrics;
 #[cfg(feature = "test-utils")]
@@ -89,7 +89,6 @@ pub trait GasEstimator: Send + Sync {
         &self,
         op: Self::UserOperationOptionalGas,
         state_override: StateOverride,
-        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError>;
 }
 
@@ -150,7 +149,6 @@ struct Metrics {
     pvgl_estimate_ms: Histogram,
 }
 
-#[derive(Debug)] // FIXME HC
 enum BinarySearchResult {
     Success(u128, u32),
     Revert(Bytes),

@@ -11,14 +11,19 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{Address, B256, U128, U256, U64};
+use alloy_primitives::{Address, B256, U64, U128, U256};
 use rundler_provider::{Log, TransactionReceipt};
 use rundler_types::{
-    chain::{ChainSpec, FromWithSpec, IntoWithSpec},
-    pool::{Reputation, ReputationStatus},
-    UserOperationOptionalGas, UserOperationVariant,
+    EntryPointVersion, UserOperationOptionalGas, UserOperationVariant,
+    chain::ChainSpec,
+    pool::{PendingBundleInfo, PoolOperationStatus, Reputation},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::{
+    eth::EthRpcError,
+    utils::{FromRpcType, IntoRundlerType, TryFromRpcType, TryIntoRundlerType},
+};
 
 mod permissions;
 pub(crate) use permissions::RpcUserOperationPermissions;
@@ -33,8 +38,6 @@ pub(crate) use v0_7::{
     RpcGasEstimate as RpcGasEstimateV0_7, RpcUserOperation as RpcUserOperationV0_7,
     RpcUserOperationOptionalGas as RpcUserOperationOptionalGasV0_7,
 };
-
-mod rpc_authorization;
 
 /// API namespace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString)]
@@ -112,11 +115,19 @@ impl From<UserOperationVariant> for RpcUserOperation {
     }
 }
 
-impl FromWithSpec<RpcUserOperation> for UserOperationVariant {
-    fn from_with_spec(op: RpcUserOperation, chain_spec: &ChainSpec) -> Self {
+impl TryFromRpcType<RpcUserOperation> for UserOperationVariant {
+    fn try_from_rpc_type(
+        op: RpcUserOperation,
+        chain_spec: &ChainSpec,
+        ep_version: EntryPointVersion,
+    ) -> Result<Self, EthRpcError> {
         match op {
-            RpcUserOperation::V0_6(op) => UserOperationVariant::V0_6(op.into_with_spec(chain_spec)),
-            RpcUserOperation::V0_7(op) => UserOperationVariant::V0_7(op.into_with_spec(chain_spec)),
+            RpcUserOperation::V0_6(op) => Ok(UserOperationVariant::V0_6(
+                op.try_into_rundler_type(chain_spec, ep_version)?,
+            )),
+            RpcUserOperation::V0_7(op) => Ok(UserOperationVariant::V0_7(
+                op.try_into_rundler_type(chain_spec, ep_version)?,
+            )),
         }
     }
 }
@@ -145,11 +156,19 @@ pub(crate) enum RpcUserOperationOptionalGas {
     V0_7(RpcUserOperationOptionalGasV0_7),
 }
 
-impl From<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
-    fn from(op: RpcUserOperationOptionalGas) -> Self {
+impl FromRpcType<RpcUserOperationOptionalGas> for UserOperationOptionalGas {
+    fn from_rpc_type(
+        op: RpcUserOperationOptionalGas,
+        chain_spec: &ChainSpec,
+        ep_version: EntryPointVersion,
+    ) -> Self {
         match op {
-            RpcUserOperationOptionalGas::V0_6(op) => UserOperationOptionalGas::V0_6(op.into()),
-            RpcUserOperationOptionalGas::V0_7(op) => UserOperationOptionalGas::V0_7(op.into()),
+            RpcUserOperationOptionalGas::V0_6(op) => {
+                UserOperationOptionalGas::V0_6(op.into_rundler_type(chain_spec, ep_version))
+            }
+            RpcUserOperationOptionalGas::V0_7(op) => {
+                UserOperationOptionalGas::V0_7(op.into_rundler_type(chain_spec, ep_version))
+            }
         }
     }
 }
@@ -173,6 +192,12 @@ impl From<RpcGasEstimateV0_7> for RpcGasEstimate {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UOStatusEnum {
+    Mined,
+    Preconfirmed,
+}
 /// User operation receipt
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -199,6 +224,8 @@ pub struct RpcUserOperationReceipt {
     pub logs: Vec<Log>,
     /// The receipt of the transaction that included this operation
     pub receipt: TransactionReceipt,
+    /// The status of this operation
+    pub status: UOStatusEnum,
 }
 
 /// Reputation of an entity
@@ -224,7 +251,7 @@ pub struct RpcReputationOutput {
     /// Number of operations included in this interval
     pub ops_included: U64,
     /// Reputation status
-    pub status: ReputationStatus,
+    pub status: U64,
 }
 
 impl From<RpcReputationInput> for Reputation {
@@ -294,18 +321,97 @@ pub(crate) struct RpcMinedUserOperation {
 }
 
 /// User operation status value
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum UserOperationStatusEnum {
+    #[default]
     Unknown,
     Pending,
+    PendingBundle,
     Mined,
+    Preconfirmed,
+}
+
+/// Information about a pending bundle containing a user operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RpcPendingBundleInfo {
+    /// The transaction hash of the pending bundle
+    pub(crate) tx_hash: B256,
+    /// The block number at which the bundle was sent
+    pub(crate) sent_at_block: U64,
+    /// The address of the bundler that sent the bundle
+    pub(crate) bundler_address: Address,
 }
 
 /// User operation status
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RpcUserOperationStatus {
     pub(crate) status: UserOperationStatusEnum,
     pub(crate) receipt: Option<RpcUserOperationReceipt>,
+    pub(crate) user_operation: Option<RpcUserOperation>,
+    pub(crate) added_at_block: Option<U64>,
+    pub(crate) valid_until: Option<U64>,
+    pub(crate) valid_after: Option<U64>,
+    pub(crate) pending_bundle: Option<RpcPendingBundleInfo>,
+}
+
+impl From<PendingBundleInfo> for RpcPendingBundleInfo {
+    fn from(info: PendingBundleInfo) -> Self {
+        RpcPendingBundleInfo {
+            tx_hash: info.tx_hash,
+            sent_at_block: U64::from(info.sent_at_block),
+            bundler_address: info.builder_address,
+        }
+    }
+}
+
+impl From<PoolOperationStatus> for RpcUserOperationStatus {
+    fn from(status: PoolOperationStatus) -> Self {
+        let pending_bundle = status.pending_bundle.map(RpcPendingBundleInfo::from);
+        let op_status = if pending_bundle.is_some() {
+            UserOperationStatusEnum::PendingBundle
+        } else {
+            UserOperationStatusEnum::Pending
+        };
+
+        RpcUserOperationStatus {
+            status: op_status,
+            receipt: None,
+            user_operation: Some(status.uo.into()),
+            added_at_block: Some(U64::from(status.added_at_block)),
+            valid_until: Some(U64::from(
+                status.valid_time_range.valid_until.seconds_since_epoch(),
+            )),
+            valid_after: Some(U64::from(
+                status.valid_time_range.valid_after.seconds_since_epoch(),
+            )),
+            pending_bundle,
+        }
+    }
+}
+
+/// Suggested gas fees for user operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSuggestedGasFees {
+    /// Suggested priority fee with configurable buffer above current
+    pub max_priority_fee_per_gas: U128,
+    /// Suggested max fee (bundler-inflated base fee with buffer + suggested priority fee)
+    pub max_fee_per_gas: U128,
+}
+
+/// Gas price information for user operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcUserOperationGasPrice {
+    /// Required priority fee (same as rundler_maxPriorityFeePerGas)
+    pub priority_fee: U128,
+    /// Current pending base fee for next block (without bundler overhead)
+    pub base_fee: U128,
+    /// Block number this estimate is based on
+    pub block_number: U64,
+    /// Suggested fees with buffer for faster inclusion
+    pub suggested: RpcSuggestedGasFees,
 }

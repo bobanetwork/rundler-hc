@@ -11,16 +11,16 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{ruint::UintTryFrom, Address, Bytes, B256, U128};
+use alloy_primitives::{Address, B256, Bytes, U128, ruint::UintTryFrom};
 use alloy_sol_types::SolEvent;
 use rundler_contracts::v0_7::IEntryPoint::{
     BeforeExecution, UserOperationEvent, UserOperationRevertReason,
 };
 use rundler_provider::{Log, TransactionReceipt};
-use rundler_types::{chain::ChainSpec, v0_7::UserOperation};
+use rundler_types::{authorization::Eip7702Auth, chain::ChainSpec, v0_7::UserOperation};
 
 use super::common::{EntryPointEvents, UserOperationEventProviderImpl};
-use crate::types::RpcUserOperationReceipt;
+use crate::types::{RpcUserOperationReceipt, UOStatusEnum};
 
 pub(crate) type UserOperationEventProviderV0_7<P> =
     UserOperationEventProviderImpl<P, EntryPointFiltersV0_7>;
@@ -69,20 +69,27 @@ impl EntryPointEvents for EntryPointFiltersV0_7 {
             logs,
             receipt: tx_receipt,
             reason,
+            status: UOStatusEnum::Mined,
         }
     }
 
-    fn get_user_operations_from_tx_data(tx_data: Bytes, chain_spec: &ChainSpec) -> Vec<Self::UO> {
-        let uos_per_agg = rundler_provider::decode_v0_7_ops_from_calldata(chain_spec, &tx_data);
+    fn get_user_operations_from_tx_data(
+        to_address: Address,
+        tx_data: Bytes,
+        tx_auth_list: &[Eip7702Auth],
+        chain_spec: &ChainSpec,
+    ) -> Vec<Self::UO> {
+        let uos_per_agg = rundler_provider::decode_v0_7_ops_from_calldata(
+            chain_spec,
+            to_address,
+            &tx_data,
+            tx_auth_list,
+        );
 
         uos_per_agg
             .into_iter()
             .flat_map(|uos_per_agg| uos_per_agg.user_ops)
             .collect()
-    }
-
-    fn address(chain_spec: &ChainSpec) -> Address {
-        chain_spec.entry_point_address_v0_7
     }
 
     fn before_execution_selector() -> B256 {

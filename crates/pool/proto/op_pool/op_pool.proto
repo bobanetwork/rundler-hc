@@ -24,12 +24,21 @@ message UserOperation {
   }
 }
 
+enum EntryPointVersion {
+  ENTRY_POINT_VERSION_UNSPECIFIED = 0;
+  ENTRY_POINT_VERSION_V0_6 = 1;
+  ENTRY_POINT_VERSION_V0_7 = 2;
+  ENTRY_POINT_VERSION_V0_8 = 3;
+  ENTRY_POINT_VERSION_V0_9 = 4;
+}
+
 message UserOperationPermissions {
   bool trusted = 1;
   optional uint64 max_allowed_in_pool_for_sender = 2;
   optional uint32 underpriced_accept_pct = 3;
   optional uint32 underpriced_bundle_pct = 4;
   BundlerSponsorship bundler_sponsorship = 5;
+  bool eip7702_disabled = 6;
 }
 
 message BundlerSponsorship {
@@ -124,6 +133,9 @@ message UserOperationV07 {
   AuthorizationTuple authorization_tuple = 18;
   // aggregator
   bytes aggregator = 19;
+
+  // Entry point version
+  EntryPointVersion entry_point_version = 20;
 }
 
 enum EntityType {
@@ -195,6 +207,8 @@ message MempoolOp {
   string filter_id = 10;
   // The permissions for the UserOperation
   UserOperationPermissions permissions = 11;
+  // Whether the sender is a 7702 delegation
+  bool sender_is_7702 = 12;
 }
 
 message PoolOperationSummary {
@@ -204,8 +218,10 @@ message PoolOperationSummary {
   bytes entry_point = 2;
   // The sender of the UserOperation
   bytes sender = 3;
+  // The sim block number of the UserOperation
+  uint64 sim_block_number = 4;
   // Hybrid Compute extension
-  bytes hc_hash = 4;
+  bytes hc_hash = 5;
 }
 
 // Data associated with a user operation for DA gas calculations
@@ -226,7 +242,7 @@ message NitroDaGasData {
 
 // Data associated with a user operation for Bedrock DA gas calculations
 message BedrockDaGasData {
-  uint64 units = 1;
+  bytes units = 1;
 }
 
 // Defines the gRPC endpoints for a UserOperation mempool service
@@ -292,6 +308,12 @@ service OpPool {
 
   // Clears the bundler mempool and reputation data of paymasters/accounts/factories/aggregators
   rpc AdminSetTracking(AdminSetTrackingRequest) returns (AdminSetTrackingResponse);
+
+  // Notify the pool about a pending bundle transaction
+  rpc NotifyPendingBundle(NotifyPendingBundleRequest) returns (NotifyPendingBundleResponse);
+
+  // Get extended status for a user operation
+  rpc GetOpStatus(GetOpStatusRequest) returns (GetOpStatusResponse);
 }
 
 message GetSupportedEntryPointsRequest {}
@@ -384,6 +406,10 @@ message GetOpByHashResponse {
 }
 message GetOpByHashSuccess {
   MempoolOp op = 1;
+}
+
+message PreconfInfo {
+  bytes tx_hash = 1;
 }
 
 message GetOpByIdRequest {
@@ -598,6 +624,50 @@ message AdminSetTrackingResponse {
 }
 message AdminSetTrackingSuccess {}
 
+message NotifyPendingBundleRequest {
+  bytes entry_point = 1;
+  bytes tx_hash = 2;
+  uint64 sent_at_block = 3;
+  bytes builder_address = 4;
+  repeated bytes uo_hashes = 5;
+}
+message NotifyPendingBundleResponse {
+  oneof result {
+    NotifyPendingBundleSuccess success = 1;
+    MempoolError failure = 2;
+  }
+}
+message NotifyPendingBundleSuccess {}
+
+message GetOpStatusRequest {
+  bytes hash = 1;
+}
+message GetOpStatusResponse {
+  oneof result {
+    GetOpStatusSuccess success = 1;
+    MempoolError failure = 2;
+  }
+}
+message GetOpStatusSuccess {
+  PoolOperationStatus status = 1;
+}
+
+message PendingBundleInfo {
+  bytes tx_hash = 1;
+  uint64 sent_at_block = 2;
+  bytes builder_address = 3;
+}
+
+message PoolOperationStatus {
+  UserOperation uo = 1;
+  bytes entry_point = 2;
+  uint64 added_at_block = 3;
+  uint64 valid_after = 4;
+  uint64 valid_until = 5;
+  optional PendingBundleInfo pending_bundle = 6;
+  optional PreconfInfo preconf_info = 7;
+}
+
 message Reputation {
   // The (serialized) address to set the reputation for
   bytes address = 1;
@@ -732,11 +802,15 @@ message PrecheckViolationError {
     CallGasLimitTooLow call_gas_limit_too_low = 12;
     FactoryMustBeEmpty factory_must_be_empty = 13;
     OverMaxCost over_max_cost = 14;
+    Eip7702Disabled eip_7702_disabled = 15;
+    Eip7702SenderPendingTransactionCountTooHigh eip_7702_sender_pending_transaction_count_too_high = 16;
+    Eip7702NotSupported eip_7702_not_supported = 17;
+    Eip7702ChainIdMismatch eip_7702_chain_id_mismatch = 18;
+    Eip7702InvalidSignature eip_7702_invalid_signature = 19;
+    Eip7702SenderRecoveredAuthorityMismatch eip_7702_sender_recovered_authority_mismatch = 20;
+    Eip7702NonceMismatch eip_7702_nonce_mismatch = 21;
+    Eip7702InvalidFactory eip_7702_invalid_factory = 22;
   }
-}
-
-message InitCodeTooShort {
-  uint64 length = 1;
 }
 
 message SenderIsNotContractAndNoInitCode {
@@ -764,10 +838,6 @@ message VerificationGasLimitTooHigh {
 message PreVerificationGasTooLow {
   bytes actual_gas = 1;
   bytes min_gas = 2;
-}
-
-message PaymasterTooShort {
-  uint64 length = 1;
 }
 
 message PaymasterIsNotContract {
@@ -806,6 +876,39 @@ message FactoryMustBeEmpty{
 message OverMaxCost {
   bytes actual_cost = 1;
   bytes max_cost = 2;
+}
+
+message Eip7702Disabled {}
+
+message Eip7702NotSupported {
+  bytes entry_point = 1;
+}
+
+message Eip7702SenderPendingTransactionCountTooHigh {
+  uint64 pending_transaction_count = 1;
+}
+
+message Eip7702ChainIdMismatch {
+  uint64 expected_chain_id = 1;
+  uint64 actual_chain_id = 2;
+}
+
+message Eip7702InvalidSignature {
+  string reason = 1;
+}
+
+message Eip7702SenderRecoveredAuthorityMismatch {
+  bytes sender_address = 1;
+  bytes recovered_authority = 2;
+}
+
+message Eip7702NonceMismatch {
+  uint64 expected_nonce = 1;
+  uint64 actual_nonce = 2;
+}
+
+message Eip7702InvalidFactory {
+  string reason = 1;
 }
 
 // SIMULATION VIOLATIONS

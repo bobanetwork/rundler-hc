@@ -24,8 +24,8 @@ use metrics::Histogram;
 use metrics_derive::Metrics;
 use rundler_signer::SignerManager;
 use rundler_task::{
-    server::{HealthCheck, ServerStatus},
     GracefulShutdown,
+    server::{HealthCheck, ServerStatus},
 };
 use rundler_types::{
     builder::{Builder, BuilderError, BuilderResult, BundlingMode},
@@ -261,7 +261,7 @@ impl LocalBuilderServerRunner {
                                         Ok(ServerResponse::DebugSendBundleNow { hash: tx_hash, block_number })
                                     },
                                     SendBundleResult::NoOperationsInitially => {
-                                        Err(anyhow::anyhow!("no ops to send").into())
+                                        Err(BuilderError::NoOperationsToSend)
                                     },
                                     SendBundleResult::StalledAtMaxFeeIncreases => Err(anyhow::anyhow!("stalled at max fee increases").into()),
                                     SendBundleResult::Error(e) => Err(anyhow::anyhow!("send bundle error: {e:?}").into()),

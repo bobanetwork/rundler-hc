@@ -23,26 +23,26 @@ use rundler_builder::{
 };
 use rundler_pbh::PbhSubmissionProxy;
 use rundler_pool::RemotePoolClient;
-use rundler_provider::Providers;
+use rundler_provider::{AlloyNetworkConfig, Providers};
 use rundler_sim::MempoolConfigs;
 use rundler_task::{
-    server::{connect_with_retries_shutdown, format_socket_addr},
     TaskSpawnerExt,
+    server::{connect_with_retries_shutdown, format_socket_addr},
 };
 use rundler_types::{
+    EntryPointVersion,
     chain::{ChainSpec, ContractRegistry},
     proxy::SubmissionProxy,
-    EntryPointVersion,
 };
-use rundler_utils::emit::{self, WithEntryPoint, EVENT_CHANNEL_CAPACITY};
+use rundler_utils::emit::{self, EVENT_CHANNEL_CAPACITY, WithEntryPoint};
 use secrecy::SecretString;
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use super::{
+    CommonArgs,
     proxy::{PassThroughProxy, SubmissionProxyType},
     signer::SignerArgs,
-    CommonArgs,
 };
 
 const REQUEST_CHANNEL_CAPACITY: usize = 1024;
@@ -58,7 +58,7 @@ pub struct BuilderArgs {
         env = "BUILDER_PORT",
         default_value = "50051"
     )]
-    port: u16,
+    pub port: u16,
 
     /// Host to listen on for gRPC requests
     #[arg(
@@ -67,7 +67,7 @@ pub struct BuilderArgs {
         env = "BUILDER_HOST",
         default_value = "127.0.0.1"
     )]
-    host: String,
+    pub host: String,
 
     #[command(flatten)]
     signer_args: SignerArgs,
@@ -189,6 +189,15 @@ pub struct BuilderArgs {
         default_value = "20"
     )]
     max_replacement_underpriced_blocks: u64,
+
+    /// The maximum number of ops requested from mempool
+    #[arg(
+        long = "builder.assigner_max_ops_per_request",
+        name = "builder.assigner_max_ops_per_request",
+        env = "BUILDER_ASSIGNER_MAX_OPS_PER_REQUEST",
+        default_value = "1024"
+    )]
+    assigner_max_ops_per_request: u64,
 }
 
 impl BuilderArgs {
@@ -208,64 +217,54 @@ impl BuilderArgs {
         let mut entry_points = vec![];
         let mut num_builders = 0;
 
-        if !common.disable_entry_point_v0_6 {
+        for ep in &common.enabled_entry_points {
+            let ep_address = chain_spec.entry_point_address(*ep);
             let builders = entry_point_builders
                 .as_ref()
                 .and_then(|builder_configs| {
                     builder_configs
-                        .get_for_entry_point(chain_spec.entry_point_address_v0_6)
+                        .get_for_entry_point(ep_address)
                         .map(|ep| ep.builders())
                 })
-                .unwrap_or_else(|| builder_settings_from_cli(common.num_builders_v0_6));
+                .unwrap_or_else(|| {
+                    builder_settings_from_cli(common.num_builders_for_entry_point(*ep))
+                });
+
+            // check for submission proxy on EP v0.9+ and fail
+            if *ep >= EntryPointVersion::V0_9
+                && builders.iter().any(|b| b.submission_proxy.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "Submission proxy is not supported for entry point version: {:?}",
+                    *ep
+                ));
+            }
+
+            num_builders += builders.len();
 
             entry_points.push(EntryPointBuilderSettings {
-                address: chain_spec.entry_point_address_v0_6,
-                version: EntryPointVersion::V0_6,
-                mempool_configs: mempool_configs
-                    .get_for_entry_point(chain_spec.entry_point_address_v0_6),
+                address: ep_address,
+                version: *ep,
+                mempool_configs: mempool_configs.get_for_entry_point(ep_address),
                 builders,
             });
-
-            num_builders += common.num_builders_v0_6;
-        }
-        if !common.disable_entry_point_v0_7 {
-            let builders = entry_point_builders
-                .as_ref()
-                .and_then(|builder_configs| {
-                    builder_configs
-                        .get_for_entry_point(chain_spec.entry_point_address_v0_7)
-                        .map(|ep| ep.builders())
-                })
-                .unwrap_or_else(|| builder_settings_from_cli(common.num_builders_v0_7));
-
-            entry_points.push(EntryPointBuilderSettings {
-                address: chain_spec.entry_point_address_v0_7,
-                version: EntryPointVersion::V0_7,
-                mempool_configs: mempool_configs
-                    .get_for_entry_point(chain_spec.entry_point_address_v0_7),
-                builders,
-            });
-
-            num_builders += common.num_builders_v0_7;
         }
 
         let sender_args = self.sender_args(&chain_spec, &rpc_url)?;
-        let signing_scheme = self
-            .signer_args
-            .signing_scheme(Some(num_builders as usize))?;
+        let signing_scheme = self.signer_args.signing_scheme(Some(num_builders))?;
 
         let da_gas_tracking_enabled =
             super::lint_da_gas_tracking(common.da_gas_tracking_enabled, &chain_spec);
 
-        let provider_client_timeout_seconds = common.provider_client_timeout_seconds;
+        let alloy_network_config = AlloyNetworkConfig::try_from(common)?;
+
+        let bundle_limits = common.bundle_limits(&chain_spec);
 
         tracing::info!(
-            "Builder bundle limits: Chain block gas limit: {}. Target bundle gas: {}. Max bundle gas: {}",
-            chain_spec.block_gas_limit,
-            chain_spec
-                .block_gas_limit_mult(common.target_bundle_block_gas_limit_ratio),
-            chain_spec
-                .block_gas_limit_mult(common.max_bundle_block_gas_limit_ratio)
+            "Builder bundle limits: Chain transaction gas limit: {}. Target bundle gas: {}. Max bundle gas: {}",
+            chain_spec.transaction_gas_limit(),
+            bundle_limits.target_bundle_execution_gas_limit,
+            bundle_limits.max_bundle_execution_gas_limit
         );
 
         Ok(BuilderTaskArgs {
@@ -275,10 +274,8 @@ impl BuilderArgs {
             unsafe_mode: common.unsafe_mode,
             rpc_url,
             max_bundle_size: self.max_bundle_size,
-            target_bundle_gas: chain_spec
-                .block_gas_limit_mult(common.target_bundle_block_gas_limit_ratio),
-            max_bundle_gas: chain_spec
-                .block_gas_limit_mult(common.max_bundle_block_gas_limit_ratio),
+            target_bundle_gas: bundle_limits.target_bundle_execution_gas_limit,
+            max_bundle_gas: bundle_limits.max_bundle_execution_gas_limit,
             sender_args,
             sim_settings: common.try_into()?,
             max_blocks_to_wait_for_mine: self.max_blocks_to_wait_for_mine,
@@ -287,11 +284,12 @@ impl BuilderArgs {
             max_replacement_underpriced_blocks: self.max_replacement_underpriced_blocks,
             remote_address,
             da_gas_tracking_enabled,
-            provider_client_timeout_seconds,
+            alloy_network_config,
             max_expected_storage_slots: common.max_expected_storage_slots.unwrap_or(usize::MAX),
             verification_gas_limit_efficiency_reject_threshold: common
                 .verification_gas_limit_efficiency_reject_threshold,
             chain_spec,
+            assigner_max_ops_per_request: self.assigner_max_ops_per_request,
         })
     }
 
@@ -515,10 +513,10 @@ pub fn is_nonspammy_event(event: &WithEntryPoint<BuilderEvent>) -> bool {
         fee_increase_count,
         ..
     } = &event.event.kind
+        && tx_details.is_none()
+        && *fee_increase_count == 0
     {
-        if tx_details.is_none() && *fee_increase_count == 0 {
-            return false;
-        }
+        return false;
     }
     true
 }

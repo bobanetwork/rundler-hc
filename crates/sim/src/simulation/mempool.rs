@@ -11,12 +11,15 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 use alloy_primitives::{Address, B256, U256};
 use rundler_types::{Entity, EntityType, Opcode, UserOperation, UserOperationVariant};
 use serde::Deserialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 
 use crate::simulation::SimulationViolation;
 
@@ -262,10 +265,26 @@ pub(crate) fn match_mempools(
     MempoolMatchResult::Matches(candidate_pools)
 }
 
+pub(crate) fn allow_unstaked_addresses(
+    mempool_configs: &HashMap<B256, MempoolConfig>,
+) -> HashSet<Address> {
+    let mut allow_unstaked_addresses = HashSet::new();
+    for config in mempool_configs.values() {
+        for entry in &config.allowlist {
+            if entry.rule == AllowRule::NotStaked
+                && let AllowEntity::Address(address) = entry.entity
+            {
+                allow_unstaked_addresses.insert(address);
+            }
+        }
+    }
+    allow_unstaked_addresses
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::U256;
-    use rundler_types::{pool::NeedsStakeInformation, StorageSlot, ViolationOpCode};
+    use rundler_types::{StorageSlot, ViolationOpCode, pool::NeedsStakeInformation};
 
     use super::*;
 

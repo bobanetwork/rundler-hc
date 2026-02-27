@@ -11,28 +11,30 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-//use alloy_json_rpc::{RpcParam, RpcReturn};
-use alloy_primitives::{aliases::U192, Address, Bytes, TxHash, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, TxHash, U256, aliases::U192};
 use alloy_rpc_types_eth::{
-    state::StateOverride, BlockId, BlockNumberOrTag, FeeHistory, Filter, Log,
+    BlockId, BlockNumberOrTag, FeeHistory, Filter, Log, state::StateOverride,
 };
 use alloy_rpc_types_trace::geth::{
     GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace,
 };
 use rundler_contracts::utils::GetGasUsed::GasUsedResult;
 use rundler_types::{
+    EntryPointVersion, ExpectedStorage, GasFees, UserOpsPerAggregator, ValidationOutput,
+    ValidationRevert,
+    authorization::Eip7702Auth,
     chain::ChainSpec,
     da::{DAGasBlockData, DAGasData},
-    v0_6, v0_7, EntryPointVersion, ExpectedStorage, GasFees, UserOpsPerAggregator,
-    ValidationOutput, ValidationRevert,
+    v0_6, v0_7,
 };
 
 use super::error::ProviderResult;
 use crate::{
     AggregatorOut, Block, BlockHashOrNumber, BundleHandler, DAGasOracle, DAGasOracleSync,
     DAGasProvider, DepositInfo, EntryPoint, EntryPointProvider, EvmCall,
-    EvmProvider as EvmProviderTrait, ExecutionResult, FeeEstimator, HandleOpsOut, RpcRecv, RpcSend,
-    SignatureAggregator, SimulationProvider, Transaction, TransactionReceipt, TransactionRequest,
+    EvmProvider as EvmProviderTrait, ExecutionResult, FeeEstimator, HandleOpsOut,
+    LatestFeeEstimate, RpcRecv, RpcSend, SignatureAggregator, SimulationProvider, Transaction,
+    TransactionReceipt, TransactionRequest,
 };
 
 mockall::mock! {
@@ -96,6 +98,8 @@ mockall::mock! {
         ) -> ProviderResult<GethTrace>;
 
         async fn get_latest_block_hash_and_number(&self) -> ProviderResult<(B256, u64)>;
+        /// Get the pending block hash and number
+        async fn get_pending_block_hash_and_number(&self) -> ProviderResult<(B256, u64)>;
 
         async fn get_pending_base_fee(&self) -> ProviderResult<u128>;
 
@@ -104,6 +108,8 @@ mockall::mock! {
         async fn get_code(&self, address: Address, block: Option<BlockId>) -> ProviderResult<Bytes>;
 
         async fn get_transaction_count(&self, address: Address) -> ProviderResult<u64>;
+
+        async fn get_pending_transaction_count(&self, address: Address) -> ProviderResult<u64>;
 
         async fn get_logs(&self, filter: &Filter) -> ProviderResult<Vec<Log>>;
 
@@ -191,6 +197,7 @@ mockall::mock! {
         fn simulation_should_revert(&self) -> bool;
 //        async fn get_nonce(&self, address: Address, key: U256) -> Result<U256, String>;
 
+        fn get_simulations_bytecode(&self) -> &Bytes;
     }
 
     #[async_trait::async_trait]
@@ -228,7 +235,9 @@ mockall::mock! {
         fn decode_handle_ops_revert(message: &str, revert_data: &Option<Bytes>) -> Option<HandleOpsOut>;
         fn decode_ops_from_calldata(
             chain_spec: &ChainSpec,
+            address: Address,
             calldata: &Bytes,
+            auth_list: &[Eip7702Auth],
         ) -> Vec<UserOpsPerAggregator<v0_6::UserOperation>>;
     }
 
@@ -297,6 +306,7 @@ mockall::mock! {
         ) -> ProviderResult<Result<ExecutionResult, ValidationRevert>>;
         fn simulation_should_revert(&self) -> bool;
 //   async fn get_nonce(&self, address: Address, key: U256) -> Result<U256, String>;
+        fn get_simulations_bytecode(&self) -> &Bytes;
     }
 
     #[async_trait::async_trait]
@@ -334,7 +344,9 @@ mockall::mock! {
         fn decode_handle_ops_revert(message: &str, revert_data: &Option<Bytes>) -> Option<HandleOpsOut>;
         fn decode_ops_from_calldata(
             chain_spec: &ChainSpec,
+            address: Address,
             calldata: &Bytes,
+            auth_list: &[Eip7702Auth],
         ) -> Vec<UserOpsPerAggregator<v0_7::UserOperation>>;
     }
 
@@ -386,6 +398,7 @@ mockall::mock! {
             min_fees: Option<GasFees>,
         ) -> anyhow::Result<(GasFees, u128)>;
         async fn latest_bundle_fees(&self) -> anyhow::Result<(GasFees, u128)>;
+        async fn latest_fee_estimate(&self) -> anyhow::Result<LatestFeeEstimate>;
         fn required_op_fees(&self, bundle_fees: GasFees) -> GasFees;
     }
 }

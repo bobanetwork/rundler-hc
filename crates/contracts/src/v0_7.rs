@@ -159,6 +159,10 @@ sol!(
 
         function balanceOf(address account) external view returns (uint256);
 
+        function getUserOpHash(
+            PackedUserOperation calldata userOp
+        ) public view returns (bytes32);
+
         function getNonce(address account, uint192 key) external view returns (uint256);
     }
 
@@ -286,11 +290,33 @@ sol!(
     }
 );
 
+mod no_sig {
+    use alloy_sol_macro::sol;
+
+    sol!(
+        /// Packed user operation without signature
+        /// Used for hashing the user operation to calculate the correct
+        /// EIP-712 type hash according to UserOperationLib.sol
+        #[allow(missing_docs)]
+        #[derive(Default, Debug, PartialEq, Eq)]
+        struct PackedUserOperation {
+            address sender;
+            uint256 nonce;
+            bytes initCode;
+            bytes callData;
+            bytes32 accountGasLimits;
+            uint256 preVerificationGas;
+            bytes32 gasFees;
+            bytes paymasterAndData;
+        }
+    );
+}
+
 sol!(
     #[allow(missing_docs)]
     #[sol(rpc)]
-    GetBalances,
-    "contracts/out/v0_7/GetBalances.sol/GetBalances.json"
+    GetEntryPointBalances,
+    "contracts/out/v0_7/GetEntryPointBalances.sol/GetEntryPointBalances.json"
 );
 
 // EntryPointSimulations deployed bytecode
@@ -313,7 +339,7 @@ static __CALL_GAS_ESTIMATION_PROXY_V0_7_DEPLOYED_BYTECODE_HEX: &[u8] = include_b
     "../contracts/out/v0_7/CallGasEstimationProxy.sol/CallGasEstimationProxy_deployedBytecode.txt"
 );
 
-static __CALL_GAS_ESTIMATION_PROXY_V0_7_DEPLOYED_BYTECODE: [u8; 5050] = {
+static __CALL_GAS_ESTIMATION_PROXY_V0_7_DEPLOYED_BYTECODE: [u8; 5041] = {
     match const_hex::const_decode_to_array(__CALL_GAS_ESTIMATION_PROXY_V0_7_DEPLOYED_BYTECODE_HEX) {
         Ok(a) => a,
         Err(_) => panic!("Failed to decode call gas estimation proxy hex"),
@@ -328,7 +354,7 @@ static __VERIFICATION_GAS_ESTIMATION_HELPER_V0_7_DEPLOYED_BYTECODE_HEX: &[u8] = 
     "../contracts/out/v0_7/VerificationGasEstimationHelper.sol/VerificationGasEstimationHelper_deployedBytecode.txt"
 );
 
-static __VERIFICATION_GAS_ESTIMATION_HELPER_V0_7_DEPLOYED_BYTECODE: [u8; 5261] = {
+static __VERIFICATION_GAS_ESTIMATION_HELPER_V0_7_DEPLOYED_BYTECODE: [u8; 5252] = {
     match const_hex::const_decode_to_array(
         __VERIFICATION_GAS_ESTIMATION_HELPER_V0_7_DEPLOYED_BYTECODE_HEX,
     ) {
@@ -339,3 +365,20 @@ static __VERIFICATION_GAS_ESTIMATION_HELPER_V0_7_DEPLOYED_BYTECODE: [u8; 5261] =
 
 pub static VERIFICATION_GAS_ESTIMATION_HELPER_V0_7_DEPLOYED_BYTECODE: Bytes =
     Bytes::from_static(&__VERIFICATION_GAS_ESTIMATION_HELPER_V0_7_DEPLOYED_BYTECODE);
+
+pub use no_sig::PackedUserOperation as PackedUserOperationNoSig;
+
+impl From<PackedUserOperation> for PackedUserOperationNoSig {
+    fn from(puo: PackedUserOperation) -> Self {
+        PackedUserOperationNoSig {
+            sender: puo.sender,
+            nonce: puo.nonce,
+            initCode: puo.initCode,
+            callData: puo.callData,
+            accountGasLimits: puo.accountGasLimits,
+            preVerificationGas: puo.preVerificationGas,
+            gasFees: puo.gasFees,
+            paymasterAndData: puo.paymasterAndData,
+        }
+    }
+}

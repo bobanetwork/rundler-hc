@@ -26,6 +26,8 @@ pub mod builder;
 
 pub mod chain;
 
+pub mod constants;
+
 pub mod da;
 
 mod entity;
@@ -52,8 +54,8 @@ pub use storage::*;
 
 mod validation_results;
 pub use validation_results::{
-    parse_validation_data, AggregatorInfo, StakeInfo, ValidationOutput, ValidationReturnInfo,
-    ValidationRevert,
+    AggregatorInfo, StakeInfo, ValidationOutput, ValidationReturnInfo, ValidationRevert,
+    parse_validation_data,
 };
 
 pub mod task;
@@ -61,3 +63,5 @@ pub mod task;
 pub mod authorization;
 
 pub mod hybrid_compute;
+pub mod tag;
+pub use tag::BlockTag;

@@ -34,12 +34,13 @@ use alloy_primitives::{Address, B256};
 use mockall::automock;
 use rundler_sim::{MempoolConfig, PrecheckSettings, SimulationSettings};
 use rundler_types::{
-    chain::ChainSpec,
-    pool::{
-        MempoolError, PaymasterMetadata, PoolOperation, Reputation, ReputationStatus, StakeStatus,
-    },
     EntityUpdate, EntryPointVersion, UserOperationId, UserOperationPermissions,
     UserOperationVariant,
+    chain::ChainSpec,
+    pool::{
+        MempoolError, PaymasterMetadata, PoolOperation, PoolOperationStatus, Reputation,
+        ReputationStatus, StakeStatus,
+    },
 };
 use tonic::async_trait;
 pub(crate) use uo_pool::{UoPool, UoPoolProviders};
@@ -125,6 +126,18 @@ pub(crate) trait Mempool: Send + Sync {
 
     /// Turns on and off tracking errors
     fn set_tracking(&self, paymaster: bool, reputation: bool);
+
+    /// Set pending bundle info for user operations.
+    fn set_pending_bundle(
+        &self,
+        tx_hash: B256,
+        sent_at_block: u64,
+        builder_address: Address,
+        uo_hashes: Vec<B256>,
+    );
+
+    /// Get extended status for a user operation.
+    fn get_operation_status(&self, hash: B256) -> Option<PoolOperationStatus>;
 }
 
 /// Config for the mempool
@@ -197,8 +210,8 @@ pub enum OperationOrigin {
 #[cfg(test)]
 mod tests {
     use rundler_types::{
-        v0_6::{UserOperationBuilder, UserOperationRequiredFields},
         Entity, EntityInfo, EntityInfos, EntityType, ValidTimeRange,
+        v0_6::{UserOperationBuilder, UserOperationRequiredFields},
     };
 
     use super::*;
@@ -250,6 +263,7 @@ mod tests {
             da_gas_data: Default::default(),
             filter_id: None,
             perms: UserOperationPermissions::default(),
+            sender_is_7702: false,
         };
 
         let entities = po.entities().collect::<Vec<_>>();

@@ -11,16 +11,18 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{keccak256, ruint::FromUintError, Address, Bytes, FixedBytes, B256, U256};
-use alloy_sol_types::{sol, SolValue};
-use rundler_contracts::v0_7::PackedUserOperation;
+use alloy_primitives::{
+    Address, B256, Bytes, FixedBytes, U256, address, b256, keccak256, ruint::FromUintError,
+};
+use alloy_sol_types::{SolStruct, SolValue, eip712_domain, sol};
+use rundler_contracts::v0_7::{PackedUserOperation, PackedUserOperationNoSig};
 use rundler_utils::random::{random_bytes, random_bytes_array};
 
 //use rand::RngCore;
 use super::{UserOperation as UserOperationTrait, UserOperationId, UserOperationVariant};
 use crate::{
-    aggregator::AggregatorCosts, authorization::Eip7702Auth, chain::ChainSpec, Entity,
-    EntryPointVersion,
+    Entity, EntryPointVersion, aggregator::AggregatorCosts, authorization::Eip7702Auth,
+    chain::ChainSpec,
 };
 
 /// Gas overhead required by the entry point contract for the inner call
@@ -39,6 +41,21 @@ pub const ENTRY_POINT_INNER_GAS_OVERHEAD: u128 = 10_000;
 ///
 /// 13 * 32 = 416
 const ABI_ENCODED_USER_OPERATION_FIXED_LEN: usize = 416;
+
+// keccak("PaymasterSignature")[:8]
+const PAYMASTER_SIG_MAGIC: [u8; 8] = [0x22, 0xe3, 0x25, 0xa2, 0x97, 0x43, 0x96, 0x56];
+// Minimum length of paymaster data that can contain a paymaster signature
+const MIN_PAYMASTER_DATA_WITH_SUFFIX_LEN: usize = 62;
+/// EIP-7702 factory marker
+pub const EIP7702_FACTORY_MARKER: Address = address!("7702000000000000000000000000000000000000");
+/// EIP-7702 initCode marker
+pub const EIP7702_INITCODE_MARKER: [u8; 20] = [
+    0x77, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+];
+// Placeholder for user operations that have invalid hashes due to structural issues
+const INVALID_HASH: B256 =
+    b256!("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
 /// User Operation for Entry Point v0.7
 ///
@@ -86,10 +103,14 @@ pub struct UserOperation {
     paymaster_data: Bytes,
     /// eip 7702 - tuple of authority.
     authorization_tuple: Option<Eip7702Auth>,
+    /// Paymaster signature - only entry point v0.9+
+    paymaster_signature: Option<Bytes>,
 
     /*
      * Cached fields, not part of the UO
      */
+    /// Entry point version
+    entry_point_version: EntryPointVersion,
     /// Entry point address
     entry_point: Address,
     /// Chain id
@@ -156,6 +177,8 @@ pub struct UnstructuredUserOperation {
     pub authorization_tuple: Option<Eip7702Auth>,
     /// Signature aggregator address
     pub aggregator: Option<Address>,
+    /// Paymaster signature - only entry point v0.9+
+    pub paymaster_signature: Option<Bytes>,
 }
 
 sol! {
@@ -177,8 +200,8 @@ sol! {
 impl UserOperationTrait for UserOperation {
     type OptionalGas = UserOperationOptionalGas;
 
-    fn entry_point_version() -> EntryPointVersion {
-        EntryPointVersion::V0_7
+    fn entry_point_version(&self) -> EntryPointVersion {
+        self.entry_point_version
     }
 
     fn entry_point(&self) -> Address {
@@ -441,6 +464,7 @@ impl UserOperation {
             paymaster_data: self.paymaster_data,
             authorization_tuple: self.authorization_tuple,
             aggregator: self.aggregator,
+            paymaster_signature: self.paymaster_signature,
         }
     }
 
@@ -463,6 +487,11 @@ impl UserOperation {
     pub fn paymaster_post_op_gas_limit(&self) -> u128 {
         self.paymaster_post_op_gas_limit
     }
+
+    /// Get the entry point version
+    pub fn entry_point_version(&self) -> EntryPointVersion {
+        self.entry_point_version
+    }
 }
 
 #[cfg(feature = "test-utils")]
@@ -470,6 +499,7 @@ impl Default for UserOperation {
     fn default() -> Self {
         UserOperationBuilder::new(
             &ChainSpec::default(),
+            EntryPointVersion::V0_7,
             UserOperationRequiredFields {
                 sender: Address::ZERO,
                 nonce: U256::ZERO,
@@ -544,6 +574,8 @@ pub struct UserOperationOptionalGas {
     pub call_data: Bytes,
     /// Signature, typically a dummy value for optional gas
     pub signature: Bytes,
+    /// Entry point version
+    pub entry_point_version: EntryPointVersion,
     /*
      * Optional fields
      */
@@ -573,6 +605,8 @@ pub struct UserOperationOptionalGas {
     pub eip7702_auth_address: Option<Address>,
     /// Signature aggregator address
     pub aggregator: Option<Address>,
+    /// Paymaster signature - only entry point v0.9+
+    pub paymaster_signature: Option<Bytes>,
 }
 
 impl UserOperationOptionalGas {
@@ -586,6 +620,7 @@ impl UserOperationOptionalGas {
 
         let mut builder = UserOperationBuilder::new(
             chain_spec,
+            self.entry_point_version,
             UserOperationRequiredFields {
                 sender: self.sender,
                 nonce: self.nonce,
@@ -612,15 +647,16 @@ impl UserOperationOptionalGas {
             builder = builder.factory(factory, vec![255_u8; self.factory_data.len()].into());
         }
         if let Some(eip_7702_auth_address) = self.eip7702_auth_address {
-            let auth = Eip7702Auth {
-                address: eip_7702_auth_address,
-                chain_id: chain_spec.id,
-                ..Default::default()
-            };
-            builder = builder.authorization_tuple(auth.max_fill());
+            builder = builder.authorization_tuple(Eip7702Auth::new_max_fill(
+                chain_spec.id,
+                eip_7702_auth_address,
+            ));
         }
         if let Some(aggregator) = self.aggregator {
             builder = builder.aggregator(aggregator);
+        }
+        if let Some(paymaster_signature) = &self.paymaster_signature {
+            builder = builder.paymaster_signature(paymaster_signature.clone());
         }
 
         let uo = builder.build();
@@ -646,6 +682,7 @@ impl UserOperationOptionalGas {
     pub fn random_fill(&self, chain_spec: &ChainSpec) -> UserOperation {
         let mut builder = UserOperationBuilder::new(
             chain_spec,
+            self.entry_point_version,
             UserOperationRequiredFields {
                 sender: self.sender,
                 nonce: self.nonce,
@@ -671,15 +708,14 @@ impl UserOperationOptionalGas {
             builder = builder.factory(self.factory.unwrap(), random_bytes(self.factory_data.len()))
         }
         if let Some(address) = self.eip7702_auth_address {
-            let auth = Eip7702Auth {
-                address,
-                chain_id: chain_spec.id,
-                ..Default::default()
-            };
-            builder = builder.authorization_tuple(auth.random_fill());
+            builder =
+                builder.authorization_tuple(Eip7702Auth::new_random_fill(chain_spec.id, address));
         }
         if let Some(aggregator) = self.aggregator {
             builder = builder.aggregator(aggregator);
+        }
+        if let Some(paymaster_signature) = &self.paymaster_signature {
+            builder = builder.paymaster_signature(paymaster_signature.clone());
         }
 
         let uo = builder.build();
@@ -714,6 +750,7 @@ impl UserOperationOptionalGas {
 
         let mut builder = UserOperationBuilder::new(
             chain_spec,
+            self.entry_point_version,
             UserOperationRequiredFields {
                 sender: self.sender,
                 nonce: self.nonce,
@@ -742,10 +779,7 @@ impl UserOperationOptionalGas {
             );
         }
         if let Some(contract) = self.eip7702_auth_address {
-            builder = builder.authorization_tuple(Eip7702Auth {
-                address: contract,
-                ..Default::default()
-            });
+            builder = builder.authorization_tuple(Eip7702Auth::new_dummy(chain_spec.id, contract));
         }
         builder
     }
@@ -794,6 +828,8 @@ impl From<super::UserOperationOptionalGas> for UserOperationOptionalGas {
 pub struct UserOperationBuilder<'a> {
     // chain spec
     chain_spec: &'a ChainSpec,
+    // entry point version
+    entry_point_version: EntryPointVersion,
 
     // required fields
     required: UserOperationRequiredFields,
@@ -807,8 +843,11 @@ pub struct UserOperationBuilder<'a> {
     paymaster_data: Bytes,
     packed_uo: Option<PackedUserOperation>,
 
-    /// eip 7702 - tuple of authority.
+    /// eip 7702 authorization tuple
     authorization_tuple: Option<Eip7702Auth>,
+    /// Paymaster signature - only entry point v0.9+
+    paymaster_signature: Option<Bytes>,
+    /// Signature aggregator address
     aggregator: Option<Address>,
 }
 
@@ -836,7 +875,11 @@ pub struct UserOperationRequiredFields {
 
 impl<'a> UserOperationBuilder<'a> {
     /// Creates a new builder
-    pub fn new(chain_spec: &'a ChainSpec, required: UserOperationRequiredFields) -> Self {
+    pub fn new(
+        chain_spec: &'a ChainSpec,
+        entry_point_version: EntryPointVersion,
+        required: UserOperationRequiredFields,
+    ) -> Self {
         Self {
             chain_spec,
             required,
@@ -849,6 +892,8 @@ impl<'a> UserOperationBuilder<'a> {
             packed_uo: None,
             authorization_tuple: None,
             aggregator: None,
+            paymaster_signature: None,
+            entry_point_version,
         }
     }
 
@@ -856,9 +901,12 @@ impl<'a> UserOperationBuilder<'a> {
     pub fn from_packed(
         puo: PackedUserOperation,
         chain_spec: &'a ChainSpec,
+        entry_point_version: EntryPointVersion,
+        eip7702_auth: Option<Eip7702Auth>,
     ) -> Result<Self, FromUintError<u128>> {
         let mut builder = UserOperationBuilder::new(
             chain_spec,
+            entry_point_version,
             UserOperationRequiredFields {
                 sender: puo.sender,
                 nonce: puo.nonce,
@@ -871,6 +919,9 @@ impl<'a> UserOperationBuilder<'a> {
                 signature: puo.signature.clone(),
             },
         );
+        if let Some(auth) = eip7702_auth {
+            builder = builder.authorization_tuple(auth);
+        }
 
         builder = builder.packed(puo.clone());
 
@@ -903,6 +954,7 @@ impl<'a> UserOperationBuilder<'a> {
     pub fn from_uo(uo: UserOperation, chain_spec: &'a ChainSpec) -> Self {
         Self {
             chain_spec,
+            entry_point_version: uo.entry_point_version(),
             required: UserOperationRequiredFields {
                 sender: uo.sender,
                 nonce: uo.nonce,
@@ -923,6 +975,7 @@ impl<'a> UserOperationBuilder<'a> {
             packed_uo: None,
             authorization_tuple: uo.authorization_tuple,
             aggregator: uo.aggregator,
+            paymaster_signature: uo.paymaster_signature,
         }
     }
 
@@ -1020,8 +1073,24 @@ impl<'a> UserOperationBuilder<'a> {
         self
     }
 
-    /// Builds the UserOperation
+    /// Sets the paymaster signature
+    /// PANICS if entry point version is < v0.9
+    pub fn paymaster_signature(mut self, paymaster_signature: Bytes) -> Self {
+        if self.entry_point_version < EntryPointVersion::V0_9 {
+            panic!("Paymaster signature is only supported for entry point v0.9+");
+        }
+
+        self.paymaster_signature = Some(paymaster_signature);
+        self
+    }
+
+    /// Builds the UserOperation for the given entry point version
     pub fn build(self) -> UserOperation {
+        let entry_point = self
+            .chain_spec
+            .entry_point_address(self.entry_point_version);
+        let delegation_address = self.authorization_tuple.as_ref().map(|auth| auth.address);
+
         let uo = UserOperation {
             sender: self.required.sender,
             nonce: self.required.nonce,
@@ -1038,8 +1107,10 @@ impl<'a> UserOperationBuilder<'a> {
             paymaster_post_op_gas_limit: self.paymaster_post_op_gas_limit,
             paymaster_data: self.paymaster_data,
             authorization_tuple: self.authorization_tuple,
+            paymaster_signature: self.paymaster_signature,
             signature: self.required.signature,
-            entry_point: self.chain_spec.entry_point_address_v0_7,
+            entry_point_version: self.entry_point_version,
+            entry_point,
             chain_id: self.chain_spec.id,
             hash: B256::ZERO,
             packed: PackedUserOperation::default(),
@@ -1057,8 +1128,10 @@ impl<'a> UserOperationBuilder<'a> {
             .unwrap_or_else(|| pack_user_operation(uo.clone()));
         let hash = hash_packed_user_operation(
             &packed,
-            self.chain_spec.entry_point_address_v0_7,
+            entry_point,
+            self.entry_point_version,
             self.chain_spec.id,
+            delegation_address,
         );
 
         let (calldata_gas_cost, calldata_floor_gas_limit) =
@@ -1086,13 +1159,34 @@ fn pack_user_operation(uo: UserOperation) -> PackedUserOperation {
     let account_gas_limits = concat_u128_be(uo.verification_gas_limit, uo.call_gas_limit);
     let gas_fees = concat_u128_be(uo.max_priority_fee_per_gas, uo.max_fee_per_gas);
 
-    let pvgl: [u8; 16] = uo.paymaster_verification_gas_limit.to_be_bytes();
-    let pogl: [u8; 16] = uo.paymaster_post_op_gas_limit.to_be_bytes();
     let paymaster_and_data = if let Some(paymaster) = uo.paymaster {
         let mut paymaster_and_data = paymaster.to_vec();
+        let pvgl: [u8; 16] = uo.paymaster_verification_gas_limit.to_be_bytes();
+        let pogl: [u8; 16] = uo.paymaster_post_op_gas_limit.to_be_bytes();
         paymaster_and_data.extend_from_slice(&pvgl);
         paymaster_and_data.extend_from_slice(&pogl);
-        paymaster_and_data.extend_from_slice(&uo.paymaster_data);
+
+        if let Some(paymaster_signature) = uo.paymaster_signature {
+            // ignore the paymaster signature if paymaster and data doesn't end with the magic
+            if !uo.paymaster_data.ends_with(&PAYMASTER_SIG_MAGIC) {
+                paymaster_and_data.extend_from_slice(&uo.paymaster_data);
+            } else {
+                // remove the magic bytes from the end of paymaster and data
+                paymaster_and_data.extend_from_slice(
+                    &uo.paymaster_data[..uo.paymaster_data.len() - PAYMASTER_SIG_MAGIC.len()],
+                );
+                // append the paymaster signature
+                paymaster_and_data.extend_from_slice(&paymaster_signature);
+                // append the length of the paymaster signature in 2 bytes
+                paymaster_and_data
+                    .extend_from_slice(&(paymaster_signature.len() as u16).to_be_bytes());
+                // append the magic bytes
+                paymaster_and_data.extend_from_slice(&PAYMASTER_SIG_MAGIC);
+            }
+        } else {
+            paymaster_and_data.extend_from_slice(&uo.paymaster_data);
+        }
+
         Bytes::from(paymaster_and_data)
     } else {
         Bytes::new()
@@ -1142,6 +1236,27 @@ sol! {
 fn hash_packed_user_operation(
     puo: &PackedUserOperation,
     entry_point: Address,
+    entry_point_version: EntryPointVersion,
+    chain_id: u64,
+    delegation_address: Option<Address>,
+) -> B256 {
+    match entry_point_version {
+        EntryPointVersion::V0_6 => {
+            panic!("v0.7 user operation ABI created with v0.6 entry point version")
+        }
+        EntryPointVersion::V0_7 => hash_packed_user_operation_v0_7(puo, entry_point, chain_id),
+        EntryPointVersion::V0_8 | EntryPointVersion::V0_9 => hash_packed_user_operation_v0_8_plus(
+            puo.clone(),
+            entry_point,
+            chain_id,
+            delegation_address,
+        ),
+    }
+}
+
+fn hash_packed_user_operation_v0_7(
+    puo: &PackedUserOperation,
+    entry_point: Address,
     chain_id: u64,
 ) -> B256 {
     let hash_init_code = alloy_primitives::keccak256(&puo.initCode);
@@ -1170,6 +1285,62 @@ fn hash_packed_user_operation(
     alloy_primitives::keccak256(encoded.abi_encode())
 }
 
+fn hash_packed_user_operation_v0_8_plus(
+    puo: PackedUserOperation,
+    entry_point: Address,
+    chain_id: u64,
+    delegation_address: Option<Address>,
+) -> B256 {
+    let mut puo_no_sig: PackedUserOperationNoSig = puo.into();
+
+    if puo_no_sig.initCode.starts_with(&EIP7702_INITCODE_MARKER) {
+        let Some(delegation_address) = delegation_address else {
+            // We cannot calculate a valid hash without a delegation address
+            return INVALID_HASH;
+        };
+
+        puo_no_sig.initCode = [
+            delegation_address.as_ref(),
+            &puo_no_sig.initCode[EIP7702_INITCODE_MARKER.len()..],
+        ]
+        .concat()
+        .into();
+    }
+
+    // perform paymaster signature hash override
+    // if paymaster data length is incorrect, override will not be applied
+    let pd_len = puo_no_sig.paymasterAndData.len();
+    if pd_len >= MIN_PAYMASTER_DATA_WITH_SUFFIX_LEN
+        && puo_no_sig.paymasterAndData.ends_with(&PAYMASTER_SIG_MAGIC)
+    {
+        let paymaster_signature_length = u16::from_be_bytes(
+            puo_no_sig.paymasterAndData
+                [pd_len - PAYMASTER_SIG_MAGIC.len() - 2..pd_len - PAYMASTER_SIG_MAGIC.len()]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        if pd_len >= paymaster_signature_length + MIN_PAYMASTER_DATA_WITH_SUFFIX_LEN {
+            // remove the paymaster signature, length, and magic bytes from the paymaster and data
+            let pd_no_sig = &puo_no_sig.paymasterAndData
+                [..pd_len - PAYMASTER_SIG_MAGIC.len() - 2 - paymaster_signature_length];
+            puo_no_sig.paymasterAndData = [pd_no_sig, &PAYMASTER_SIG_MAGIC].concat().into();
+        } else {
+            // paymaster signature is invalid, return invalid hash
+            return INVALID_HASH;
+        }
+    }
+
+    let domain = eip712_domain! {
+        name: "ERC4337",
+        version: "1",
+        chain_id: chain_id,
+        verifying_contract: entry_point,
+    };
+
+    puo_no_sig.eip712_signing_hash(&domain)
+}
+
 fn concat_u128_be(a: u128, b: u128) -> [u8; 32] {
     let a = a.to_be_bytes();
     let b = b.to_be_bytes();
@@ -1193,6 +1364,7 @@ mod tests {
         let cs = ChainSpec::default();
         let builder = UserOperationBuilder::new(
             &cs,
+            EntryPointVersion::V0_7,
             UserOperationRequiredFields {
                 sender: Address::ZERO,
                 nonce: U256::ZERO,
@@ -1208,9 +1380,10 @@ mod tests {
 
         let uo = builder.build();
         let packed = uo.clone().pack();
-        let unpacked = UserOperationBuilder::from_packed(packed, &cs)
-            .unwrap()
-            .build();
+        let unpacked =
+            UserOperationBuilder::from_packed(packed, &cs, EntryPointVersion::V0_7, None)
+                .unwrap()
+                .build();
 
         assert_eq!(uo, unpacked);
     }
@@ -1220,6 +1393,7 @@ mod tests {
         let cs = ChainSpec::default();
         let builder = UserOperationBuilder::new(
             &cs,
+            EntryPointVersion::V0_7,
             UserOperationRequiredFields {
                 sender: Address::ZERO,
                 nonce: U256::ZERO,
@@ -1238,9 +1412,10 @@ mod tests {
 
         let uo = builder.build();
         let packed = uo.clone().pack();
-        let unpacked = UserOperationBuilder::from_packed(packed, &cs)
-            .unwrap()
-            .build();
+        let unpacked =
+            UserOperationBuilder::from_packed(packed, &cs, EntryPointVersion::V0_7, None)
+                .unwrap()
+                .build();
 
         assert_eq!(uo, unpacked);
     }
@@ -1257,16 +1432,24 @@ mod tests {
             sender: address!("b292Cf4a8E1fF21Ac27C4f94071Cd02C022C414b"),
             nonce: uint!(0xF83D07238A7C8814A48535035602123AD6DBFA63000000000000000000000001_U256),
             initCode: Bytes::default(),
-            callData: bytes!("e9ae5c530000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000001d8b292cf4a8e1ff21ac27c4f94071cd02c022c414b00000000000000000000000000000000000000000000000000000000000000009517e29f0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000ad6330089d9a1fe89f4020292e1afe9969a5a2fc00000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000001518000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018e2fbe8980000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000800000000000000000000000002372912728f93ab3daaaebea4f87e6e28476d987000000000000000000000000000000000000000000000000002386f26fc10000000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
-            accountGasLimits: b256!("000000000000000000000000000114fc0000000000000000000000000012c9b5"),
+            callData: bytes!(
+                "e9ae5c530000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000001d8b292cf4a8e1ff21ac27c4f94071cd02c022c414b00000000000000000000000000000000000000000000000000000000000000009517e29f0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000ad6330089d9a1fe89f4020292e1afe9969a5a2fc00000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000001518000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018e2fbe8980000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000800000000000000000000000002372912728f93ab3daaaebea4f87e6e28476d987000000000000000000000000000000000000000000000000002386f26fc10000000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            accountGasLimits: b256!(
+                "000000000000000000000000000114fc0000000000000000000000000012c9b5"
+            ),
             preVerificationGas: U256::from(48916),
             gasFees: b256!("000000000000000000000000524121000000000000000000000000109a4a441a"),
             paymasterAndData: Bytes::default(),
-            signature: bytes!("3c7bfe22c9c2ef8994a9637bcc4df1741c5dc0c25b209545a7aeb20f7770f351479b683bd17c4d55bc32e2a649c8d2dff49dcfcc1f3fd837bcd88d1e69a434cf1c"),
+            signature: bytes!(
+                "3c7bfe22c9c2ef8994a9637bcc4df1741c5dc0c25b209545a7aeb20f7770f351479b683bd17c4d55bc32e2a649c8d2dff49dcfcc1f3fd837bcd88d1e69a434cf1c"
+            ),
         };
 
         let hash = b256!("e486401370d145766c3cf7ba089553214a1230d38662ae532c9b62eb6dadcf7e");
-        let uo = UserOperationBuilder::from_packed(puo, &cs).unwrap().build();
+        let uo = UserOperationBuilder::from_packed(puo, &cs, EntryPointVersion::V0_7, None)
+            .unwrap()
+            .build();
         assert_eq!(uo.hash(), hash);
     }
 
@@ -1278,6 +1461,7 @@ mod tests {
 
         let uo = UserOperationBuilder::new(
             &cs,
+            EntryPointVersion::V0_7,
             UserOperationRequiredFields {
                 sender: Address::ZERO,
                 nonce: U256::ZERO,
@@ -1308,6 +1492,7 @@ mod tests {
         let new_sig = bytes!("12341234");
         let uo = UserOperationBuilder::new(
             &cs,
+            EntryPointVersion::V0_7,
             UserOperationRequiredFields {
                 sender: Address::ZERO,
                 nonce: U256::ZERO,
@@ -1340,5 +1525,119 @@ mod tests {
         assert_eq!(uo.signature, orig_sig);
         assert_eq!(uo.packed.signature, orig_sig);
         assert_eq!(uo.calldata_gas_cost, original_calldata_cost);
+    }
+
+    #[test]
+    fn test_hash_v0_8() {
+        // From https://sepolia.basescan.org/tx/0xfe67b0dc11c280c9cd59642c866646f787bdda155f248c284f0e4dbe068839f1
+        let cs = ChainSpec {
+            id: 84532,
+            ..Default::default()
+        };
+
+        let puo = PackedUserOperation {
+            sender: address!("fF3CA848D35d31aB8Ab554220e163b9C1b244088"),
+            nonce: uint!(32607161661329966818242529853440_U256),
+            initCode: Bytes::default(),
+            callData: bytes!(
+                "b61d27f6000000000000000000000000ff3ca848d35d31ab8ab554220e163b9c1b244088000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            accountGasLimits: b256!(
+                "0000000000000000000000000000c76d0000000000000000000000000000238c"
+            ),
+            preVerificationGas: U256::from(47196),
+            gasFees: b256!("00000000000000000000000000000001000000000000000000000000000493e1"),
+            paymasterAndData: bytes!(
+                "df32ad4a17be64101744c7edc411cbff8032975d0000000000000000000000000000745400000000000000000000000000000000000000000000000000000000801ffb9f39c43f9558387db3e33206affaffc0bae5042ad41caa5a6ba725259375e45e87dbd23af44c6f352e210a2e09f08272e32635de1c2481bfb5f457e0671b"
+            ),
+            signature: bytes!(
+                "00f04a4abdca2d4abfc90ea397ebc49ddf8955653e2bca28a1f72c4f024c91cf7740626a2ae8afe90b0d3ff651680903d2a9e83083142e53ec5c6ea70ecf906bf31c"
+            ),
+        };
+
+        let hash = b256!("063B6A12FDFB3DB99A1844B05709E346278575281DAB0FB99A20E400D9C760B5");
+        let uo = UserOperationBuilder::from_packed(puo, &cs, EntryPointVersion::V0_8, None)
+            .unwrap()
+            .build();
+        assert_eq!(uo.hash(), hash);
+    }
+
+    #[test]
+    fn test_hash_v0_8_7702() {
+        // From https://sepolia.basescan.org/tx/0x3177e44651c127dbdc76d29b347407601ca4e3381ba27e721e22254408768641
+        let cs = ChainSpec {
+            id: 84532,
+            ..Default::default()
+        };
+
+        let puo = PackedUserOperation {
+            sender: address!("f479F10B98a66180ebcA5AAe652512b1CFCDf0d3"),
+            nonce: uint!(32629663150294956114847377391616_U256),
+            initCode: bytes!("7702000000000000000000000000000000000000"),
+            callData: bytes!(
+                "b61d27f6000000000000000000000000f479f10b98a66180ebca5aae652512b1cfcdf0d3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            accountGasLimits: b256!(
+                "0000000000000000000000000000af9e0000000000000000000000000000238c"
+            ),
+            preVerificationGas: U256::from(188368),
+            gasFees: b256!("00000000000000000000000000000001000000000000000000000000000493e1"),
+            paymasterAndData: bytes!(
+                "df32AD4a17bE64101744c7EDc411cBFF8032975D00000000000000000000000000007aed00000000000000000000000000000000000000000000000000000000786633be55bd0309df99a7147656499fa75c743b802d8799d03dbbc3944d87da5e679e3001ad094b57ec750f5ab98acb3f4d30f9ca8458eca208e2a33fb4b1d91b"
+            ),
+            signature: bytes!(
+                "00fffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c"
+            ),
+        };
+
+        // The delegation address for the EIP-7702 authorization
+        let delegation_address = address!("0x82cffc0f83a66f016f1273cdd5c43f86e78d2478");
+        let eip7702_auth = Eip7702Auth::new_dummy(cs.id, delegation_address);
+
+        let hash = b256!("9173f293dd690650cbc32afe9d3f6fbfd1ae21a6a86222eceead32426073a065");
+        let uo = UserOperationBuilder::from_packed(
+            puo,
+            &cs,
+            EntryPointVersion::V0_8,
+            Some(eip7702_auth),
+        )
+        .unwrap()
+        .build();
+        assert_eq!(uo.hash(), hash);
+    }
+
+    #[test]
+    fn test_hash_v0_9_paymaster_signature() {
+        // https://sepolia.basescan.org/tx/0xaf889842fce1257103d2d8c74d88852f3204e3906d3d65a6933a2931e3d4476f
+        let cs = ChainSpec {
+            id: 84532,
+            ..Default::default()
+        };
+
+        let puo = PackedUserOperation {
+            sender: address!("ccb42c44Ba23626cc8a8FDA2bCA65a6Be48b7Bf2"),
+            nonce: uint!(32607162721833283615804652257280_U256),
+            initCode: Bytes::default(),
+            callData: bytes!(
+                "b61d27f6000000000000000000000000ccb42c44ba23626cc8a8fda2bca65a6be48b7bf2000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            accountGasLimits: b256!(
+                "0000000000000000000000000000c7a30000000000000000000000000000238c"
+            ),
+            preVerificationGas: U256::from(47328),
+            gasFees: b256!("00000000000000000000000000000001000000000000000000000000000493e1"),
+            paymasterAndData: bytes!(
+                "2691cd1b083c2edd37db13bd4da8ce0cfc3126a10000000000000000000000000000747400000000000000000000000000000000000000000000000000000000009b50e8d2e506366c14da1f2eb2e15f4e44318ea36342607afbd156742aec68a4758783de1355b550911c5bd8fc8f70be10b9f6560aa268c10ee8113d1c0699571b004122e325a297439656"
+            ),
+            signature: bytes!(
+                "009b50e8d2e506366c14da1f2eb2e15f4e44318ea36342607afbd156742aec68a4758783de1355b550911c5bd8fc8f70be10b9f6560aa268c10ee8113d1c0699571b"
+            ),
+        };
+
+        let hash = b256!("4E12D8B45C2AD5CED3AC06F5CCBF1FDB89D136D000D869AAA4689B97B52FD834");
+        let uo = UserOperationBuilder::from_packed(puo, &cs, EntryPointVersion::V0_9, None)
+            .unwrap()
+            .build();
+        assert_eq!(uo.hash(), hash);
     }
 }

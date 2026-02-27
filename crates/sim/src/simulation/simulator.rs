@@ -21,28 +21,28 @@ use async_trait::async_trait;
 use futures_util::TryFutureExt;
 use rundler_provider::{EntryPoint, EvmProvider, SimulationProvider};
 use rundler_types::{
+    Entity, EntityType, Opcode, StorageSlot, UserOperation, ValidTimeRange, ValidationOutput,
+    ValidationReturnInfo, ViolationOpCode,
     pool::{NeedsStakeInformation, SimulationViolation},
     v0_6::UserOperation as UserOperationV0_6,
     v0_7::UserOperation as UserOperationV0_7,
-    Entity, EntityInfo, EntityInfos, EntityType, Opcode, StorageSlot, UserOperation,
-    ValidTimeRange, ValidationOutput, ValidationReturnInfo, ViolationOpCode,
 };
 
 use super::{
+    UnsafeSimulator,
     context::{
         self, AccessInfo, AssociatedSlotsByAddress, ValidationContext, ValidationContextProvider,
     },
-    UnsafeSimulator,
 };
 use crate::{
+    SimulationError, SimulationResult,
     simulation::{
-        mempool::{self, AllowEntity, AllowRule, MempoolConfig, MempoolMatchResult},
+        Settings, Simulator,
+        mempool::{self, MempoolConfig, MempoolMatchResult},
         v0_6::ValidationContextProvider as ValidationContextProviderV0_6,
         v0_7::ValidationContextProvider as ValidationContextProviderV0_7,
-        Settings, Simulator,
     },
     types::ViolationError,
-    SimulationError, SimulationResult,
 };
 
 /// Create a new simulator for v0.6 entry point contracts
@@ -127,21 +127,15 @@ where
         sim_settings: Settings,
         mempool_configs: HashMap<B256, MempoolConfig>,
     ) -> Self {
-        // Get a list of entities that are allowed to act as staked entities despite being unstaked
-        let mut allow_unstaked_addresses = HashSet::new();
-        for config in mempool_configs.values() {
-            for entry in &config.allowlist {
-                if entry.rule == AllowRule::NotStaked {
-                    if let AllowEntity::Address(address) = entry.entity {
-                        allow_unstaked_addresses.insert(address);
-                    }
-                }
-            }
-        }
+        let allow_unstaked_addresses = mempool::allow_unstaked_addresses(&mempool_configs);
 
         Self {
             provider,
-            unsafe_sim: UnsafeSimulator::new(entry_point.clone(), sim_settings.clone()),
+            unsafe_sim: UnsafeSimulator::new(
+                entry_point.clone(),
+                sim_settings.clone(),
+                &mempool_configs,
+            ),
             entry_point,
             validation_context_provider,
             sim_settings,
@@ -258,22 +252,34 @@ where
                             address,
                             slot,
                         ) => {
-                            let needs_stake_entity = needs_stake.and_then(|t| entity_infos.get(t));
-
-                            if needs_stake.is_none() {
-                                if let Some(factory) = entity_infos.get(EntityType::Factory) {
-                                    if factory.is_staked {
-                                        tracing::debug!("Associated storage accessed by staked entity during deploy, and factory is staked");
-                                        continue;
-                                    }
-                                }
+                            // [STO-022] - if factory is staked, then any associated storage access is allowed
+                            if entity_infos
+                                .get(EntityType::Factory)
+                                .is_some_and(|f| f.is_staked)
+                            {
+                                continue;
                             }
 
-                            if let Some(needs_stake_entity_info) = needs_stake_entity {
-                                if needs_stake_entity_info.is_staked {
-                                    tracing::debug!("Associated storage accessed by staked entity during deploy, and entity is staked");
-                                    continue;
-                                }
+                            // If factory is not staked, then the accessing entity must be staked
+                            let needs_stake_entity = needs_stake.and_then(|t| entity_infos.get(t));
+
+                            if needs_stake.is_none()
+                                && let Some(factory) = entity_infos.get(EntityType::Factory)
+                                && factory.is_staked
+                            {
+                                tracing::debug!(
+                                    "Associated storage accessed by staked entity during deploy, and factory is staked"
+                                );
+                                continue;
+                            }
+
+                            if let Some(needs_stake_entity_info) = needs_stake_entity
+                                && needs_stake_entity_info.is_staked
+                            {
+                                tracing::debug!(
+                                    "Associated storage accessed by staked entity during deploy, and entity is staked"
+                                );
+                                continue;
                             }
 
                             // [STO-022]
@@ -371,6 +377,14 @@ where
             }
         }
 
+        if context.op.paymaster().is_some()
+            && !entry_point_out.return_info.paymaster_context.is_empty()
+            && !context.entity_infos.paymaster.unwrap().is_staked
+        {
+            // [EREP-050]
+            violations.push(SimulationViolation::UnstakedPaymasterContext);
+        }
+
         // Get violations specific to the implemented entry point from the context provider
         violations.extend(
             self.validation_context_provider
@@ -407,7 +421,8 @@ where
 
         if let Some(expected_code_hash) = expected_code_hash {
             // [COD-010]
-            if expected_code_hash != code_hash {
+            // If the expected code hash is zero, skip the check.
+            if expected_code_hash != B256::ZERO && expected_code_hash != code_hash {
                 violations.push(SimulationViolation::CodeHashChanged)
             }
         }
@@ -481,10 +496,10 @@ where
             MempoolMatchResult::NoMatch(i) => {
                 return Err(SimulationError {
                     violation_error: ViolationError::Violations(vec![
-                        overridable_violations[i].clone()
+                        overridable_violations[i].clone(),
                     ]),
                     entity_infos: Some(context.entity_infos),
-                })
+                });
             }
         };
 
@@ -505,7 +520,12 @@ where
             sender_info,
             ..
         } = entry_point_out;
-        let account_is_staked = context::is_staked(sender_info, &self.sim_settings);
+
+        let mut account_is_staked = context::is_staked(sender_info, &self.sim_settings);
+        if self.allow_unstaked_addresses.contains(&op.sender()) {
+            account_is_staked = true;
+        }
+
         let ValidationReturnInfo {
             pre_op_gas,
             valid_after,
@@ -515,7 +535,7 @@ where
         } = return_info;
 
         // Conduct any stake overrides before assigning entity_infos
-        override_infos_staked(&mut context.entity_infos, &self.allow_unstaked_addresses);
+        context::override_infos_staked(&mut context.entity_infos, &self.allow_unstaked_addresses);
 
         Ok(SimulationResult {
             mempools,
@@ -634,36 +654,18 @@ fn parse_storage_accesses(args: ParseStorageAccess<'_>) -> Vec<StorageRestrictio
     restrictions
 }
 
-fn override_is_staked(ei: &mut EntityInfo, allow_unstaked_addresses: &HashSet<Address>) {
-    ei.is_staked = allow_unstaked_addresses.contains(&ei.entity.address) || ei.is_staked;
-}
-
-fn override_infos_staked(eis: &mut EntityInfos, allow_unstaked_addresses: &HashSet<Address>) {
-    override_is_staked(&mut eis.sender, allow_unstaked_addresses);
-
-    if let Some(mut factory) = eis.factory {
-        override_is_staked(&mut factory, allow_unstaked_addresses);
-    }
-    if let Some(mut paymaster) = eis.paymaster {
-        override_is_staked(&mut paymaster, allow_unstaked_addresses);
-    }
-    if let Some(mut aggregator) = eis.aggregator {
-        override_is_staked(&mut aggregator, allow_unstaked_addresses);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{ops::Sub, sync::Arc, time::Duration};
 
-    use alloy_primitives::{address, b256, bytes, uint, Bytes};
+    use alloy_primitives::{Bytes, address, b256, bytes, uint};
     use context::ContractInfo;
     use rundler_provider::{BlockId, BlockNumberOrTag, MockEntryPointV0_6, MockEvmProvider};
     use rundler_types::{
+        AggregatorInfo, Opcode, StakeInfo, Timestamp, UserOperation as _,
         aggregator::AggregatorCosts,
         chain::ChainSpec,
         v0_6::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
-        AggregatorInfo, Opcode, StakeInfo, Timestamp, UserOperation as _,
     };
 
     use self::context::{Phase, TracerOutput};
@@ -1276,5 +1278,72 @@ mod tests {
                 context.entry_point_out.return_info.valid_after,
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn test_code_hash_zero() {
+        // test that ensures we don't get a code hash changed violation if the expected code hash is zero
+        let (mut provider, mut ep, mut context_provider) = create_base_config();
+        ep.expect_address()
+            .return_const(address!("5ff137d4b0fdcd49dca30c7cf57e578a026d2789"));
+        context_provider
+            .expect_get_specific_violations()
+            .returning(|_| Ok(vec![]));
+        provider
+            .expect_get_code_hash()
+            .returning(|_, _| Ok(B256::random()));
+
+        let mut context = get_test_context();
+        context.tracer_out.accessed_contracts.insert(
+            address!("5ff137d4b0fdcd49dca30c7cf57e578a026d2789"),
+            ContractInfo {
+                header: "0xEFF000".to_string(),
+                opcode: Opcode::CALL,
+                length: 32,
+            },
+        );
+
+        let simulator = create_simulator(provider, ep, context_provider);
+        let res = simulator
+            .check_code_hash(&mut context, Some(B256::ZERO))
+            .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_code_hash_changed() {
+        // test that ensures we get a code hash changed violation if the expected code hash is not zero
+        // and the code hash is different
+        let (mut provider, mut ep, mut context_provider) = create_base_config();
+        ep.expect_address()
+            .return_const(address!("5ff137d4b0fdcd49dca30c7cf57e578a026d2789"));
+        context_provider
+            .expect_get_specific_violations()
+            .returning(|_| Ok(vec![]));
+        provider
+            .expect_get_code_hash()
+            .returning(|_, _| Ok(B256::random()));
+
+        let mut context = get_test_context();
+        context.tracer_out.accessed_contracts.insert(
+            address!("5ff137d4b0fdcd49dca30c7cf57e578a026d2789"),
+            ContractInfo {
+                header: "0xEFF000".to_string(),
+                opcode: Opcode::CALL,
+                length: 32,
+            },
+        );
+        let simulator = create_simulator(provider, ep, context_provider);
+        let res = simulator
+            .check_code_hash(&mut context, Some(B256::random()))
+            .await;
+
+        let ViolationError::Violations(violations) = res.err().unwrap().violation_error else {
+            panic!("expected violations");
+        };
+        let Some(violation) = violations.first() else {
+            panic!("expected violation");
+        };
+        assert_eq!(*violation, SimulationViolation::CodeHashChanged);
     }
 }

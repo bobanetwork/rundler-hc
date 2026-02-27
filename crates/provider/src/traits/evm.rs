@@ -15,7 +15,7 @@
 
 use std::fmt::Display;
 
-use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, TxHash, U256};
 use rundler_types::ExpectedStorage;
 
 use crate::{
@@ -123,6 +123,9 @@ pub trait EvmProvider: Send + Sync {
     /// Get the latest block hash and number
     async fn get_latest_block_hash_and_number(&self) -> ProviderResult<(B256, u64)>;
 
+    /// Get the pending block hash and number
+    async fn get_pending_block_hash_and_number(&self) -> ProviderResult<(B256, u64)>;
+
     /// Get the base fee per gas of the pending block
     async fn get_pending_base_fee(&self) -> ProviderResult<u128>;
 
@@ -134,6 +137,9 @@ pub trait EvmProvider: Send + Sync {
 
     /// Get the nonce/transaction count of an address
     async fn get_transaction_count(&self, address: Address) -> ProviderResult<u64>;
+
+    /// Get the pending transaction count for an address
+    async fn get_pending_transaction_count(&self, address: Address) -> ProviderResult<u64>;
 
     /// Get the logs matching a filter
     async fn get_logs(&self, filter: &Filter) -> ProviderResult<Vec<Log>>;

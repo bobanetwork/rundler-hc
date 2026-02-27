@@ -11,8 +11,8 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{keccak256, ruint::FromUintError, Address, Bytes, B256, U256};
-use alloy_sol_types::{sol, SolValue};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256, ruint::FromUintError};
+use alloy_sol_types::{SolValue, sol};
 pub use rundler_contracts::v0_6::UserOperation as ContractUserOperation;
 use rundler_utils::random::{random_bytes, random_bytes_array};
 use serde::{Deserialize, Serialize};
@@ -20,11 +20,11 @@ use strum::IntoEnumIterator;
 
 use super::{UserOperation as UserOperationTrait, UserOperationId, UserOperationVariant};
 use crate::{
+    EntryPointVersion,
     aggregator::AggregatorCosts,
     authorization::Eip7702Auth,
     chain::ChainSpec,
     entity::{Entity, EntityType},
-    EntryPointVersion,
 };
 
 /// Gas overhead required by the entry point contract for the inner call
@@ -204,7 +204,7 @@ impl From<UserOperation> for UserOperationPackedForHash {
 impl UserOperationTrait for UserOperation {
     type OptionalGas = UserOperationOptionalGas;
 
-    fn entry_point_version() -> EntryPointVersion {
+    fn entry_point_version(&self) -> EntryPointVersion {
         EntryPointVersion::V0_6
     }
 
@@ -614,14 +614,7 @@ impl UserOperationOptionalGas {
         );
 
         if let Some(auth) = self.eip7702_auth_address {
-            let auth = Eip7702Auth {
-                address: auth,
-                chain_id: chain_spec.id,
-                ..Default::default()
-            }
-            .max_fill();
-
-            builder = builder.authorization_tuple(auth);
+            builder = builder.authorization_tuple(Eip7702Auth::new_max_fill(chain_spec.id, auth));
         }
 
         if let Some(agg) = self.aggregator {
@@ -667,14 +660,8 @@ impl UserOperationOptionalGas {
         );
 
         if let Some(auth) = self.eip7702_auth_address {
-            let auth = Eip7702Auth {
-                address: auth,
-                chain_id: chain_spec.id,
-                ..Default::default()
-            }
-            .random_fill();
-
-            builder = builder.authorization_tuple(auth);
+            builder =
+                builder.authorization_tuple(Eip7702Auth::new_random_fill(chain_spec.id, auth));
         }
 
         if let Some(agg) = self.aggregator {
@@ -705,10 +692,9 @@ impl UserOperationOptionalGas {
             super::default_if_none_or_equal(self.verification_gas_limit, max_verification_gas, 0);
         let pvg = super::default_if_none_or_equal(self.pre_verification_gas, max_call_gas, 0);
 
-        let authorization_tuple = self.eip7702_auth_address.map(|address| Eip7702Auth {
-            address,
-            ..Default::default()
-        });
+        let authorization_tuple = self
+            .eip7702_auth_address
+            .map(|address| Eip7702Auth::new_dummy(chain_spec.id, address));
         let required = UserOperationRequiredFields {
             sender: self.sender,
             nonce: self.nonce,

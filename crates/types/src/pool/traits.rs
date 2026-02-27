@@ -18,7 +18,10 @@ use futures_util::Stream;
 
 use super::{
     error::PoolError,
-    types::{NewHead, PaymasterMetadata, PoolOperation, Reputation, ReputationStatus, StakeStatus},
+    types::{
+        NewHead, PaymasterMetadata, PoolOperation, PoolOperationStatus, Reputation,
+        ReputationStatus, StakeStatus,
+    },
 };
 use crate::{
     EntityUpdate, UserOperation, UserOperationId, UserOperationPermissions, UserOperationVariant,
@@ -36,6 +39,8 @@ pub struct PoolOperationSummary {
     pub hash: B256,
     /// Sender of the operation
     pub sender: Address,
+    /// Sim block number of the operation
+    pub sim_block_number: u64,
     /// Hybrid Compute hash
     pub hc_hash: B256,
 }
@@ -95,6 +100,9 @@ pub trait Pool: Send + Sync {
         id: UserOperationId,
     ) -> PoolResult<Option<B256>>;
 
+    /// Get extended status for a user operation
+    async fn get_op_status(&self, hash: B256) -> PoolResult<Option<PoolOperationStatus>>;
+
     /// Update operations associated with entities from the pool
     async fn update_entities(
         &self,
@@ -110,6 +118,17 @@ pub trait Pool: Send + Sync {
         &self,
         to_track: Vec<Address>,
     ) -> PoolResult<Pin<Box<dyn Stream<Item = NewHead> + Send>>>;
+
+    /// Notify the pool about a pending bundle transaction.
+    /// Automatically replaces any existing pending bundle for the same builder.
+    async fn notify_pending_bundle(
+        &self,
+        entry_point: Address,
+        tx_hash: B256,
+        sent_at_block: u64,
+        builder_address: Address,
+        uo_hashes: Vec<B256>,
+    ) -> PoolResult<()>;
 
     /// Get reputation status given entrypoint and address
     async fn get_reputation_status(
@@ -167,6 +186,7 @@ impl From<&PoolOperation> for PoolOperationSummary {
             entry_point: op.entry_point,
             hash: op.uo.hash(),
             sender: op.uo.sender(),
+            sim_block_number: op.sim_block_number,
             hc_hash: op.uo.hc_hash(),
         }
     }
@@ -251,5 +271,14 @@ mockall::mock! {
             &self,
             entry_point: Address,
         ) -> PoolResult<Vec<PaymasterMetadata>>;
+        async fn notify_pending_bundle(
+            &self,
+            entry_point: Address,
+            tx_hash: B256,
+            sent_at_block: u64,
+            builder_address: Address,
+            uo_hashes: Vec<B256>,
+        ) -> PoolResult<()>;
+        async fn get_op_status(&self, hash: B256) -> PoolResult<Option<PoolOperationStatus>>;
     }
 }

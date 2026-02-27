@@ -11,42 +11,41 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use std::{cmp, ops::Add, time::Instant};
+use std::{ops::Add, time::Instant};
 
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::{SolCall, SolInterface};
 use rundler_contracts::v0_7::{
-    CallGasEstimationProxy::{
-        estimateCallGasCall, testCallGasCall, CallGasEstimationProxyCalls, EstimateCallGasArgs,
-    },
-    VerificationGasEstimationHelper::{
-        estimatePaymasterVerificationGasCall, estimateVerificationGasCall,
-        EstimateGasArgs as ContractEstimateGasArgs,
-    },
     CALL_GAS_ESTIMATION_PROXY_V0_7_DEPLOYED_BYTECODE,
-    ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE,
+    CallGasEstimationProxy::{
+        CallGasEstimationProxyCalls, EstimateCallGasArgs, estimateCallGasCall, testCallGasCall,
+    },
     VERIFICATION_GAS_ESTIMATION_HELPER_V0_7_DEPLOYED_BYTECODE,
+    VerificationGasEstimationHelper::{
+        EstimateGasArgs as ContractEstimateGasArgs, estimatePaymasterVerificationGasCall,
+        estimateVerificationGasCall,
+    },
 };
 use rundler_provider::{
     AccountOverride, DAGasProvider, EntryPoint, EvmProvider, FeeEstimator, SimulationProvider,
     StateOverride,
 };
 use rundler_types::{
+    GasEstimate, UserOperation as _,
     chain::ChainSpec,
     v0_7::{UserOperation, UserOperationBuilder, UserOperationOptionalGas},
-    GasEstimate, UserOperation as _,
 };
 use rundler_utils::{guard_timer::CustomTimerGuard, math};
 use tokio::join;
 use tracing::instrument;
 
 use super::{
-    estimate_verification_gas::{EstimateGasArgs, VerificationGasEstimatorSpecialization},
     GasEstimationError, Metrics, Settings,
+    estimate_verification_gas::{EstimateGasArgs, VerificationGasEstimatorSpecialization},
 };
 use crate::{
-    gas, CallGasEstimator, CallGasEstimatorImpl, CallGasEstimatorSpecialization,
-    VerificationGasEstimator, VerificationGasEstimatorImpl, MIN_CALL_GAS_LIMIT,
+    CallGasEstimator, CallGasEstimatorImpl, CallGasEstimatorSpecialization, MIN_CALL_GAS_LIMIT,
+    VerificationGasEstimator, VerificationGasEstimatorImpl, gas,
 };
 
 /// Gas estimator for entry point v0.7
@@ -82,7 +81,6 @@ where
         &self,
         op: UserOperationOptionalGas,
         state_override: StateOverride,
-        _at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
         let _timer = CustomTimerGuard::new(self.metrics.total_gas_estimate_ms.clone());
         self.check_provided_limits(&op)?;
@@ -124,7 +122,17 @@ where
             );
         }
 
-        let pre_verification_gas_future = self.estimate_pre_verification_gas(&op, block_hash);
+        let random_op = op.random_fill(&self.chain_spec);
+        let da_gas_future = gas::estimate_da_gas_with_fees(
+            &self.chain_spec,
+            &self.entry_point,
+            &self.fee_estimator,
+            &random_op,
+            op.max_fee_per_gas,
+            op.max_priority_fee_per_gas,
+            block_hash.into(),
+            self.metrics.pvg_estimate_ms.clone(),
+        );
 
         let verification_gas_future =
             self.estimate_verification_gas(&op, &full_op, block_hash, state_override.clone());
@@ -140,21 +148,46 @@ where
 
         // Not try_join! because then the output is nondeterministic if multiple calls fail.
         let (
-            pvg_result,
+            da_gas_result,
             verification_gas_limit_result,
             paymaster_verification_gas_limit_result,
             call_gas_limit_result,
         ) = join!(
-            pre_verification_gas_future,
+            da_gas_future,
             verification_gas_future,
             paymaster_verification_gas_future,
             call_gas_future
         );
 
-        let (pre_verification_gas, da_gas) = pvg_result?;
+        let da_gas = da_gas_result.map_err(GasEstimationError::from)?;
         let verification_gas_limit = verification_gas_limit_result?;
         let paymaster_verification_gas_limit = paymaster_verification_gas_limit_result?;
         let call_gas_limit = call_gas_limit_result?;
+
+        // Calculate the final PVG now that we have all gas limits
+        let pre_verification_gas = if op.pre_verification_gas.is_some_and(|pvg| pvg != 0) {
+            op.pre_verification_gas.unwrap()
+        } else {
+            // TODO(bundle): assuming a bundle size of 1
+            let bundle_size = 1;
+            let base_op = op.max_fill(&self.chain_spec);
+            if self.chain_spec.charge_gas_limit_via_pvg {
+                let op_with_limits = UserOperationBuilder::from_uo(base_op, &self.chain_spec)
+                    .verification_gas_limit(verification_gas_limit)
+                    .paymaster_verification_gas_limit(paymaster_verification_gas_limit)
+                    .call_gas_limit(call_gas_limit)
+                    .paymaster_post_op_gas_limit(op.paymaster_post_op_gas_limit.unwrap_or(0))
+                    .build();
+                op_with_limits.required_pre_verification_gas(
+                    &self.chain_spec,
+                    bundle_size,
+                    da_gas,
+                    None,
+                )
+            } else {
+                base_op.required_pre_verification_gas(&self.chain_spec, bundle_size, da_gas, None)
+            }
+        };
 
         // check the total gas limit
         let op_with_gas = UserOperationBuilder::from_uo(full_op, &self.chain_spec)
@@ -255,6 +288,7 @@ where
             settings,
             CallGasEstimatorSpecializationV07 {
                 chain_spec: chain_spec.clone(),
+                simulations_bytecode: entry_point.get_simulations_bytecode().clone(),
             },
         );
         Self {
@@ -284,37 +318,37 @@ where
         &self,
         optional_op: &UserOperationOptionalGas,
     ) -> Result<(), GasEstimationError> {
-        if let Some(vl) = optional_op.verification_gas_limit {
-            if vl > self.settings.max_verification_gas {
-                return Err(GasEstimationError::GasFieldTooLarge(
-                    "verificationGasLimit",
-                    self.settings.max_verification_gas,
-                ));
-            }
+        if let Some(vl) = optional_op.verification_gas_limit
+            && vl > self.settings.max_verification_gas
+        {
+            return Err(GasEstimationError::GasFieldTooLarge(
+                "verificationGasLimit",
+                self.settings.max_verification_gas,
+            ));
         }
-        if let Some(vl) = optional_op.paymaster_verification_gas_limit {
-            if vl > self.settings.max_verification_gas {
-                return Err(GasEstimationError::GasFieldTooLarge(
-                    "paymasterVerificationGasLimit",
-                    self.settings.max_verification_gas,
-                ));
-            }
+        if let Some(vl) = optional_op.paymaster_verification_gas_limit
+            && vl > self.settings.max_verification_gas
+        {
+            return Err(GasEstimationError::GasFieldTooLarge(
+                "paymasterVerificationGasLimit",
+                self.settings.max_verification_gas,
+            ));
         }
-        if let Some(cl) = optional_op.call_gas_limit {
-            if cl > self.settings.max_bundle_execution_gas {
-                return Err(GasEstimationError::GasFieldTooLarge(
-                    "callGasLimit",
-                    self.settings.max_bundle_execution_gas,
-                ));
-            }
+        if let Some(cl) = optional_op.call_gas_limit
+            && cl > self.settings.max_bundle_execution_gas
+        {
+            return Err(GasEstimationError::GasFieldTooLarge(
+                "callGasLimit",
+                self.settings.max_bundle_execution_gas,
+            ));
         }
-        if let Some(cl) = optional_op.paymaster_post_op_gas_limit {
-            if cl > self.settings.max_bundle_execution_gas {
-                return Err(GasEstimationError::GasFieldTooLarge(
-                    "paymasterPostOpGasLimit",
-                    self.settings.max_bundle_execution_gas,
-                ));
-            }
+        if let Some(cl) = optional_op.paymaster_post_op_gas_limit
+            && cl > self.settings.max_bundle_execution_gas
+        {
+            return Err(GasEstimationError::GasFieldTooLarge(
+                "paymasterPostOpGasLimit",
+                self.settings.max_bundle_execution_gas,
+            ));
         }
 
         Ok(())
@@ -329,12 +363,12 @@ where
         state_override: StateOverride,
     ) -> Result<u128, GasEstimationError> {
         // if set and non-zero, don't estimate
-        if let Some(vl) = optional_op.verification_gas_limit {
-            if vl != 0 {
-                // No need to do an extra simulation here, if the user provides a value that is
-                // insufficient it will cause a revert during call gas estimation (or simulation).
-                return Ok(vl);
-            }
+        if let Some(vl) = optional_op.verification_gas_limit
+            && vl != 0
+        {
+            // No need to do an extra simulation here, if the user provides a value that is
+            // insufficient it will cause a revert during call gas estimation (or simulation).
+            return Ok(vl);
         }
 
         let _timer = CustomTimerGuard::new(self.metrics.vgl_estimate_ms.clone());
@@ -373,10 +407,10 @@ where
             return Ok(0);
         }
 
-        if let Some(pvl) = optional_op.paymaster_verification_gas_limit {
-            if pvl != 0 {
-                return Ok(pvl);
-            }
+        if let Some(pvl) = optional_op.paymaster_verification_gas_limit
+            && pvl != 0
+        {
+            return Ok(pvl);
         }
 
         let _timer = CustomTimerGuard::new(self.metrics.pvgl_estimate_ms.clone());
@@ -403,50 +437,6 @@ where
     }
 
     #[instrument(skip_all)]
-    async fn estimate_pre_verification_gas(
-        &self,
-        optional_op: &UserOperationOptionalGas,
-        block_hash: B256,
-    ) -> Result<(u128, u128), GasEstimationError> {
-        if let Some(pvg) = optional_op.pre_verification_gas {
-            if pvg != 0 {
-                return Ok((pvg, 0));
-            }
-        }
-
-        let _timer = CustomTimerGuard::new(self.metrics.pvg_estimate_ms.clone());
-
-        // If not using calldata pre-verification gas, return 0
-        let gas_price = if !self.chain_spec.da_pre_verification_gas {
-            0
-        } else {
-            // If the user provides fees, use them, otherwise use the current bundle fees
-            let (bundle_fees, base_fee) = self
-                .fee_estimator
-                .required_bundle_fees(block_hash, None)
-                .await?;
-            if let (Some(max_fee), Some(prio_fee)) = (
-                optional_op.max_fee_per_gas.filter(|fee| *fee != 0),
-                optional_op.max_priority_fee_per_gas.filter(|fee| *fee != 0),
-            ) {
-                cmp::min(max_fee, base_fee.saturating_add(prio_fee))
-            } else {
-                base_fee.saturating_add(bundle_fees.max_priority_fee_per_gas)
-            }
-        };
-
-        Ok(gas::estimate_pre_verification_gas(
-            &self.chain_spec,
-            &self.entry_point,
-            &optional_op.max_fill(&self.chain_spec),
-            &optional_op.random_fill(&self.chain_spec),
-            block_hash.into(),
-            gas_price,
-        )
-        .await?)
-    }
-
-    #[instrument(skip_all)]
     async fn estimate_call_gas(
         &self,
         optional_op: &UserOperationOptionalGas,
@@ -456,14 +446,14 @@ where
     ) -> Result<u128, GasEstimationError> {
         let _timer = CustomTimerGuard::new(self.metrics.cgl_estimate_ms.clone());
         // if set and non-zero, don't estimate
-        if let Some(cl) = optional_op.call_gas_limit {
-            if cl != 0 {
-                // The user provided a non-zero value, simulate once
-                self.call_gas_estimator
-                    .simulate_handle_op_with_result(full_op, block_hash, state_override)
-                    .await?;
-                return Ok(cl);
-            }
+        if let Some(cl) = optional_op.call_gas_limit
+            && cl != 0
+        {
+            // The user provided a non-zero value, simulate once
+            self.call_gas_estimator
+                .simulate_handle_op_with_result(full_op, block_hash, state_override)
+                .await?;
+            return Ok(cl);
         }
 
         let call_gas_limit = self
@@ -485,6 +475,7 @@ where
 #[derive(Debug, Clone)]
 pub struct CallGasEstimatorSpecializationV07 {
     chain_spec: ChainSpec,
+    simulations_bytecode: Bytes,
 }
 
 impl CallGasEstimatorSpecialization for CallGasEstimatorSpecializationV07 {
@@ -501,7 +492,7 @@ impl CallGasEstimatorSpecialization for CallGasEstimatorSpecializationV07 {
         state_override.insert(
             moved_entry_point_address,
             AccountOverride {
-                code: Some(ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE.clone()),
+                code: Some(self.simulations_bytecode.clone()),
                 ..Default::default()
             },
         );
@@ -592,6 +583,7 @@ fn construct_verification_args(
 
 fn add_proxy_to_overrides(
     entry_point: Address,
+    simulations_bytecode: Bytes,
     to_override: Address,
     state_override: &mut StateOverride,
 ) {
@@ -605,7 +597,7 @@ fn add_proxy_to_overrides(
     state_override.insert(
         entry_point,
         AccountOverride {
-            code: Some(ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE.clone()),
+            code: Some(simulations_bytecode),
             ..Default::default()
         },
     );
@@ -635,7 +627,12 @@ where
     type UO = UserOperation;
 
     fn add_proxy_to_overrides(&self, to_override: Address, state_override: &mut StateOverride) {
-        add_proxy_to_overrides(*self.entry_point.address(), to_override, state_override);
+        add_proxy_to_overrides(
+            *self.entry_point.address(),
+            self.entry_point.get_simulations_bytecode().clone(),
+            to_override,
+            state_override,
+        );
     }
 
     fn get_call(&self, op: Self::UO, args: &EstimateGasArgs) -> Bytes {
@@ -665,7 +662,12 @@ where
     type UO = UserOperation;
 
     fn add_proxy_to_overrides(&self, to_override: Address, state_override: &mut StateOverride) {
-        add_proxy_to_overrides(*self.entry_point.address(), to_override, state_override);
+        add_proxy_to_overrides(
+            *self.entry_point.address(),
+            self.entry_point.get_simulations_bytecode().clone(),
+            to_override,
+            state_override,
+        );
     }
 
     fn get_call(&self, op: Self::UO, args: &EstimateGasArgs) -> Bytes {
@@ -685,17 +687,20 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use alloy_primitives::{hex, U256};
+    use alloy_primitives::{U256, hex};
     use alloy_sol_types::{Revert, SolError};
-    use rundler_contracts::common::EstimationTypes::TestCallGasResult;
+    use rundler_contracts::{
+        common::EstimationTypes::TestCallGasResult,
+        v0_7::ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE,
+    };
     use rundler_provider::{
         ExecutionResult, MockEntryPointV0_7, MockEvmProvider, MockFeeEstimator,
     };
-    use rundler_types::v0_7::UserOperationOptionalGas;
+    use rundler_types::{EntryPointVersion, v0_7::UserOperationOptionalGas};
 
     use super::*;
     use crate::{
-        estimation::estimate_call_gas::PROXY_IMPLEMENTATION_ADDRESS_MARKER, GasEstimator as _,
+        GasEstimator as _, estimation::estimate_call_gas::PROXY_IMPLEMENTATION_ADDRESS_MARKER,
     };
 
     // Alises for complex types (which also satisfy Clippy)
@@ -728,6 +733,9 @@ mod tests {
         entry.expect_simulation_should_revert().return_const(true);
 
         entry.expect_address().return_const(Address::ZERO);
+        entry
+            .expect_get_simulations_bytecode()
+            .return_const(ENTRY_POINT_SIMULATIONS_V0_7_DEPLOYED_BYTECODE.clone());
 
         (entry, provider)
     }
@@ -791,6 +799,9 @@ mod tests {
             factory_data: Bytes::new(),
             eip7702_auth_address: None,
             aggregator: None,
+            paymaster_signature: None,
+
+            entry_point_version: EntryPointVersion::V0_7,
         }
     }
 
@@ -803,7 +814,7 @@ mod tests {
         optional_op.verification_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default(), None)
+            .estimate_op_gas(optional_op, StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -823,7 +834,7 @@ mod tests {
         optional_op.paymaster_verification_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default(), None)
+            .estimate_op_gas(optional_op, StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -846,7 +857,7 @@ mod tests {
         optional_op.call_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default(), None)
+            .estimate_op_gas(optional_op, StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -866,7 +877,7 @@ mod tests {
         optional_op.paymaster_post_op_gas_limit = Some(TEST_MAX_GAS_LIMITS + 1);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default(), None)
+            .estimate_op_gas(optional_op, StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -911,7 +922,7 @@ mod tests {
         optional_op.paymaster_post_op_gas_limit = Some(10000);
 
         let estimation = estimator
-            .estimate_op_gas(optional_op.clone(), StateOverride::default(), None)
+            .estimate_op_gas(optional_op.clone(), StateOverride::default())
             .await
             .unwrap();
 
@@ -969,7 +980,7 @@ mod tests {
         optional_op.verification_gas_limit = Some(10000);
 
         let estimation_error = estimator
-            .estimate_op_gas(optional_op.clone(), StateOverride::default(), None)
+            .estimate_op_gas(optional_op.clone(), StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -1025,10 +1036,13 @@ mod tests {
             factory_data: Bytes::new(),
             eip7702_auth_address: None,
             aggregator: None,
+            paymaster_signature: None,
+
+            entry_point_version: EntryPointVersion::V0_7,
         };
 
         let estimation = estimator
-            .estimate_op_gas(optional_op, StateOverride::default(), None)
+            .estimate_op_gas(optional_op, StateOverride::default())
             .await
             .err()
             .unwrap();
@@ -1048,7 +1062,7 @@ mod tests {
         op.aggregator = Some(unsupported);
 
         let err = estimator
-            .estimate_op_gas(op, StateOverride::default(), None)
+            .estimate_op_gas(op, StateOverride::default())
             .await
             .err()
             .unwrap();

@@ -77,6 +77,7 @@ impl Assigner {
         builder_address: Address,
         entry_point: Address,
         filter_id: Option<String>,
+        max_sim_block_number: u64,
     ) -> anyhow::Result<Vec<PoolOperation>> {
         let per_builder_metrics =
             PerBuilderMetrics::new_with_labels(&[("builder_address", builder_address.to_string())]);
@@ -88,7 +89,13 @@ impl Assigner {
 
         {
             let mut state = self.state.lock().unwrap();
-            for op in ops {
+
+            // iterate through ops that have been simulated before the max sim block number
+            // to ensure that the second simulation happens at the same or a later block than the first simulation
+            for op in ops
+                .iter()
+                .filter(|op| op.sim_block_number <= max_sim_block_number)
+            {
                 if let Some(hc_ent) = hybrid_compute::get_hc_ent(op.hc_hash) {
                     let hc_sender = hybrid_compute::get_hc_sender(hc_ent.clone());
                     if hc_sender != op.sender {
@@ -195,7 +202,10 @@ impl Assigner {
                     .get(hc_check)
                     .expect("BUG: confirmed_sender not found in state, lock contract broken (HC)");
                 if *locked_builder_address != builder_address {
-                    panic!("BUG: confirmed_sender {:?} is assigned to another builder expected: {:?} found: {:?}, lock contract broken", confirmed_sender, builder_address, locked_builder_address);
+                    panic!(
+                        "BUG: confirmed_sender {:?} is assigned to another builder expected: {:?} found: {:?}, lock contract broken",
+                        confirmed_sender, builder_address, locked_builder_address
+                    );
                 }
 
                 state.hc_extra_senders.remove(confirmed_sender);
@@ -210,7 +220,10 @@ impl Assigner {
                 .expect("BUG: confirmed_sender not found in state, lock contract broken");
 
             if *locked_builder_address != builder_address {
-                panic!("BUG: confirmed_sender {:?} is assigned to another builder expected: {:?} found: {:?}, lock contract broken", confirmed_sender, builder_address, locked_builder_address);
+                panic!(
+                    "BUG: confirmed_sender {:?} is assigned to another builder expected: {:?} found: {:?}, lock contract broken",
+                    confirmed_sender, builder_address, locked_builder_address
+                );
             }
 
             // Confirm the sender to the builder
@@ -317,10 +330,10 @@ struct PerBuilderMetrics {
 mod tests {
     use alloy_primitives::B256;
     use rundler_types::{
+        EntityInfos, UserOperation, UserOperationPermissions, ValidTimeRange,
         chain::ChainSpec,
         pool::MockPool,
         v0_6::{UserOperationBuilder, UserOperationRequiredFields},
-        EntityInfos, UserOperation, UserOperationPermissions, ValidTimeRange,
     };
 
     use super::*;
@@ -351,6 +364,7 @@ mod tests {
                     da_gas_data: Default::default(),
                     filter_id: None,
                     perms: UserOperationPermissions::default(),
+                    sender_is_7702: false,
                 }
             })
             .collect()
@@ -382,7 +396,7 @@ mod tests {
 
         // First assignment should succeed
         let assigned_ops = assigner
-            .assign_operations(address(0), address(0), None)
+            .assign_operations(address(0), address(0), None, u64::MAX)
             .await
             .unwrap();
         assert_eq!(assigned_ops.len(), 0); // TestPool returns empty by default
@@ -396,7 +410,7 @@ mod tests {
 
         let assigner = Assigner::new(Box::new(mock_pool), 10, 10);
         let assigned_ops = assigner
-            .assign_operations(address(0), address(0), None)
+            .assign_operations(address(0), address(0), None, u64::MAX)
             .await
             .unwrap();
         assert_eq!(assigned_ops.len(), 2);
@@ -412,19 +426,19 @@ mod tests {
 
         let assigner = Assigner::new(Box::new(mock_pool), 10, 10);
         let _ = assigner
-            .assign_operations(address(0), address(0), None)
+            .assign_operations(address(0), address(0), None, u64::MAX)
             .await
             .unwrap();
 
         // Same builder address should assign again
         let assigned_ops = assigner
-            .assign_operations(address(0), address(0), None)
+            .assign_operations(address(0), address(0), None, u64::MAX)
             .await
             .unwrap();
         assert_eq!(assigned_ops.len(), 2);
         // Different builder address should not assign
         let assigned_ops = assigner
-            .assign_operations(address(1), address(0), None)
+            .assign_operations(address(1), address(0), None, u64::MAX)
             .await
             .unwrap();
         assert_eq!(assigned_ops.len(), 0);
@@ -438,7 +452,7 @@ mod tests {
 
         let assigner = Assigner::new(Box::new(mock_pool), 10, 10);
         let _ = assigner
-            .assign_operations(address(0), address(0), None)
+            .assign_operations(address(0), address(0), None, u64::MAX)
             .await
             .unwrap();
 
@@ -447,7 +461,7 @@ mod tests {
 
         // Different builder should be able go receive address(2)
         let assigned_ops = assigner
-            .assign_operations(address(1), address(0), None)
+            .assign_operations(address(1), address(0), None, u64::MAX)
             .await
             .unwrap();
         assert_eq!(assigned_ops.len(), 1);
@@ -462,7 +476,7 @@ mod tests {
 
         let assigner = Assigner::new(Box::new(mock_pool), 10, 10);
         let _ = assigner
-            .assign_operations(address(0), address(0), None)
+            .assign_operations(address(0), address(0), None, u64::MAX)
             .await
             .unwrap();
 
@@ -470,7 +484,7 @@ mod tests {
         assigner.release_all(address(0));
 
         let assigned_ops = assigner
-            .assign_operations(address(1), address(0), None)
+            .assign_operations(address(1), address(0), None, u64::MAX)
             .await
             .unwrap();
         assert_eq!(assigned_ops.len(), 2);
@@ -486,7 +500,7 @@ mod tests {
 
         let assigner = Assigner::new(Box::new(mock_pool), 10, 10);
         let _ = assigner
-            .assign_operations(address(0), address(0), None)
+            .assign_operations(address(0), address(0), None, u64::MAX)
             .await
             .unwrap();
 
@@ -497,7 +511,7 @@ mod tests {
 
         // Different builder should be able go receive address(2)
         let assigned_ops = assigner
-            .assign_operations(address(1), address(0), None)
+            .assign_operations(address(1), address(0), None, u64::MAX)
             .await
             .unwrap();
         assert_eq!(assigned_ops.len(), 1);
@@ -532,7 +546,7 @@ mod tests {
 
         let assigner = Assigner::new(Box::new(mock_pool), 10, 10);
         let _ = assigner
-            .assign_operations(address(0), address(0), None)
+            .assign_operations(address(0), address(0), None, u64::MAX)
             .await
             .unwrap();
 

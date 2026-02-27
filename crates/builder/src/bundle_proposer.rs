@@ -20,7 +20,7 @@ use std::{
     time::Instant,
 };
 
-use alloy_primitives::{aliases::U192, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, aliases::U192};
 use anyhow::Context;
 use async_trait::async_trait;
 use futures::future;
@@ -35,18 +35,18 @@ use rundler_provider::{
 };
 use rundler_sim::{SimulationError, SimulationResult, Simulator, ViolationError};
 use rundler_types::{
+    BUNDLE_BYTE_OVERHEAD, BundleExpectedStorage, Entity, EntityInfo, EntityInfos, EntityType,
+    EntityUpdate, EntityUpdateType, EntryPointVersion, ExpectedStorage, GasFees, TIME_RANGE_BUFFER,
+    Timestamp, UserOperation, UserOperationVariant, UserOpsPerAggregator, ValidTimeRange,
+    ValidationRevert,
     aggregator::SignatureAggregatorResult,
     chain::ChainSpec,
-    da::DAGasBlockData,
+    da::{DAGasBlockData, DAGasData},
     hybrid_compute,
     pool::{PoolOperation, SimulationViolation},
     proxy::SubmissionProxy,
-    BundleExpectedStorage, Entity, EntityInfo, EntityInfos, EntityType, EntityUpdate,
-    EntityUpdateType, EntryPointVersion, ExpectedStorage, GasFees, Timestamp, UserOperation,
-    UserOperationVariant, UserOpsPerAggregator, ValidTimeRange, ValidationRevert,
-    BUNDLE_BYTE_OVERHEAD, TIME_RANGE_BUFFER,
 };
-use rundler_utils::{emit::WithEntryPoint, guard_timer::CustomTimerGuard, math};
+use rundler_utils::{emit::WithEntryPoint, eth, guard_timer::CustomTimerGuard, math};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -79,13 +79,6 @@ impl<UO: UserOperation> Default for Bundle<UO> {
 }
 
 impl<UO: UserOperation> Bundle<UO> {
-    pub(crate) fn len(&self) -> usize {
-        self.ops_per_aggregator
-            .iter()
-            .map(|ops| ops.user_ops.len())
-            .sum()
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.ops_per_aggregator.is_empty()
     }
@@ -227,7 +220,9 @@ where
             match da_gas_oracle.da_block_data(block_hash.into()).await {
                 Ok(block_data) => Some(block_data),
                 Err(e) => {
-                    error!("Failed to get block data for block hash {block_hash:?}, falling back to async da gas calculations: {e:?}");
+                    error!(
+                        "Failed to get block data for block hash {block_hash:?}, falling back to async da gas calculations: {e:?}"
+                    );
                     None
                 }
             }
@@ -446,11 +441,10 @@ where
         };
 
         let required_da_gas = if self.settings.da_gas_tracking_enabled
-            && da_block_data.is_some()
-            && self.ep_providers.da_gas_oracle_sync().is_some()
+            && op.da_gas_data != DAGasData::Empty
+            && let Some(da_block_data) = da_block_data
+            && let Some(da_gas_oracle) = self.ep_providers.da_gas_oracle_sync().as_ref()
         {
-            let da_gas_oracle = self.ep_providers.da_gas_oracle_sync().as_ref().unwrap();
-            let da_block_data = da_block_data.unwrap();
             let extra_data_len = op.uo.extra_data_len(bundle_size);
 
             da_gas_oracle.calc_da_gas_sync(
@@ -871,7 +865,10 @@ where
             {
                 // Exclude ops that access the sender of another op in the
                 // batch, but don't reject them (remove them from pool).
-                info!("Excluding op from {:?} because it accessed the address of another sender in the bundle.", op.sender());
+                info!(
+                    "Excluding op from {:?} because it accessed the address of another sender in the bundle.",
+                    op.sender()
+                );
                 println!(
                     "HC bundle_proposer limited by sender conflict {:?}",
                     other_sender
@@ -886,12 +883,16 @@ where
 
             if let Some(paymaster) = op.paymaster() {
                 let Some(balance) = balances_by_paymaster.get_mut(&paymaster) else {
-                    error!("Op had paymaster with unknown balance, but balances should have been loaded for all paymasters in bundle.");
+                    error!(
+                        "Op had paymaster with unknown balance, but balances should have been loaded for all paymasters in bundle."
+                    );
                     continue;
                 };
                 let max_cost = op.max_gas_cost();
                 if *balance < max_cost {
-                    info!("Rejected paymaster {paymaster:?} because its balance {balance:?} was too low.");
+                    info!(
+                        "Rejected paymaster {paymaster:?} because its balance {balance:?} was too low."
+                    );
                     paymasters_to_reject.push(po.op.entity_infos.paymaster.unwrap());
                     continue;
                 } else {
@@ -1233,13 +1234,17 @@ where
                 Ok(None)
             }
             HandleOpsOut::SignatureValidationFailed(aggregator) => {
-                info!("Rejected aggregator {aggregator:?} because its signature validation failed during gas estimation.");
+                info!(
+                    "Rejected aggregator {aggregator:?} because its signature validation failed during gas estimation."
+                );
                 self.reject_entity(context, Entity::aggregator(aggregator), true)
                     .await;
                 Ok(None)
             }
             HandleOpsOut::PostOpRevert => {
-                warn!("PostOpShortRevert error during gas estimation due to bug in the 0.6 entry point contract. Removing the offending op from the bundle.");
+                warn!(
+                    "PostOpShortRevert error during gas estimation due to bug in the 0.6 entry point contract. Removing the offending op from the bundle."
+                );
                 self.process_post_op_revert(context, gas_limit, bundle_fees)
                     .await?;
                 Ok(None)
@@ -1261,7 +1266,9 @@ where
                     }
 
                     if !removed {
-                        warn!("HandleOps reverted during gas estimation, proxy {proxy:?} returned no hashes to remove. Rejecting full bundle. revert data: {revert_data:?}");
+                        warn!(
+                            "HandleOps reverted during gas estimation, proxy {proxy:?} returned no hashes to remove. Rejecting full bundle. revert data: {revert_data:?}"
+                        );
                         self.reject_bundle(context).await;
                     }
                 } else {
@@ -1338,7 +1345,9 @@ where
             "AA13" | "AA14" | "AA15" => {
                 let op_with_sim = context.get_op_at(index)?;
                 let factory = op_with_sim.op.factory().context("op failed during gas estimation with factory error, but did not include a factory")?;
-                info!("Rejected op because it failed during gas estimation with factory {factory:?} error {message}.");
+                info!(
+                    "Rejected op because it failed during gas estimation with factory {factory:?} error {message}."
+                );
                 self.reject_entity(
                     context,
                     Entity::factory(factory),
@@ -1357,7 +1366,9 @@ where
                 let paymaster = op_with_sim.op.paymaster().context(
                     "op failed during gas estimation with {message}, but had no paymaster",
                 )?;
-                info!("Rejected op because it failed during gas estimation with a paymaster {paymaster:?} error {message}.");
+                info!(
+                    "Rejected op because it failed during gas estimation with a paymaster {paymaster:?} error {message}."
+                );
                 self.reject_entity(
                     context,
                     Entity::paymaster(paymaster),
@@ -1527,7 +1538,10 @@ where
             }
             Err(e) => {
                 // If we get an error here, we can't be sure if the op is the offending op or not, so we remove it to be safe
-                error!("Failed to call handle ops: {e} during postOpRevert handling, removing all ops from aggregator {:?}", agg);
+                error!(
+                    "Failed to call handle ops: {e} during postOpRevert handling, removing all ops from aggregator {:?}",
+                    agg
+                );
                 (start_index..start_index + len).collect()
             }
         }
@@ -1541,20 +1555,19 @@ where
         let mut ops_in_bundle = Vec::new();
         for op in ops {
             // if the op has an aggregator, check if the aggregator is supported, if not skip
-            if let Some(agg) = op.op.uo.aggregator() {
-                if self
+            if let Some(agg) = op.op.uo.aggregator()
+                && self
                     .settings
                     .chain_spec
                     .get_signature_aggregator(&agg)
                     .is_none()
-                {
-                    self.emit(BuilderEvent::skipped_op(
-                        self.builder_tag.clone(),
-                        op.op.uo.hash(),
-                        SkipReason::UnsupportedAggregator(agg),
-                    ));
-                    continue;
-                }
+            {
+                self.emit(BuilderEvent::skipped_op(
+                    self.builder_tag.clone(),
+                    op.op.uo.hash(),
+                    SkipReason::UnsupportedAggregator(agg),
+                ));
+                continue;
             }
 
             // Here we use optimistic gas limits for the UOs by assuming none of the paymaster UOs use postOp calls.
@@ -1682,7 +1695,9 @@ impl<UO: UserOperation> ProposalContext<UO> {
         match result {
             Ok(sig) => self.groups_by_aggregator[&aggregator].signature = sig,
             Err(error) => {
-                error!("Failed to compute aggregator signature, rejecting aggregator {aggregator:?}: {error}");
+                error!(
+                    "Failed to compute aggregator signature, rejecting aggregator {aggregator:?}: {error}"
+                );
                 self.reject_aggregator(aggregator);
             }
         }
@@ -1753,7 +1768,10 @@ impl<UO: UserOperation> ProposalContext<UO> {
             remaining_i -= group.ops_with_simulations.len();
         }
         let Some(found_aggregator) = found_aggregator else {
-            error!("The entry point indicated a failed op at index {i}, but the bundle size is only {}", i - remaining_i);
+            error!(
+                "The entry point indicated a failed op at index {i}, but the bundle size is only {}",
+                i - remaining_i
+            );
             return None;
         };
         // If we just removed the last op from a group, delete that group.
@@ -1859,10 +1877,8 @@ impl<UO: UserOperation> ProposalContext<UO> {
     }
 
     fn reject_op(&mut self, rejected: OpWithSimulation<UO>, paymaster_amendment: bool) {
-        if paymaster_amendment {
-            if let Some(paymaster) = rejected.op.paymaster() {
-                self.add_erep_015_paymaster_amendment(paymaster, 1);
-            }
+        if paymaster_amendment && let Some(paymaster) = rejected.op.paymaster() {
+            self.add_erep_015_paymaster_amendment(paymaster, 1);
         }
         self.rejected_ops
             .push((rejected.op, rejected.simulation.entity_infos));
@@ -1888,11 +1904,21 @@ impl<UO: UserOperation> ProposalContext<UO> {
     }
 
     fn get_bundle_transaction_size(&self, chain_spec: &ChainSpec) -> u128 {
-        self.bundle_overhead_bytes(chain_spec)
-            + self
-                .iter_ops_with_simulations()
-                .map(|sim_op| sim_op.op.abi_encoded_size() as u128)
-                .sum::<u128>()
+        let bundle_overhead = self.bundle_overhead_bytes(chain_spec);
+        let (ops_data_size, auth_list_count) = self
+            .iter_ops_with_simulations()
+            .map(|sim_op| {
+                (
+                    sim_op.op.abi_encoded_size() as u128,
+                    sim_op.op.authorization_tuple().map_or(0, |_| 1),
+                )
+            })
+            .fold((0u128, 0), |(acc_size, acc_count), (size, count)| {
+                (acc_size + size, acc_count + count)
+            });
+
+        let bundle_data_size = (bundle_overhead + ops_data_size) as usize;
+        eth::calculate_transaction_size(bundle_data_size, auth_list_count) as u128
     }
 
     // Get the computation gas limit in the bundle
@@ -1947,7 +1973,10 @@ impl<UO: UserOperation> ProposalContext<UO> {
     }
 
     fn get_bundle_gas_limit_inner(&self, chain_spec: &ChainSpec, include_da_gas: bool) -> u128 {
-        let mut gas_limit = rundler_types::bundle_shared_gas(chain_spec);
+        let mut authorization_gas = 0_u128;
+        let mut standard_gas_limit = 0_u128;
+        let mut calldata_floor_gas_limit = 0_u128;
+        let mut da_gas_limit = 0_u128;
 
         // Per aggregator fixed gas
         for agg in self.groups_by_aggregator.keys() {
@@ -1958,36 +1987,45 @@ impl<UO: UserOperation> ProposalContext<UO> {
                 // this should be checked prior to calling this function
                 panic!("BUG: aggregator {agg:?} not found in chain spec");
             };
-            gas_limit += agg.costs().execution_fixed_gas;
+            standard_gas_limit = standard_gas_limit.saturating_add(agg.costs().execution_fixed_gas);
 
             // NOTE: this assumes that the DA cost for the aggregated signature is covered by the gas limits
             // from the UOs (on chains that have DA gas in gas limit). This is enforced during fee check phase.
         }
 
-        // per UO gas, bundle_size == None to signal to exclude shared gas
-        gas_limit += self
-            .iter_ops_with_simulations()
-            .map(|sim_op| {
-                if include_da_gas {
-                    sim_op.op.bundle_gas_limit(chain_spec, None) + sim_op.sponsored_da_gas
-                } else {
-                    sim_op.op.bundle_computation_gas_limit(chain_spec, None)
-                }
-            })
-            .sum::<u128>();
+        for sim_op in self.iter_ops_with_simulations() {
+            let op_authorization_gas = sim_op.op.authorization_gas_limit();
+            authorization_gas = authorization_gas.saturating_add(op_authorization_gas);
 
-        let calldata_floor_gas_limit = self.bundle_overhead_bytes(chain_spec)
-            * chain_spec.calldata_floor_non_zero_byte_gas()
-            + self
-                .iter_ops_with_simulations()
-                .map(|sim_op| sim_op.op.calldata_floor_gas_limit())
-                .sum::<u128>();
+            // EIP-7623 calculations require this to be done without the EIP-7702 intrinsic gas. Its added later in the final calculation.
+            standard_gas_limit = standard_gas_limit.saturating_add(
+                sim_op.op.bundle_computation_gas_limit(chain_spec, None) - op_authorization_gas,
+            );
 
-        if calldata_floor_gas_limit > gas_limit {
-            return calldata_floor_gas_limit;
+            calldata_floor_gas_limit =
+                calldata_floor_gas_limit.saturating_add(sim_op.op.calldata_floor_gas_limit());
+
+            if include_da_gas {
+                da_gas_limit = da_gas_limit.saturating_add(
+                    sim_op.op.pre_verification_da_gas_limit(chain_spec, None)
+                        + sim_op.sponsored_da_gas,
+                );
+            }
         }
 
-        gas_limit
+        calldata_floor_gas_limit = calldata_floor_gas_limit.saturating_add(
+            self.bundle_overhead_bytes(chain_spec)
+                .saturating_mul(chain_spec.calldata_floor_non_zero_byte_gas()),
+        );
+
+        // EIP-7623 maximum between standard and calldata floor
+        let execution_gas_limit = standard_gas_limit.max(calldata_floor_gas_limit);
+
+        chain_spec
+            .transaction_intrinsic_gas()
+            .saturating_add(authorization_gas)
+            .saturating_add(da_gas_limit)
+            .saturating_add(execution_gas_limit)
     }
 
     fn iter_ops_with_simulations(&self) -> impl Iterator<Item = &OpWithSimulation<UO>> + '_ {
@@ -2015,10 +2053,10 @@ impl<UO: UserOperation> ProposalContext<UO> {
         // Paymasters should not be held accountable, so the paymaster's `opsSeen` count should be decremented accordingly.
         let is_staked_factory = entity_infos.factory.is_some_and(|f| f.is_staked);
         let is_staked_sender = entity_infos.sender.is_staked;
-        if is_staked_factory || is_staked_sender {
-            if let Some(paymaster) = entity_infos.paymaster {
-                self.add_erep_015_paymaster_amendment(paymaster.address(), 1)
-            }
+        if (is_staked_factory || is_staked_sender)
+            && let Some(paymaster) = entity_infos.paymaster
+        {
+            self.add_erep_015_paymaster_amendment(paymaster.address(), 1)
         }
 
         // [EREP-020] When there is a staked factory any error in validation is attributed to it.
@@ -2118,10 +2156,8 @@ impl<UO: UserOperation> ProposalContext<UO> {
             }
         }
 
-        if paymaster_amendment_required {
-            if let Some(paymaster) = entity_infos.paymaster {
-                self.add_erep_015_paymaster_amendment(paymaster.address(), 1)
-            };
+        if paymaster_amendment_required && let Some(paymaster) = entity_infos.paymaster {
+            self.add_erep_015_paymaster_amendment(paymaster.address(), 1)
         }
     }
 
@@ -2210,7 +2246,7 @@ impl<UO: UserOperation> ProposalContext<UO> {
 mod tests {
     use std::time::Duration;
 
-    use alloy_primitives::{utils::parse_units, Address, B256};
+    use alloy_primitives::{Address, B256, utils::parse_units};
     use anyhow::anyhow;
     use rundler_provider::{
         MockDAGasOracleSync, MockEntryPointV0_6, MockEvmProvider, MockFeeEstimator,
@@ -2218,6 +2254,7 @@ mod tests {
     };
     use rundler_sim::MockSimulator;
     use rundler_types::{
+        BundlerSponsorship, UserOperation as _, UserOperationPermissions, ValidTimeRange,
         aggregator::{
             AggregatorCosts, MockSignatureAggregator, SignatureAggregator, SignatureAggregatorError,
         },
@@ -2226,7 +2263,6 @@ mod tests {
         pool::SimulationViolation,
         proxy::MockSubmissionProxy,
         v0_6::{UserOperation, UserOperationBuilder, UserOperationRequiredFields},
-        BundlerSponsorship, UserOperation as _, UserOperationPermissions, ValidTimeRange,
     };
 
     use super::*;
@@ -2265,6 +2301,43 @@ mod tests {
         );
 
         assert_eq!(bundle.gas_estimate, expected_gas);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_size_limit_enforcement() {
+        let large_call_data = vec![0u8; 200000];
+        let op = op_from_required(UserOperationRequiredFields {
+            call_data: large_call_data.into(),
+            pre_verification_gas: DEFAULT_PVG,
+            verification_gas_limit: 10000,
+            call_gas_limit: 100000,
+            ..Default::default()
+        });
+
+        let bundle = mock_make_bundle(
+            vec![MockOp {
+                op: op.clone(),
+                simulation_result: Box::new(|| Ok(SimulationResult::default())),
+                perms: UserOperationPermissions::default(),
+            }],
+            vec![],
+            vec![HandleOpsOut::Success],
+            vec![],
+            0,
+            0,
+            false,
+            ExpectedStorage::default(),
+            false,
+            vec![],
+            None,
+            U256::MAX,
+            Some(1000), // Set max transaction size to 1000 bytes
+        )
+        .await;
+
+        // The operation should be skipped due to transaction size limit
+        assert!(bundle.ops_per_aggregator.is_empty());
+        assert!(bundle.rejected_ops.is_empty());
     }
 
     #[tokio::test]
@@ -2416,6 +2489,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
         assert_eq!(
@@ -2458,6 +2532,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
         assert_eq!(
@@ -2510,6 +2585,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
         assert_eq!(
@@ -2591,6 +2667,7 @@ mod tests {
             vec![agg_a, agg_b],
             None,
             U256::MAX,
+            None,
         )
         .await;
         // Ops should be grouped by aggregator. Further, the `signature` field
@@ -2693,6 +2770,7 @@ mod tests {
             vec![agg_a, agg_b],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -2776,6 +2854,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -2844,6 +2923,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -2907,6 +2987,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3010,6 +3091,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3068,6 +3150,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3132,6 +3215,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3254,6 +3338,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bundle_gas_limit_calldata_floor_with_authorization() {
+        // Enable EIP-7623 so the calldata floor is non-zero
+        let cs = ChainSpec {
+            eip7623_enabled: true,
+            ..Default::default()
+        };
+
+        // Create an op with an authorization tuple
+        let op = UserOperationBuilder::new(
+            &cs,
+            UserOperationRequiredFields {
+                // Use small gas limits so the calldata floor wins over execution gas
+                pre_verification_gas: 1_000,
+                call_gas_limit: 1_000,
+                verification_gas_limit: 1_000,
+                // Large calldata to ensure the calldata floor exceeds execution gas
+                call_data: Bytes::from(vec![1u8; 4096]),
+                ..Default::default()
+            },
+        )
+        .authorization_tuple(rundler_types::authorization::Eip7702Auth::new_dummy(
+            cs.id,
+            address(1),
+        ))
+        .build();
+
+        let auth_gas = op.authorization_gas_limit();
+        assert!(auth_gas > 0, "op must have authorization gas");
+
+        let mut groups_by_aggregator = LinkedHashMap::new();
+        groups_by_aggregator.insert(
+            Address::ZERO,
+            AggregatorGroup {
+                ops_with_simulations: vec![OpWithSimulation {
+                    op: op.clone(),
+                    simulation: SimulationResult {
+                        requires_post_op: false,
+                        ..Default::default()
+                    },
+                    sponsored_da_gas: 0,
+                }],
+                signature: Default::default(),
+            },
+        );
+        let context = ProposalContext {
+            groups_by_aggregator,
+            rejected_ops: vec![],
+            entity_updates: BTreeMap::new(),
+            bundle_expected_storage: BundleExpectedStorage::default(),
+        };
+
+        let gas_limit = context.get_bundle_gas_limit(&cs);
+
+        // Verify the calldata floor path is being taken by checking that
+        // the gas limit is higher than what execution gas alone would give
+        let execution_gas = op.bundle_gas_limit(&cs, None) + rundler_types::bundle_shared_gas(&cs);
+        let calldata_floor = context.bundle_overhead_bytes(&cs)
+            * cs.calldata_floor_non_zero_byte_gas()
+            + op.calldata_floor_gas_limit();
+        assert!(
+            calldata_floor > execution_gas,
+            "calldata floor ({calldata_floor}) must exceed execution gas ({execution_gas}) for this test to be valid"
+        );
+
+        // The gas limit must include transaction intrinsic and authorization gas
+        // even when calldata floor wins.
+        assert_eq!(
+            gas_limit,
+            cs.transaction_intrinsic_gas() + calldata_floor + auth_gas
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bundle_gas_limit_authorization_delta_is_empty_account_cost() {
+        let cs = ChainSpec::default();
+        let required = UserOperationRequiredFields {
+            pre_verification_gas: 100_000,
+            call_gas_limit: 100_000,
+            verification_gas_limit: 100_000,
+            ..Default::default()
+        };
+
+        let op_without_authorization = UserOperationBuilder::new(&cs, required.clone()).build();
+        let op_with_authorization = UserOperationBuilder::new(&cs, required)
+            .authorization_tuple(rundler_types::authorization::Eip7702Auth::new_dummy(
+                cs.id,
+                address(1),
+            ))
+            .build();
+
+        assert_eq!(op_without_authorization.authorization_gas_limit(), 0);
+        assert_eq!(op_with_authorization.authorization_gas_limit(), 25_000);
+
+        let mut groups_without_authorization = LinkedHashMap::new();
+        groups_without_authorization.insert(
+            Address::ZERO,
+            AggregatorGroup {
+                ops_with_simulations: vec![OpWithSimulation {
+                    op: op_without_authorization,
+                    simulation: SimulationResult::default(),
+                    sponsored_da_gas: 0,
+                }],
+                signature: Default::default(),
+            },
+        );
+        let context_without_authorization = ProposalContext {
+            groups_by_aggregator: groups_without_authorization,
+            rejected_ops: vec![],
+            entity_updates: BTreeMap::new(),
+            bundle_expected_storage: BundleExpectedStorage::default(),
+        };
+
+        let mut groups_with_authorization = LinkedHashMap::new();
+        groups_with_authorization.insert(
+            Address::ZERO,
+            AggregatorGroup {
+                ops_with_simulations: vec![OpWithSimulation {
+                    op: op_with_authorization,
+                    simulation: SimulationResult::default(),
+                    sponsored_da_gas: 0,
+                }],
+                signature: Default::default(),
+            },
+        );
+        let context_with_authorization = ProposalContext {
+            groups_by_aggregator: groups_with_authorization,
+            rejected_ops: vec![],
+            entity_updates: BTreeMap::new(),
+            bundle_expected_storage: BundleExpectedStorage::default(),
+        };
+
+        let gas_without_authorization = context_without_authorization.get_bundle_gas_limit(&cs);
+        let gas_with_authorization = context_with_authorization.get_bundle_gas_limit(&cs);
+
+        assert_eq!(
+            gas_with_authorization - gas_without_authorization,
+            25_000,
+            "authorization should add only EIP-7702 empty account intrinsic gas"
+        );
+    }
+
+    #[tokio::test]
     async fn test_post_op_revert() {
         let op1 = op_with_sender(address(1));
         let bundle = mock_make_bundle(
@@ -3273,6 +3499,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3313,6 +3540,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3376,6 +3604,7 @@ mod tests {
             vec![agg_a],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3422,6 +3651,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3465,6 +3695,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3502,6 +3733,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3553,6 +3785,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3591,6 +3824,7 @@ mod tests {
             vec![],
             Some(proxy),
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3635,6 +3869,7 @@ mod tests {
             vec![],
             Some(proxy),
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3692,6 +3927,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3729,6 +3965,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3772,6 +4009,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3818,6 +4056,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3873,6 +4112,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3913,6 +4153,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await;
 
@@ -3958,6 +4199,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await
         .expect_err("should fail to bundle");
@@ -3996,6 +4238,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await
         .expect_err("should fail to bundle");
@@ -4056,6 +4299,7 @@ mod tests {
             vec![],
             None,
             max_bundle_fee,
+            None,
         )
         .await;
 
@@ -4095,6 +4339,7 @@ mod tests {
             vec![],
             None,
             U256::MAX,
+            None,
         )
         .await
     }
@@ -4115,6 +4360,7 @@ mod tests {
         aggregators: Vec<MockSignatureAggregator>,
         proxy: Option<MockSubmissionProxy>,
         max_bundle_fee: U256,
+        max_transaction_size_bytes: Option<usize>,
     ) -> Bundle<UserOperation> {
         mock_make_bundle_allow_error(
             mock_ops,
@@ -4129,6 +4375,7 @@ mod tests {
             aggregators,
             proxy,
             max_bundle_fee,
+            max_transaction_size_bytes,
         )
         .await
         .expect("should make a bundle")
@@ -4148,9 +4395,11 @@ mod tests {
         aggregators: Vec<MockSignatureAggregator>,
         proxy: Option<MockSubmissionProxy>,
         max_bundle_fee: U256,
+        max_transaction_size_bytes: Option<usize>,
     ) -> BundleProposerResult<Bundle<UserOperation>> {
         let mut chain_spec = ChainSpec {
             da_pre_verification_gas: da_gas_tracking_enabled,
+            max_transaction_size_bytes: max_transaction_size_bytes.unwrap_or(usize::MAX),
             ..Default::default()
         };
         let sender_eoa = address(124);
@@ -4172,6 +4421,7 @@ mod tests {
                 da_gas_data: Default::default(),
                 filter_id: None,
                 perms: perms.clone(),
+                sender_is_7702: false,
             })
             .collect();
 
@@ -4257,6 +4507,13 @@ mod tests {
         entry_point
             .expect_aggregate_signatures()
             .returning(move |address, _| Ok(signatures_by_aggregator[&address]().unwrap()));
+
+        // Mock calc_da_gas for when da_gas_data is Empty (used by bundler sponsorship tests)
+        entry_point
+            .expect_calc_da_gas()
+            .returning(move |_, _, _, _| {
+                Ok((DEFAULT_DA_PVG, DAGasData::Empty, DAGasBlockData::Empty))
+            });
 
         let (event_sender, _) = broadcast::channel(16);
 

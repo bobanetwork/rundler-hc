@@ -12,13 +12,13 @@
 
 use std::{convert::TryFrom, fmt::Debug};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use rundler_provider::{
     BlockId, EvmProvider, GethDebugTracerType, GethDebugTracingCallOptions,
     GethDebugTracingOptions, GethTrace, SimulationProvider,
 };
-use rundler_types::{hybrid_compute, v0_6::UserOperation, UserOperation as UserOperation2};
+use rundler_types::v0_6::UserOperation;
 use serde::Deserialize;
 
 use crate::simulation::context::TracerOutput;
@@ -70,14 +70,8 @@ where
     ) -> anyhow::Result<TracerOutput> {
         let (tx, state_override) = self
             .entry_point
-            .get_tracer_simulate_validation_call(op.clone() /*, self.max_validation_gas */)
+            .get_tracer_simulate_validation_call(op)
             .context("should get simulate validation call")?;
-
-        let hh = op.clone().hc_hash();
-        println!("HC tracer.rs debug_trace_call hh {:?}", hh);
-        let s2 = hybrid_compute::get_hc_op_statediff(hh, state_override);
-
-        println!("HC trace2 pre {:?} {:?}", op, tx);
 
         TracerOutput::try_from(
             self.provider
@@ -92,7 +86,7 @@ where
                             timeout: Some(self.tracer_timeout.clone()),
                             ..Default::default()
                         },
-                        state_overrides: Some(s2),
+                        state_overrides: Some(state_override),
                         block_overrides: None,
                         tx_index: None,
                     },

@@ -11,12 +11,13 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{aliases::U192, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, aliases::U192};
 use rundler_types::{
-    chain::ChainSpec,
-    da::{DAGasBlockData, DAGasData},
     EntryPointVersion, GasFees, Timestamp, UserOperation, UserOpsPerAggregator, ValidationOutput,
     ValidationRevert,
+    authorization::Eip7702Auth,
+    chain::ChainSpec,
+    da::{DAGasBlockData, DAGasData},
 };
 
 use crate::{BlockHashOrNumber, BlockId, ProviderResult, StateOverride, TransactionRequest};
@@ -99,7 +100,7 @@ pub trait EntryPoint: Send + Sync {
 
     /// Get the balance of an address
     async fn balance_of(&self, address: Address, block_id: Option<BlockId>)
-        -> ProviderResult<U256>;
+    -> ProviderResult<U256>;
 
     /// Get the deposit info for an address
     async fn get_deposit_info(&self, address: Address) -> ProviderResult<DepositInfo>;
@@ -165,12 +166,14 @@ pub trait BundleHandler: Send + Sync {
 
     /// Decode the revert data from a call to `handleOps`
     fn decode_handle_ops_revert(message: &str, revert_data: &Option<Bytes>)
-        -> Option<HandleOpsOut>;
+    -> Option<HandleOpsOut>;
 
     /// Decode user ops from calldata
     fn decode_ops_from_calldata(
         chain_spec: &ChainSpec,
+        address: Address,
         calldata: &Bytes,
+        auth_list: &[Eip7702Auth],
     ) -> Vec<UserOpsPerAggregator<Self::UO>>;
 }
 
@@ -248,13 +251,8 @@ pub trait SimulationProvider: Send + Sync {
     /// results.
     fn simulation_should_revert(&self) -> bool;
 
-    /*    /// Return the AA nonce for the given sender and key
-        async fn get_nonce(
-            &self,
-            address: Address,
-            key: U256,
-        ) -> Result<U256, String>;
-    */
+    /// Get the simulations bytecode for the entry point
+    fn get_simulations_bytecode(&self) -> &Bytes;
 }
 
 /// Trait for a provider that provides all entry point functionality

@@ -12,21 +12,25 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use std::{
+    collections::HashMap,
     fmt::{self, Debug},
     marker::PhantomData,
     sync::Arc,
 };
 
-use alloy_primitives::{aliases::U192, Address, B256, U256};
-use rundler_provider::{EntryPoint, SimulationProvider, StateOverride, TransactionReceipt};
+use alloy_primitives::{Address, B256, U256, aliases::U192};
+use rundler_provider::{
+    EntryPoint, ProviderError, SimulationProvider, StateOverride, TransactionReceipt,
+};
 use rundler_sim::{GasEstimationError, GasEstimator};
 use rundler_types::{
-    EntryPointVersion, GasEstimate, UserOperation, UserOperationOptionalGas, UserOperationVariant,
+    EntryPointAbiVersion, EntryPointVersion, GasEstimate, UserOperation, UserOperationOptionalGas,
+    UserOperationVariant,
 };
 
-use super::events::UserOperationEventProvider;
+use super::events::{EventProviderError, EventProviderResult, UserOperationEventProvider};
 use crate::{
-    eth::{error::EthResult, EthRpcError},
+    eth::{EthRpcError, error::EthResult},
     types::{
         RpcGasEstimate, RpcGasEstimateV0_6, RpcGasEstimateV0_7, RpcUserOperationByHash,
         RpcUserOperationReceipt,
@@ -35,71 +39,44 @@ use crate::{
 
 #[derive(Default)]
 pub(crate) struct EntryPointRouterBuilder {
-    entry_points: Vec<Address>,
-    v0_6: Option<(Address, Arc<dyn EntryPointRoute>)>,
-    v0_7: Option<(Address, Arc<dyn EntryPointRoute>)>,
+    entry_points: HashMap<Address, Arc<dyn EntryPointRoute>>,
 }
 
 impl EntryPointRouterBuilder {
-    pub(crate) fn v0_6<R>(mut self, route: R) -> Self
+    pub(crate) fn add_route<R>(mut self, route: R) -> Self
     where
         R: EntryPointRoute + 'static,
     {
-        if route.version() != EntryPointVersion::V0_6 {
-            panic!(
-                "Invalid entry point version for route: {:?}",
-                route.version()
-            );
-        }
-
-        self.entry_points.push(route.address());
-        self.v0_6 = Some((route.address(), Arc::new(route)));
-        self
-    }
-
-    pub(crate) fn v0_7<R>(mut self, route: R) -> Self
-    where
-        R: EntryPointRoute + 'static,
-    {
-        if route.version() != EntryPointVersion::V0_7 {
-            panic!(
-                "Invalid entry point version for route: {:?}",
-                route.version()
-            );
-        }
-
-        self.entry_points.push(route.address());
-        self.v0_7 = Some((route.address(), Arc::new(route)));
+        self.entry_points.insert(route.address(), Arc::new(route));
         self
     }
 
     pub(crate) fn build(self) -> EntryPointRouter {
         EntryPointRouter {
             entry_points: self.entry_points,
-            v0_6: self.v0_6,
-            v0_7: self.v0_7,
         }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct EntryPointRouter {
-    entry_points: Vec<Address>,
-    v0_6: Option<(Address, Arc<dyn EntryPointRoute>)>,
-    v0_7: Option<(Address, Arc<dyn EntryPointRoute>)>,
+    entry_points: HashMap<Address, Arc<dyn EntryPointRoute>>,
 }
 
 impl fmt::Debug for EntryPointRouter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EntryPointRouter")
-            .field("entry_points", &self.entry_points)
+            .field(
+                "entry_points",
+                &self.entry_points.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
 
 impl EntryPointRouter {
     pub(crate) fn entry_points(&self) -> impl Iterator<Item = &Address> {
-        self.entry_points.iter()
+        self.entry_points.keys()
     }
 
     pub(crate) fn check_and_get_route(
@@ -107,38 +84,38 @@ impl EntryPointRouter {
         entry_point: &Address,
         uo: &UserOperationVariant,
     ) -> EthResult<&Arc<dyn EntryPointRoute>> {
-        match self.get_ep_version(entry_point)? {
-            EntryPointVersion::V0_6 => {
+        let route = self.get_route(entry_point)?;
+
+        match route.version().abi_version() {
+            EntryPointAbiVersion::V0_6 => {
                 if !matches!(uo, UserOperationVariant::V0_6(_)) {
                     return Err(EthRpcError::InvalidParams(format!(
                         "Invalid user operation for entry point: {:?}",
-                        entry_point
+                        route.address()
                     )));
                 }
-                Ok(&self.v0_6.as_ref().unwrap().1)
             }
-            EntryPointVersion::V0_7 => {
+            EntryPointAbiVersion::V0_7 => {
                 if !matches!(uo, UserOperationVariant::V0_7(_)) {
                     return Err(EthRpcError::InvalidParams(format!(
                         "Invalid user operation for entry point: {:?}",
-                        entry_point
+                        route.address()
                     )));
                 }
-                Ok(&self.v0_7.as_ref().unwrap().1)
             }
-            EntryPointVersion::Unspecified => unreachable!("unspecified entry point version"),
         }
+
+        Ok(route)
     }
 
     pub(crate) async fn get_mined_by_hash(
         &self,
         entry_point: &Address,
         hash: B256,
-    ) -> EthResult<Option<RpcUserOperationByHash>> {
-        self.get_route(entry_point)?
+    ) -> Result<Option<RpcUserOperationByHash>, EventProviderError> {
+        self.get_event_route(entry_point)?
             .get_mined_by_hash(hash)
             .await
-            .map_err(Into::into)
     }
 
     pub(crate) async fn get_mined_from_tx_receipt(
@@ -146,22 +123,21 @@ impl EntryPointRouter {
         entry_point: &Address,
         uo_hash: B256,
         tx_receipt: TransactionReceipt,
-    ) -> EthResult<Option<RpcUserOperationByHash>> {
-        self.get_route(entry_point)?
+    ) -> Result<Option<RpcUserOperationByHash>, EventProviderError> {
+        self.get_event_route(entry_point)?
             .get_mined_from_tx_receipt(uo_hash, tx_receipt)
             .await
-            .map_err(Into::into)
     }
 
     pub(crate) async fn get_receipt(
         &self,
         entry_point: &Address,
         hash: B256,
-    ) -> EthResult<Option<RpcUserOperationReceipt>> {
-        self.get_route(entry_point)?
-            .get_receipt(hash)
+        bundle_transaction: Option<B256>,
+    ) -> Result<Option<RpcUserOperationReceipt>, EventProviderError> {
+        self.get_event_route(entry_point)?
+            .get_receipt(hash, bundle_transaction)
             .await
-            .map_err(Into::into)
     }
 
     pub(crate) async fn get_receipt_from_tx_receipt(
@@ -169,11 +145,23 @@ impl EntryPointRouter {
         entry_point: &Address,
         uo_hash: B256,
         tx_receipt: TransactionReceipt,
-    ) -> EthResult<Option<RpcUserOperationReceipt>> {
-        self.get_route(entry_point)?
+    ) -> Result<Option<RpcUserOperationReceipt>, EventProviderError> {
+        self.get_event_route(entry_point)?
             .get_receipt_from_tx_receipt(uo_hash, tx_receipt)
             .await
-            .map_err(Into::into)
+    }
+
+    /// Get both the mined user operation and receipt in a single call,
+    /// sharing the logs RPC call between both operations.
+    pub(crate) async fn get_mined_and_receipt(
+        &self,
+        entry_point: &Address,
+        hash: B256,
+        bundle_transaction: Option<B256>,
+    ) -> Result<Option<(RpcUserOperationByHash, RpcUserOperationReceipt)>, EventProviderError> {
+        self.get_event_route(entry_point)?
+            .get_mined_and_receipt(hash, bundle_transaction)
+            .await
     }
 
     pub(crate) async fn estimate_gas(
@@ -181,46 +169,30 @@ impl EntryPointRouter {
         entry_point: &Address,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
-        at_price: Option<u128>,
     ) -> EthResult<RpcGasEstimate> {
-        match self.get_ep_version(entry_point)? {
-            EntryPointVersion::V0_6 => {
+        let route = self.get_route(entry_point)?;
+
+        match route.version().abi_version() {
+            EntryPointAbiVersion::V0_6 => {
                 if !matches!(uo, UserOperationOptionalGas::V0_6(_)) {
                     return Err(EthRpcError::InvalidParams(format!(
                         "Invalid user operation for entry point: {:?}",
-                        entry_point
+                        route.address()
                     )));
                 }
-
-                let e = self
-                    .v0_6
-                    .as_ref()
-                    .unwrap()
-                    .1
-                    .estimate_gas(uo, state_override, at_price)
-                    .await?;
-
+                let e = route.estimate_gas(uo, state_override).await?;
                 Ok(RpcGasEstimateV0_6::from(e).into())
             }
-            EntryPointVersion::V0_7 => {
+            EntryPointAbiVersion::V0_7 => {
                 if !matches!(uo, UserOperationOptionalGas::V0_7(_)) {
                     return Err(EthRpcError::InvalidParams(format!(
                         "Invalid user operation for entry point: {:?}",
-                        entry_point
+                        route.address()
                     )));
                 }
-
-                let e = self
-                    .v0_7
-                    .as_ref()
-                    .unwrap()
-                    .1
-                    .estimate_gas(uo, state_override, at_price)
-                    .await?;
-
+                let e = route.estimate_gas(uo, state_override).await?;
                 Ok(RpcGasEstimateV0_7::from(e).into())
             }
-            EntryPointVersion::Unspecified => unreachable!("unspecified entry point version"),
         }
     }
 
@@ -247,63 +219,66 @@ impl EntryPointRouter {
             .map_err(Into::into)
     }
 
-    pub(crate) fn get_ep_version(&self, entry_point: &Address) -> EthResult<EntryPointVersion> {
-        if let Some((addr, _)) = self.v0_6 {
-            if addr == *entry_point {
-                return Ok(EntryPointVersion::V0_6);
-            }
-        }
-        if let Some((addr, _)) = self.v0_7 {
-            if addr == *entry_point {
-                return Ok(EntryPointVersion::V0_7);
-            }
-        }
-
-        Err(EthRpcError::InvalidParams(format!(
-            "No entry point found for address: {:?}",
-            entry_point
-        )))
+    fn get_route(&self, entry_point: &Address) -> EthResult<&Arc<dyn EntryPointRoute>> {
+        let route = self
+            .entry_points
+            .get(entry_point)
+            .ok_or(EthRpcError::InvalidParams(format!(
+                "No entry point found for address: {:?}",
+                entry_point
+            )))?;
+        Ok(route)
     }
 
-    fn get_route(&self, entry_point: &Address) -> EthResult<&Arc<dyn EntryPointRoute>> {
-        let ep = self.get_ep_version(entry_point)?;
-
-        match ep {
-            EntryPointVersion::V0_6 => Ok(&self.v0_6.as_ref().unwrap().1),
-            EntryPointVersion::V0_7 => Ok(&self.v0_7.as_ref().unwrap().1),
-            EntryPointVersion::Unspecified => unreachable!("unspecified entry point version"),
-        }
+    fn get_event_route(
+        &self,
+        entry_point: &Address,
+    ) -> Result<&Arc<dyn EntryPointRoute>, EventProviderError> {
+        self.get_route(entry_point)
+            .map_err(|e| EventProviderError::Provider(ProviderError::Other(e.into())))
     }
 }
 
 #[async_trait::async_trait]
 pub(crate) trait EntryPointRoute: Send + Sync {
     fn version(&self) -> EntryPointVersion;
-
     fn address(&self) -> Address;
 
-    async fn get_mined_by_hash(&self, hash: B256)
-        -> anyhow::Result<Option<RpcUserOperationByHash>>;
+    async fn get_mined_by_hash(
+        &self,
+        hash: B256,
+    ) -> EventProviderResult<Option<RpcUserOperationByHash>>;
 
     async fn get_mined_from_tx_receipt(
         &self,
         uo_hash: B256,
         tx_receipt: TransactionReceipt,
-    ) -> anyhow::Result<Option<RpcUserOperationByHash>>;
+    ) -> EventProviderResult<Option<RpcUserOperationByHash>>;
 
-    async fn get_receipt(&self, hash: B256) -> anyhow::Result<Option<RpcUserOperationReceipt>>;
+    async fn get_receipt(
+        &self,
+        hash: B256,
+        bundle_transaction: Option<B256>,
+    ) -> EventProviderResult<Option<RpcUserOperationReceipt>>;
 
     async fn get_receipt_from_tx_receipt(
         &self,
         uo_hash: B256,
         tx_receipt: TransactionReceipt,
-    ) -> anyhow::Result<Option<RpcUserOperationReceipt>>;
+    ) -> EventProviderResult<Option<RpcUserOperationReceipt>>;
+
+    /// Get both the mined user operation and receipt in a single call,
+    /// sharing the logs RPC call between both operations.
+    async fn get_mined_and_receipt(
+        &self,
+        hash: B256,
+        bundle_transaction: Option<B256>,
+    ) -> EventProviderResult<Option<(RpcUserOperationByHash, RpcUserOperationReceipt)>>;
 
     async fn estimate_gas(
         &self,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
-        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError>;
 
     async fn check_signature(&self, uo: UserOperationVariant) -> anyhow::Result<bool>;
@@ -328,7 +303,7 @@ where
     EV: UserOperationEventProvider,
 {
     fn version(&self) -> EntryPointVersion {
-        UO::entry_point_version()
+        self.entry_point.version()
     }
 
     fn address(&self) -> Address {
@@ -338,7 +313,7 @@ where
     async fn get_mined_by_hash(
         &self,
         hash: B256,
-    ) -> anyhow::Result<Option<RpcUserOperationByHash>> {
+    ) -> EventProviderResult<Option<RpcUserOperationByHash>> {
         self.event_provider.get_mined_by_hash(hash).await
     }
 
@@ -346,23 +321,43 @@ where
         &self,
         uo_hash: B256,
         tx_receipt: TransactionReceipt,
-    ) -> anyhow::Result<Option<RpcUserOperationByHash>> {
+    ) -> EventProviderResult<Option<RpcUserOperationByHash>> {
         self.event_provider
             .get_mined_from_tx_receipt(uo_hash, tx_receipt)
             .await
     }
 
-    async fn get_receipt(&self, hash: B256) -> anyhow::Result<Option<RpcUserOperationReceipt>> {
-        self.event_provider.get_receipt(hash).await
+    async fn get_receipt(
+        &self,
+        hash: B256,
+        bundle_transaction: Option<B256>,
+    ) -> EventProviderResult<Option<RpcUserOperationReceipt>> {
+        if let Some(bundle_transaction) = bundle_transaction {
+            self.event_provider
+                .get_receipt_from_tx_hash(hash, bundle_transaction)
+                .await
+        } else {
+            self.event_provider.get_receipt(hash).await
+        }
     }
 
     async fn get_receipt_from_tx_receipt(
         &self,
         uo_hash: B256,
         tx_receipt: TransactionReceipt,
-    ) -> anyhow::Result<Option<RpcUserOperationReceipt>> {
+    ) -> EventProviderResult<Option<RpcUserOperationReceipt>> {
         self.event_provider
             .get_receipt_from_tx_receipt(uo_hash, tx_receipt)
+            .await
+    }
+
+    async fn get_mined_and_receipt(
+        &self,
+        hash: B256,
+        bundle_transaction: Option<B256>,
+    ) -> EventProviderResult<Option<(RpcUserOperationByHash, RpcUserOperationReceipt)>> {
+        self.event_provider
+            .get_mined_and_receipt(hash, bundle_transaction)
             .await
     }
 
@@ -370,23 +365,10 @@ where
         &self,
         uo: UserOperationOptionalGas,
         state_override: Option<StateOverride>,
-        at_price: Option<u128>,
     ) -> Result<GasEstimate, GasEstimationError> {
-        //println!(
-        //    "HC router estimate_gas op {:?} state {:?}",
-        //    uo, state_override
-        //);
-        let ret = self
-            .gas_estimator
-            .estimate_op_gas(
-                uo.clone().into(),
-                state_override.unwrap_or_default(),
-                at_price,
-            )
-            .await;
-        //Commented out to reduce log volume; re-enable if needed
-        //println!("HC router estimate_gas returned {:?} for op {:?}", ret, uo);
-        ret
+        self.gas_estimator
+            .estimate_op_gas(uo.into(), state_override.unwrap_or_default())
+            .await
     }
 
     async fn get_nonce(&self, addr: Address, key: U192) -> anyhow::Result<U256> {

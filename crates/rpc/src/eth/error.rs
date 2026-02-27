@@ -14,20 +14,23 @@
 use std::fmt::Display;
 
 use alloy_json_rpc::RpcError;
-use alloy_primitives::{Address, Bytes, U128, U256, U32};
+use alloy_primitives::{Address, Bytes, U32, U128, U256};
 use jsonrpsee::types::{
-    error::{CALL_EXECUTION_FAILED_CODE, INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
     ErrorObjectOwned,
+    error::{CALL_EXECUTION_FAILED_CODE, INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
 };
 use rundler_provider::ProviderError;
 use rundler_sim::GasEstimationError;
 use rundler_types::{
-    pool::{MempoolError, PoolError, PrecheckViolation, SimulationViolation},
     Entity, EntityType, Opcode, Timestamp, ValidationRevert,
+    pool::{MempoolError, PoolError, PrecheckViolation, SimulationViolation},
 };
 use serde::Serialize;
 
-use crate::error::{rpc_err, rpc_err_with_data};
+use crate::{
+    error::{rpc_err, rpc_err_with_data},
+    eth::events::EventProviderError,
+};
 
 // Error codes borrowed from jsonrpsee
 // INVALID_REQUEST_CODE = -32600
@@ -70,10 +73,14 @@ pub enum EthRpcError {
     #[error("Paymaster balance too low. Required balance: {0}. Current balance {1}")]
     PaymasterBalanceTooLow(U256, U256),
     /// An Associated storage slot that is accessed in the UserOperation is being used as a sender by another UserOperation in the mempool.
-    #[error("An Associated storage slot that is accessed in the UserOperation is being used as a sender by another UserOperation in the mempool")]
+    #[error(
+        "An Associated storage slot that is accessed in the UserOperation is being used as a sender by another UserOperation in the mempool"
+    )]
     AssociatedStorageIsAlternateSender,
     /// Sender address used as different entity in another UserOperation currently in the mempool.
-    #[error("The sender address {0} is used as a different entity in another UserOperation currently in mempool")]
+    #[error(
+        "The sender address {0} is used as a different entity in another UserOperation currently in mempool"
+    )]
     SenderAddressUsedAsAlternateEntity(Address),
     /// Simulation ran out of gas
     #[error("Simulation ran out of gas for entity: {0}")]
@@ -85,7 +92,9 @@ pub enum EthRpcError {
     #[error("{0}")]
     OpcodeViolationMap(SimulationViolation),
     /// Associated storage accessed during deployment with unstaked factory or accessing entity
-    #[error("Sender storage at (address: {1:?} slot: {2:#032x}) accessed during deployment. Factory (or {0:?}) must be staked")]
+    #[error(
+        "Sender storage at (address: {1:?} slot: {2:#032x}) accessed during deployment. Factory (or {0:?}) must be staked"
+    )]
     AssociatedStorageDuringDeploy(Option<EntityType>, Address, U256),
     /// Invalid storage access, maps to Opcode Violation
     #[error("{0} accesses inaccessible storage at address: {1:?} slot: {2:#032x}")]
@@ -323,7 +332,19 @@ impl From<MempoolError> for EthRpcError {
 
 impl From<PrecheckViolation> for EthRpcError {
     fn from(value: PrecheckViolation) -> Self {
-        Self::PrecheckFailed(value)
+        match value {
+            PrecheckViolation::Eip7702NotSupported(_)
+            | PrecheckViolation::Eip7702Disabled
+            | PrecheckViolation::Eip7702ChainIdMismatch(_, _)
+            | PrecheckViolation::Eip7702InvalidSignature(_)
+            | PrecheckViolation::Eip7702SenderRecoveredAuthorityMismatch(_, _)
+            | PrecheckViolation::Eip7702InvalidFactory(_) => Self::InvalidParams(value.to_string()),
+            PrecheckViolation::Eip7702NonceMismatch(_, _)
+            | PrecheckViolation::Eip7702SenderPendingTransactionCountTooHigh(_) => {
+                Self::EntryPointValidationRejected(value.to_string())
+            }
+            _ => Self::PrecheckFailed(value),
+        }
     }
 }
 
@@ -454,6 +475,7 @@ struct ProviderErrorWithContext {
 
 impl From<ProviderErrorWithContext> for EthRpcError {
     fn from(e: ProviderErrorWithContext) -> Self {
+        // Log the full error details at ERROR level for debugging
         let inner_msg = match &e.error {
             ProviderError::RPC(rpc_error) => match rpc_error {
                 RpcError::ErrorResp(error_payload) => {
@@ -480,15 +502,16 @@ impl From<ProviderErrorWithContext> for EthRpcError {
                 format!("other error: {}", error)
             }
         };
-        if let Some(context_msg) = e.context {
-            Self::Internal(anyhow::anyhow!(
-                "{}: provider error: {}",
-                context_msg,
-                inner_msg
-            ))
+
+        // Log full error details for debugging
+        if let Some(context_msg) = &e.context {
+            tracing::error!("{}: provider error: {}", context_msg, inner_msg);
         } else {
-            Self::Internal(anyhow::anyhow!("provider error: {}", inner_msg))
+            tracing::error!("provider error: {}", inner_msg);
         }
+
+        // Return generic error message to user
+        Self::Internal(anyhow::anyhow!("internal error: rpc provider error"))
     }
 }
 
@@ -500,6 +523,24 @@ impl From<ProviderError> for ProviderErrorWithContext {
         }
     }
 }
+
+impl From<EventProviderError> for EthRpcError {
+    fn from(e: EventProviderError) -> Self {
+        match e {
+            // Reuse existing ProviderError conversion for all provider errors
+            EventProviderError::Provider(provider_err) => Self::from(ProviderErrorWithContext {
+                error: provider_err,
+                context: None,
+            }),
+            // Log full details server-side, return generic message to user
+            other => {
+                tracing::error!("event provider error: {}", other);
+                Self::Internal(anyhow::anyhow!("internal error: event provider error"))
+            }
+        }
+    }
+}
+
 impl From<GasEstimationError> for EthRpcError {
     fn from(e: GasEstimationError) -> Self {
         match e {

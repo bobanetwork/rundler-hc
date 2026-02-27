@@ -17,18 +17,18 @@ use alloy_primitives::{Address, B256, U64};
 use futures_util::future;
 use rundler_provider::StateOverride;
 use rundler_types::{
-    chain::ChainSpec, pool::Pool, UserOperation, UserOperationOptionalGas,
-    UserOperationPermissions, UserOperationVariant,
+    BlockTag, UserOperation, UserOperationOptionalGas, UserOperationPermissions,
+    UserOperationVariant, chain::ChainSpec, pool::Pool,
 };
 use rundler_utils::log::LogOnError;
-use tracing::{instrument, Level};
+use tracing::{Level, instrument};
 
 use super::{
     error::{EthResult, EthRpcError},
     router::EntryPointRouter,
 };
 use crate::{
-    eth::HcApi,
+    eth::{HcApi, events::EventProviderError},
     types::{RpcGasEstimate, RpcUserOperationByHash, RpcUserOperationReceipt},
 };
 
@@ -88,9 +88,11 @@ where
                 ));
         }
 
-        if op.authorization_tuple().is_some() && !self.chain_spec.supports_eip7702(entry_point) {
+        if op.authorization_tuple().is_some()
+            && (!self.chain_spec.supports_eip7702(entry_point) || permissions.eip7702_disabled)
+        {
             return Err(EthRpcError::InvalidParams(format!(
-                "EIP-7702 is not supported on entry point {:?}",
+                "EIP-7702 is not supported on entry point {:?} or is disabled",
                 entry_point
             )));
         }
@@ -148,7 +150,12 @@ where
         > = vec![];
 
         for ep in self.router.entry_points() {
-            futs.push(Box::pin(self.router.get_mined_by_hash(ep, hash)));
+            futs.push(Box::pin(async move {
+                self.router
+                    .get_mined_by_hash(ep, hash)
+                    .await
+                    .map_err(EthRpcError::from)
+            }));
         }
         futs.push(Box::pin(self.get_pending_user_operation_by_hash(hash)));
 
@@ -160,18 +167,61 @@ where
     pub(crate) async fn get_user_operation_receipt(
         &self,
         hash: B256,
+        tag: Option<BlockTag>,
     ) -> EthResult<Option<RpcUserOperationReceipt>> {
         if hash == B256::ZERO {
             return Err(EthRpcError::InvalidParams(
                 "Missing/invalid userOpHash".to_string(),
             ));
         }
+        let tag = tag.unwrap_or(BlockTag::Latest);
+
+        if tag == BlockTag::Pending {
+            if !self.chain_spec.flashblocks_enabled {
+                return Err(EthRpcError::InvalidParams(
+                    "Pending block tag is not supported on this network".to_string(),
+                ));
+            }
+
+            // Preconfirmed check. If not found fallthrough to pending check.
+            let op_status = self
+                .pool
+                .get_op_status(hash)
+                .await
+                .map_err(EthRpcError::from)?;
+
+            if let Some(op_status) = op_status
+                && let Some(preconf_info) = op_status.preconf_info
+            {
+                let ret = self
+                    .router
+                    .get_receipt(&op_status.entry_point, hash, Some(preconf_info.tx_hash))
+                    .await;
+                match ret {
+                    Ok(Some(receipt)) => return Ok(Some(receipt)),
+                    Ok(None) => {
+                        // fallthrough to pending if not found
+                        tracing::warn!(
+                            "no receipt found for preconfirmed user operation {hash}. Treating as pending."
+                        );
+                    }
+                    Err(EventProviderError::Provider(e)) => {
+                        return Err(EthRpcError::from(EventProviderError::Provider(e)));
+                    }
+                    _ => {
+                        // fallthrough to pending on unexpected errors related to consistency issues or invalid receipts
+                        tracing::warn!(
+                            "unexpected error fetching receipt for preconfirmed user operation {hash}. Treating as pending: {ret:?}"
+                        );
+                    }
+                };
+            }
+        };
 
         let futs = self
             .router
             .entry_points()
-            .map(|ep| self.router.get_receipt(ep, hash));
-
+            .map(|ep| self.router.get_receipt(ep, hash, None));
         let results = future::try_join_all(futs).await?;
         Ok(results.into_iter().find_map(|x| x))
     }
@@ -195,13 +245,13 @@ where
         &self,
         hash: B256,
     ) -> EthResult<Option<RpcUserOperationByHash>> {
-        let res = self
+        let op = self
             .pool
             .get_op_by_hash(hash)
             .await
             .map_err(EthRpcError::from)?;
 
-        Ok(res.map(|op| RpcUserOperationByHash {
+        Ok(op.map(|op| RpcUserOperationByHash {
             user_operation: op.uo.into(),
             entry_point: op.entry_point.into(),
             block_number: None,
@@ -215,20 +265,20 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use alloy_consensus::{transaction::Recovered, Signed, TxEip1559};
+    use alloy_consensus::{Signed, TxEip1559, transaction::Recovered};
     use alloy_primitives::{Log as PrimitiveLog, LogData, Signature, TxKind, U256};
     use alloy_rpc_types_eth::Transaction as AlloyTransaction;
     use alloy_sol_types::SolInterface;
     use mockall::predicate::eq;
-    use rundler_contracts::v0_6::IEntryPoint::{handleOpsCall, IEntryPointCalls};
+    use rundler_contracts::v0_6::IEntryPoint::{IEntryPointCalls, handleOpsCall};
     use rundler_provider::{
         AnyTxEnvelope, Log, MockEntryPointV0_6, MockEvmProvider, Transaction, WithOtherFields,
     };
     use rundler_sim::MockGasEstimator;
     use rundler_types::{
+        EntityInfos, UserOperation as UserOperationTrait, ValidTimeRange,
         pool::{MockPool, PoolOperation},
         v0_6::{UserOperationBuilder, UserOperationRequiredFields},
-        EntityInfos, UserOperation as UserOperationTrait, ValidTimeRange,
     };
 
     use super::*;
@@ -259,6 +309,7 @@ mod tests {
             da_gas_data: rundler_types::da::DAGasData::Empty,
             filter_id: None,
             perms: UserOperationPermissions::default(),
+            sender_is_7702: false,
         };
 
         let mut pool = MockPool::default();
@@ -425,11 +476,12 @@ mod tests {
         };
 
         let router = EntryPointRouterBuilder::default()
-            .v0_6(EntryPointRouteImpl::new(
+            .add_route(EntryPointRouteImpl::new(
                 ep.clone(),
                 gas_estimator,
                 UserOperationEventProviderV0_6::new(
                     chain_spec.clone(),
+                    chain_spec.entry_point_address_v0_6,
                     provider.clone(),
                     None,
                     None,

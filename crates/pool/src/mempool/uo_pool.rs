@@ -13,7 +13,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use alloy_primitives::{utils::format_units, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, utils::format_units};
 use anyhow::Context;
 use futures::TryFutureExt;
 use itertools::Itertools;
@@ -26,11 +26,12 @@ use rundler_provider::{
 };
 use rundler_sim::{MempoolConfig, Prechecker, Simulator};
 use rundler_types::{
-    pool::{
-        MempoolError, PaymasterMetadata, PoolOperation, Reputation, ReputationStatus, StakeStatus,
-    },
     Entity, EntityUpdate, EntityUpdateType, EntryPointVersion, GasFees, UserOperation,
     UserOperationId, UserOperationPermissions, UserOperationVariant,
+    pool::{
+        MempoolError, PaymasterMetadata, PoolOperation, PoolOperationStatus, Reputation,
+        ReputationStatus, StakeStatus,
+    },
 };
 use rundler_utils::{emit::WithEntryPoint, guard_timer::CustomTimerGuard};
 use tokio::sync::broadcast;
@@ -38,14 +39,13 @@ use tonic::async_trait;
 use tracing::{info, instrument};
 
 use super::{
-    paymaster::PaymasterTracker, pool::PoolInner, reputation::AddressReputation, Mempool,
-    MempoolResult, OperationOrigin, PoolConfig,
+    Mempool, MempoolResult, OperationOrigin, PoolConfig, paymaster::PaymasterTracker,
+    pool::PoolInner, reputation::AddressReputation,
 };
 use crate::{
-    chain::ChainUpdate,
+    chain::{ChainUpdate, UpdateType},
     emit::{EntityReputation, EntityStatus, EntitySummary, OpPoolEvent, OpRemovalReason},
 };
-
 /// User Operation Mempool
 ///
 /// Wrapper around a pool object that implements thread-safety
@@ -199,7 +199,10 @@ where
                 .await;
             match sim_result {
                 Err(e) => {
-                    tracing::error!("Failed to simulate handle op for gas limit efficiency check, failing open: {:?}", e);
+                    tracing::error!(
+                        "Failed to simulate handle op for gas limit efficiency check, failing open: {:?}",
+                        e
+                    );
                 }
                 Ok(Err(e)) => {
                     tracing::debug!(
@@ -230,6 +233,26 @@ where
 
         Ok(())
     }
+
+    fn update_preconfirmed_uos(
+        &self,
+        txn_to_uos: Vec<(B256, Vec<B256>)>,
+        preconfirmed_block_number: Option<u64>,
+    ) {
+        if let Some(preconfirmed_block_number) = preconfirmed_block_number {
+            self.state.write().pool.preconfirm_txns(&txn_to_uos);
+            self.state
+                .write()
+                .pool
+                .preconfirm_txns_at_block_number(&txn_to_uos, preconfirmed_block_number);
+        }
+    }
+    fn remove_out_of_date_preconfirmed_uos(&self, block_number: u64) {
+        self.state
+            .write()
+            .pool
+            .remove_out_of_date_preconfirmed_uos(block_number);
+    }
 }
 
 #[async_trait]
@@ -241,6 +264,15 @@ where
     #[instrument(skip_all)]
     async fn on_chain_update(&self, update: &ChainUpdate) {
         let _timer = CustomTimerGuard::new(self.metrics.update_process_time_ms.clone());
+
+        let preconfirmed_txns = update.preconfirmed_txns.clone();
+        self.update_preconfirmed_uos(preconfirmed_txns, update.preconfirmed_block_number);
+        if update.update_type == UpdateType::Preconfirmed {
+            return;
+        }
+
+        let latest_block_number = update.latest_block_number;
+        self.remove_out_of_date_preconfirmed_uos(latest_block_number);
         let deduped_ops = update.deduped_ops();
         let mined_ops = deduped_ops
             .mined_ops
@@ -328,35 +360,30 @@ where
                 .chain(unmined_entity_balance_updates)
                 .unique()
                 .collect::<Vec<_>>();
-            if !addresses.is_empty() {
-                if let Err(e) = self
+            if !addresses.is_empty()
+                && let Err(e) = self
                     .paymaster
                     .reset_confirmed_balances_for(&addresses)
                     .await
-                {
-                    tracing::error!("Failed to reset confirmed paymaster balances: {:?}", e);
-                }
+            {
+                tracing::error!("Failed to reset confirmed paymaster balances: {:?}", e);
             }
         }
 
         if mined_op_count > 0 {
             info!(
                 "{mined_op_count} op(s) mined on entry point {:?} when advancing to block with number {}, hash {:?}.",
-                self.config.entry_point,
-                update.latest_block_number,
-                update.latest_block_hash,
+                self.config.entry_point, update.latest_block_number, update.latest_block_hash,
             );
         }
         if unmined_op_count > 0 {
             info!(
                 "{unmined_op_count} op(s) unmined in reorg on entry point {:?} when advancing to block with number {}, hash {:?}.",
-                self.config.entry_point,
-                update.latest_block_number,
-                update.latest_block_hash,
+                self.config.entry_point, update.latest_block_number, update.latest_block_hash,
             );
         }
         let ops_seen: f64 = (mined_op_count as isize - unmined_op_count as isize) as f64;
-        self.ep_specific_metrics.ops_seen.increment(ops_seen);
+        self.ep_specific_metrics.ops_seen.increment(ops_seen as u64);
         self.ep_specific_metrics
             .unmined_operations
             .increment(unmined_op_count);
@@ -430,12 +457,23 @@ where
         } else {
             None
         };
-
         {
             let mut state = self.state.write();
             state
                 .pool
                 .forget_mined_operations_before_block(update.earliest_remembered_block_number);
+
+            // Clear pending bundles for mined transactions
+            let mined_tx_hashes: Vec<B256> = update
+                .address_updates
+                .iter()
+                .flat_map(|u| u.mined_tx_hashes.iter().copied())
+                .collect();
+            if !mined_tx_hashes.is_empty() {
+                state
+                    .pool
+                    .clear_pending_bundles_for_mined_txs(&mined_tx_hashes);
+            }
 
             // Remove throttled ops that are too old
             let mut to_remove = HashSet::new();
@@ -444,11 +482,10 @@ where
                     .pool
                     .get_operation_by_hash(*hash)
                     .map(|po| po.sim_block_number);
-                if let Some(block) = block_seen {
-                    if update.latest_block_number - block > self.config.throttled_entity_live_blocks
-                    {
-                        to_remove.insert((*hash, block));
-                    }
+                if let Some(block) = block_seen
+                    && update.latest_block_number - block > self.config.throttled_entity_live_blocks
+                {
+                    to_remove.insert((*hash, block));
                 }
             }
 
@@ -494,9 +531,6 @@ where
 
             // Check if op violates the STO-040 spec rule
             state.pool.check_multiple_roles_violation(&op)?;
-
-            // Check if op use 7702
-            state.pool.check_eip7702(&op)?;
 
             // Check if op is already known or replacing another, and if so, ensure its fees are high enough
             state
@@ -663,6 +697,7 @@ where
             da_gas_data: precheck_ret.da_gas_data,
             filter_id,
             perms,
+            sender_is_7702: precheck_ret.sender_is_7702,
         };
 
         // Check sender count in mempool. If sender has too many operations, must be staked
@@ -690,10 +725,10 @@ where
                 .filter(|e| e.address != pool_op.entity_infos.sender.address())
             {
                 let mut ops_allowed = self.reputation.get_ops_allowed(entity.address);
-                if let Some(to_replace) = &to_replace {
-                    if to_replace.entities().contains(&entity) {
-                        ops_allowed += 1;
-                    }
+                if let Some(to_replace) = &to_replace
+                    && to_replace.entities().contains(&entity)
+                {
+                    ops_allowed += 1;
                 }
 
                 if state.pool.address_count(&entity.address) >= ops_allowed as usize {
@@ -922,6 +957,25 @@ where
         self.paymaster.set_tracking(paymaster);
         self.reputation.set_tracking(reputation);
     }
+
+    fn set_pending_bundle(
+        &self,
+        tx_hash: B256,
+        sent_at_block: u64,
+        builder_address: Address,
+        uo_hashes: Vec<B256>,
+    ) {
+        self.state.write().pool.set_pending_bundle(
+            tx_hash,
+            sent_at_block,
+            builder_address,
+            uo_hashes,
+        );
+    }
+
+    fn get_operation_status(&self, hash: B256) -> Option<PoolOperationStatus> {
+        self.state.read().pool.get_operation_status(hash)
+    }
 }
 
 // Type erasure for UoPool providers
@@ -972,7 +1026,7 @@ where
 #[metrics(scope = "op_pool")]
 struct UoPoolMetricsEPSpecific {
     #[metric(describe = "the number of ops seen.")]
-    ops_seen: Gauge,
+    ops_seen: Counter,
     #[metric(describe = "the count of unmined ops.")]
     unmined_operations: Counter,
     #[metric(describe = "the count of removed ops.")]
@@ -998,29 +1052,31 @@ struct UoPoolMetrics {
 mod tests {
     use std::{collections::HashMap, str::FromStr, vec};
 
-    use alloy_primitives::{address, bytes, uint, Bytes};
-    use alloy_signer::SignerSync;
-    use alloy_signer_local::PrivateKeySigner;
+    use alloy_primitives::{Address, Bytes, Log as PrimitiveLog, LogData, address, bytes, uint};
+    use alloy_rpc_types_eth::TransactionReceipt as AlloyTransactionReceipt;
+    use alloy_serde::WithOtherFields;
+    use alloy_sol_types::SolEvent;
     use mockall::Sequence;
+    use rundler_contracts::v0_6::IEntryPoint::UserOperationEvent as UserOperationEventV06;
     use rundler_provider::{
-        DepositInfo, ExecutionResult, MockDAGasOracleSync, MockEntryPointV0_6, MockEvmProvider,
-        MockFeeEstimator, ProvidersWithEntryPoint,
+        AnyReceiptEnvelope, DepositInfo, EntryPoint, ExecutionResult, Log, MockDAGasOracleSync,
+        MockEntryPointV0_6, MockEvmProvider, MockFeeEstimator, ProvidersWithEntryPoint,
+        ReceiptWithBloom, TransactionReceipt,
     };
     use rundler_sim::{
         MockPrechecker, MockSimulator, PrecheckError, PrecheckReturn, PrecheckSettings,
         SimulationError, SimulationResult, SimulationSettings, ViolationError,
     };
     use rundler_types::{
+        EntityInfo, EntityInfos, EntityType, EntryPointVersion,
+        UserOperation as UserOperationTrait, ValidTimeRange,
         aggregator::{
             AggregatorCosts, MockSignatureAggregator, SignatureAggregator, SignatureAggregatorError,
         },
-        authorization::Eip7702Auth,
         chain::{ChainSpec, ContractRegistry},
         da::DAGasData,
         pool::{PrecheckViolation, SimulationViolation},
         v0_6::{UserOperationBuilder, UserOperationRequiredFields},
-        EntityInfo, EntityInfos, EntityType, EntryPointVersion,
-        UserOperation as UserOperationTrait, ValidTimeRange,
     };
 
     use super::*;
@@ -1150,6 +1206,8 @@ mod tests {
                 paymaster: None,
             }],
             unmined_ops: vec![],
+            preconfirmed_txns: vec![],
+            preconfirmed_block_number: None,
             entity_balance_updates: vec![BalanceUpdate {
                 address: paymaster,
                 amount: U256::from(100),
@@ -1164,6 +1222,7 @@ mod tests {
             }],
             address_updates: vec![],
             reorg_larger_than_history: false,
+            update_type: UpdateType::Confirmed,
         })
         .await;
 
@@ -1249,6 +1308,9 @@ mod tests {
                 paymaster: Some(paymaster),
             }],
             unmined_ops: vec![],
+
+            preconfirmed_txns: vec![],
+            preconfirmed_block_number: None,
             entity_balance_updates: vec![BalanceUpdate {
                 address: paymaster,
                 amount: U256::from(100),
@@ -1263,6 +1325,7 @@ mod tests {
             }],
             address_updates: vec![],
             reorg_larger_than_history: false,
+            update_type: UpdateType::Confirmed,
         })
         .await;
 
@@ -1296,8 +1359,11 @@ mod tests {
                 entrypoint: pool.config.entry_point,
                 is_addition: true,
             }],
+            preconfirmed_txns: vec![],
+            preconfirmed_block_number: None,
             address_updates: vec![],
             reorg_larger_than_history: false,
+            update_type: UpdateType::Confirmed,
         })
         .await;
 
@@ -1332,10 +1398,13 @@ mod tests {
                 paymaster: None,
             }],
             unmined_ops: vec![],
+            preconfirmed_txns: vec![],
+            preconfirmed_block_number: None,
             entity_balance_updates: vec![],
             unmined_entity_balance_updates: vec![],
             address_updates: vec![],
             reorg_larger_than_history: false,
+            update_type: UpdateType::Confirmed,
         })
         .await;
 
@@ -1375,10 +1444,13 @@ mod tests {
                 paymaster: None,
             }],
             unmined_ops: vec![],
+            preconfirmed_txns: vec![],
+            preconfirmed_block_number: None,
             entity_balance_updates: vec![],
             unmined_entity_balance_updates: vec![],
             address_updates: vec![],
             reorg_larger_than_history: false,
+            update_type: UpdateType::Confirmed,
         })
         .await;
 
@@ -1452,10 +1524,13 @@ mod tests {
                 paymaster: None,
             }],
             entity_balance_updates: vec![],
+            preconfirmed_txns: vec![],
+            preconfirmed_block_number: None,
             unmined_entity_balance_updates: vec![],
             unmined_ops: vec![],
             address_updates: vec![],
             reorg_larger_than_history: false,
+            update_type: UpdateType::Confirmed,
         })
         .await;
 
@@ -1471,6 +1546,107 @@ mod tests {
                 uos[3].clone(),
                 uos[4].clone(),
             ],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chain_partial_update() {
+        let paymaster = Address::random();
+        let paymaster_and_data = paymaster.to_vec().into();
+
+        let base_required = UserOperationRequiredFields {
+            max_fee_per_gas: 1,
+            call_gas_limit: 10,
+            verification_gas_limit: 10,
+            pre_verification_gas: 10,
+            paymaster_and_data,
+            ..Default::default()
+        };
+
+        let ops_1 = [create_op_from_required(UserOperationRequiredFields {
+            sender: Address::random(),
+            nonce: U256::from(3),
+            ..base_required.clone()
+        })];
+
+        let ops_2 = [create_op_from_required(UserOperationRequiredFields {
+            sender: Address::random(),
+            nonce: U256::from(1),
+            ..base_required.clone()
+        })];
+
+        let ops_3 = [create_op_from_required(UserOperationRequiredFields {
+            sender: Address::random(),
+            nonce: U256::from(0),
+            ..base_required.clone()
+        })];
+        let mut entrypoint = MockEntryPointV0_6::new();
+        // initial balance
+        entrypoint
+            .expect_balance_of()
+            .returning(|_, _| Ok(U256::from(1000)));
+
+        let (pool, _) = create_pool_with_entrypoint_insert_ops(
+            vec![ops_1[0].clone(), ops_2[0].clone(), ops_3[0].clone()],
+            entrypoint,
+        )
+        .await;
+
+        let preconfirmed_txns = vec![
+            (ops_1[0].op.hash(), vec![ops_1[0].op.hash()]),
+            (ops_2[0].op.hash(), vec![ops_2[0].op.hash()]),
+            (ops_3[0].op.hash(), vec![ops_3[0].op.hash()]),
+        ];
+
+        pool.on_chain_update(&ChainUpdate {
+            latest_block_number: 0,
+            latest_block_hash: B256::random(),
+            latest_block_timestamp: 0.into(),
+            earliest_remembered_block_number: 0,
+            reorg_depth: 0,
+            mined_ops: vec![],
+            unmined_ops: vec![],
+            preconfirmed_txns: vec![preconfirmed_txns[0].clone()],
+            preconfirmed_block_number: Some(1),
+            entity_balance_updates: vec![],
+            unmined_entity_balance_updates: vec![],
+            address_updates: vec![],
+            reorg_larger_than_history: false,
+            update_type: UpdateType::Preconfirmed,
+        })
+        .await;
+        check_pre_confirm_ops(
+            pool.state.read().pool.preconfirmed_uos().collect(),
+            ops_1.iter().map(|op| op.op.clone()).collect(),
+        );
+
+        // mine the first op with actual gas cost of 10
+        pool.on_chain_update(&ChainUpdate {
+            latest_block_number: 0,
+            latest_block_hash: B256::random(),
+            latest_block_timestamp: 0.into(),
+            earliest_remembered_block_number: 0,
+            reorg_depth: 0,
+            mined_ops: vec![],
+            unmined_ops: vec![],
+            preconfirmed_txns,
+            preconfirmed_block_number: Some(2),
+            entity_balance_updates: vec![],
+            unmined_entity_balance_updates: vec![],
+            address_updates: vec![],
+            reorg_larger_than_history: false,
+            update_type: UpdateType::Preconfirmed,
+        })
+        .await;
+
+        check_pre_confirm_ops(
+            pool.state.read().pool.preconfirmed_uos().collect(),
+            ops_1
+                .iter()
+                .chain(ops_2.iter())
+                .chain(ops_3.iter())
+                .map(|op| op.op.clone())
+                .collect(),
         );
     }
 
@@ -1552,7 +1728,7 @@ mod tests {
             Err(MempoolError::PrecheckViolation(
                 PrecheckViolation::SenderIsNotContractAndNoInitCode(_),
             )) => {}
-            _ => panic!("Expected InitCodeTooShort error"),
+            _ => panic!("Expected SenderIsNotContractAndNoInitCode error"),
         }
         assert_eq!(pool.best_operations(1, None).unwrap(), vec![]);
     }
@@ -1728,8 +1904,8 @@ mod tests {
             .await
             .unwrap();
 
-        let pool_op = pool.get_user_operation_by_hash(hash).unwrap();
-        assert_eq!(pool_op.uo, op.op);
+        let pool_op = pool.get_user_operation_by_hash(hash);
+        assert_eq!(pool_op.unwrap().uo, op.op);
     }
 
     #[tokio::test]
@@ -1818,10 +1994,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert!(pool
-            .add_operation(OperationOrigin::Local, ops[4].op.clone(), default_perms())
-            .await
-            .is_err());
+        assert!(
+            pool.add_operation(OperationOrigin::Local, ops[4].op.clone(), default_perms())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1966,78 +2143,6 @@ mod tests {
         pool.add_operation(OperationOrigin::Local, op.op, default_perms())
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_auth_support() {
-        let mut config = default_config();
-        let op = create_op_with_auth(
-            UserOperationRequiredFields {
-                call_gas_limit: 50_000,
-                max_fee_per_gas: 0,
-                max_priority_fee_per_gas: 0,
-                ..Default::default()
-            },
-            Eip7702Auth::default(),
-        );
-        {
-            let pool = create_pool_with_config(config.clone(), vec![op.clone()]);
-            assert!(pool
-                .add_operation(OperationOrigin::Local, op.clone().op, default_perms())
-                .await
-                .is_err());
-        }
-        {
-            config.chain_spec.eip7702_enabled = true;
-            let pool = create_pool_with_config(config.clone(), vec![op.clone()]);
-            assert!(pool
-                .add_operation(OperationOrigin::Local, op.clone().op, default_perms())
-                .await
-                .is_err());
-        }
-        {
-            config.chain_spec.eip7702_enabled = true;
-            let private_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-            let signer: PrivateKeySigner = PrivateKeySigner::from_str(private_key).unwrap();
-            let authorization = alloy_eips::eip7702::Authorization {
-                chain_id: U256::from(11011),
-                address: Address::from_str("0x1234123412341234123412341234123412341234").unwrap(),
-                nonce: 1,
-            };
-            let signature = signer
-                .sign_hash_sync(&authorization.signature_hash())
-                .unwrap();
-            let signed_authorization = authorization.into_signed(signature);
-
-            let signed_op = create_op_with_auth(
-                UserOperationRequiredFields {
-                    sender: Address::from_str("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
-                        .unwrap(),
-                    call_gas_limit: 50_000,
-                    max_fee_per_gas: 0,
-                    max_priority_fee_per_gas: 0,
-                    ..Default::default()
-                },
-                Eip7702Auth {
-                    address: signed_authorization.address,
-                    chain_id: signed_authorization.chain_id.try_into().unwrap(),
-                    nonce: signed_authorization.nonce,
-                    y_parity: signed_authorization.y_parity(),
-                    r: signed_authorization.r(),
-                    s: signed_authorization.s(),
-                },
-            );
-
-            let pool = create_pool_with_config(config.clone(), vec![signed_op.clone()]);
-            assert!(pool
-                .add_operation(
-                    OperationOrigin::Local,
-                    signed_op.clone().op,
-                    default_perms()
-                )
-                .await
-                .is_ok());
-        }
     }
 
     #[tokio::test]
@@ -2360,10 +2465,16 @@ mod tests {
     fn create_pool_with_entry_point_config(
         args: PoolConfig,
         ops: Vec<OpWithErrors>,
-        entrypoint: MockEntryPointV0_6,
+        mut entrypoint: MockEntryPointV0_6,
         mempool_config: MempoolConfig,
     ) -> UoPool<impl UoPoolProvidersT, impl ProvidersWithEntryPointT> {
-        let entrypoint = Arc::new(entrypoint);
+        entrypoint
+            .expect_address()
+            .return_const(Address::from_str("0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789").unwrap());
+
+        entrypoint
+            .expect_version()
+            .return_const(EntryPointVersion::V0_6);
 
         let mut evm = MockEvmProvider::new();
         evm.expect_get_latest_block_hash_and_number()
@@ -2372,8 +2483,21 @@ mod tests {
         let mut simulator = MockSimulator::new();
         let mut prechecker = MockPrechecker::new();
         let mut fee_estimator = MockFeeEstimator::new();
-        let entry_point = Arc::new(entrypoint);
 
+        let entry_point = Arc::new(entrypoint);
+        let entrypoint_address = *entry_point.address();
+        evm.expect_get_transaction_receipt()
+            .returning(move |txn_hash| {
+                let random = B256::random();
+
+                Ok(Some(given_receipt(
+                    entrypoint_address,
+                    vec![
+                        given_user_op_log(entrypoint_address, txn_hash),
+                        given_user_op_log(entrypoint_address, random),
+                    ],
+                )))
+            });
         let paymaster = PaymasterTracker::new(
             entry_point.clone(),
             PaymasterConfig::new(
@@ -2408,6 +2532,7 @@ mod tests {
                     Ok(PrecheckReturn {
                         da_gas_data: DAGasData::Empty,
                         required_pre_verification_gas: 100_000,
+                        sender_is_7702: false,
                     })
                 }
             });
@@ -2555,21 +2680,6 @@ mod tests {
         }
     }
 
-    fn create_op_with_auth(op: UserOperationRequiredFields, auth: Eip7702Auth) -> OpWithErrors {
-        let op = UserOperationBuilder::new(&ChainSpec::default(), op)
-            .authorization_tuple(auth)
-            .build()
-            .into();
-        OpWithErrors {
-            op,
-            valid_time_range: ValidTimeRange::default(),
-            precheck_error: None,
-            simulation_error: None,
-            staked: false,
-            trusted: false,
-        }
-    }
-
     fn create_op_with_aggregator(
         op: UserOperationRequiredFields,
         aggregator: Address,
@@ -2614,6 +2724,17 @@ mod tests {
         }
     }
 
+    fn check_pre_confirm_ops(ops: Vec<B256>, expected: Vec<UserOperationVariant>) {
+        assert_eq!(ops.len(), expected.len());
+        for expected_op in expected {
+            assert!(
+                ops.contains(&expected_op.hash()),
+                "expected op {} not found",
+                expected_op.hash()
+            );
+        }
+    }
+
     fn check_ops_unordered(actual: &[Arc<PoolOperation>], expected: &[UserOperationVariant]) {
         let actual_hashes = actual.iter().map(|op| op.uo.hash()).collect::<HashSet<_>>();
         let expected_hashes = expected.iter().map(|op| op.hash()).collect::<HashSet<_>>();
@@ -2622,5 +2743,45 @@ mod tests {
 
     fn default_perms() -> UserOperationPermissions {
         UserOperationPermissions::default()
+    }
+
+    fn given_user_op_log(entry_point: Address, uo_hash: B256) -> Log {
+        let mut log_data = LogData::default();
+        log_data.set_topics_unchecked(vec![UserOperationEventV06::SIGNATURE_HASH, uo_hash]);
+
+        Log {
+            inner: PrimitiveLog {
+                address: entry_point, // 使用入口点地址，不是 Address::ZERO
+                data: log_data,
+            },
+            ..Default::default()
+        }
+    }
+    fn given_receipt(entrypoint: Address, logs: Vec<Log>) -> TransactionReceipt {
+        let receipt = alloy_consensus::Receipt {
+            logs,
+            ..Default::default()
+        };
+
+        WithOtherFields::new(AlloyTransactionReceipt {
+            inner: AnyReceiptEnvelope {
+                inner: ReceiptWithBloom {
+                    receipt,
+                    ..Default::default()
+                },
+                r#type: 0,
+            },
+            transaction_hash: B256::ZERO,
+            transaction_index: None,
+            block_hash: None,
+            block_number: None,
+            gas_used: 0,
+            effective_gas_price: 0,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: Address::ZERO,
+            to: Some(entrypoint),
+            contract_address: None,
+        })
     }
 }

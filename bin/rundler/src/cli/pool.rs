@@ -21,8 +21,8 @@ use rundler_provider::Providers;
 use rundler_sim::MempoolConfigs;
 use rundler_task::TaskSpawnerExt;
 use rundler_types::{
-    chain::{ChainSpec, TryIntoWithSpec},
     EntryPointVersion,
+    chain::{ChainSpec, TryIntoWithSpec},
 };
 use rundler_utils::emit::{self, EVENT_CHANNEL_CAPACITY};
 use tokio::sync::broadcast;
@@ -205,7 +205,7 @@ impl PoolArgs {
         let pool_config_base = PoolConfig {
             // update per entry point
             entry_point: Address::ZERO,
-            entry_point_version: EntryPointVersion::Unspecified,
+            entry_point_version: EntryPointVersion::V0_6,
             mempool_channel_configs: HashMap::new(),
             // Base config
             chain_spec: chain_spec.clone(),
@@ -233,21 +233,12 @@ impl PoolArgs {
 
         let mut pool_configs = vec![];
 
-        if !common.disable_entry_point_v0_6 {
+        for ep in &common.enabled_entry_points {
             pool_configs.push(PoolConfig {
-                entry_point: chain_spec.entry_point_address_v0_6,
-                entry_point_version: EntryPointVersion::V0_6,
+                entry_point: chain_spec.entry_point_address(*ep),
+                entry_point_version: *ep,
                 mempool_channel_configs: mempool_channel_configs
-                    .get_for_entry_point(chain_spec.entry_point_address_v0_6),
-                ..pool_config_base.clone()
-            });
-        }
-        if !common.disable_entry_point_v0_7 {
-            pool_configs.push(PoolConfig {
-                entry_point: chain_spec.entry_point_address_v0_7,
-                entry_point_version: EntryPointVersion::V0_7,
-                mempool_channel_configs: mempool_channel_configs
-                    .get_for_entry_point(chain_spec.entry_point_address_v0_7),
+                    .get_for_entry_point(chain_spec.entry_point_address(*ep)),
                 ..pool_config_base.clone()
             });
         }

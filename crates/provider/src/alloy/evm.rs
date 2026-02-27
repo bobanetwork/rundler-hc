@@ -11,11 +11,11 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, TxHash, U64, U256};
 use alloy_provider::{ext::DebugApi, network::TransactionBuilder};
 use alloy_rpc_types_eth::{
-    state::{AccountOverride, StateOverride},
     BlockId, BlockNumberOrTag, FeeHistory, Filter, Log,
+    state::{AccountOverride, StateOverride},
 };
 use alloy_rpc_types_trace::geth::{
     GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace,
@@ -172,6 +172,14 @@ where
     }
 
     #[instrument(skip_all)]
+    async fn get_pending_block_hash_and_number(&self) -> ProviderResult<(B256, u64)> {
+        let pending_block = EvmProvider::get_block(self, BlockId::pending())
+            .await?
+            .context("pending block should exist")?;
+        Ok((pending_block.header.hash, pending_block.header.number))
+    }
+
+    #[instrument(skip_all)]
     async fn get_pending_base_fee(&self) -> ProviderResult<u128> {
         let fee_history = self.fee_history(1, BlockNumberOrTag::Latest, &[]).await?;
         Ok(fee_history
@@ -197,6 +205,16 @@ where
     #[instrument(skip_all)]
     async fn get_transaction_count(&self, address: Address) -> ProviderResult<u64> {
         Ok(self.inner.get_transaction_count(address).await?)
+    }
+
+    #[instrument(skip_all)]
+    async fn get_pending_transaction_count(&self, address: Address) -> ProviderResult<u64> {
+        Ok(self
+            .inner
+            .client()
+            .request("eth_getTransactionCount", (address, "pending"))
+            .map_resp(|count: U64| count.to::<u64>())
+            .await?)
     }
 
     #[instrument(skip_all)]

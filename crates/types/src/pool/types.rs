@@ -12,12 +12,39 @@
 // If not, see https://www.gnu.org/licenses/.
 
 use alloy_primitives::{Address, B256, U256};
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    da::DAGasData, entity::EntityInfos, Entity, EntityType, StakeInfo, UserOperation,
-    UserOperationPermissions, UserOperationVariant, ValidTimeRange,
+    Entity, EntityType, StakeInfo, UserOperation, UserOperationPermissions, UserOperationVariant,
+    ValidTimeRange, da::DAGasData, entity::EntityInfos,
 };
+
+/// Information about a pending bundle containing a user operation
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PendingBundleInfo {
+    /// The transaction hash of the pending bundle
+    pub tx_hash: B256,
+    /// The block number at which the bundle was sent
+    pub sent_at_block: u64,
+    /// The address of the builder that sent the bundle
+    pub builder_address: Address,
+}
+
+/// Extended status for a user operation in the pool
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PoolOperationStatus {
+    /// The user operation
+    pub uo: UserOperationVariant,
+    /// The entry point address for this operation
+    pub entry_point: Address,
+    /// The block number at which the operation was added to the pool
+    pub added_at_block: u64,
+    /// The valid time range for this operation
+    pub valid_time_range: ValidTimeRange,
+    /// Information about the pending bundle, if any
+    pub pending_bundle: Option<PendingBundleInfo>,
+    /// Information about the preconfirmation, if any
+    pub preconf_info: Option<PreconfInfo>,
+}
 
 /// The new head of the chain, as viewed by the pool
 #[derive(Clone, Debug, Default)]
@@ -56,41 +83,14 @@ pub struct Reputation {
 
 /// Reputation status for an entity
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(u64)]
 pub enum ReputationStatus {
     /// Entity is not throttled or banned
-    Ok,
+    Ok = 0,
     /// Entity is throttled
-    Throttled,
+    Throttled = 1,
     /// Entity is banned
-    Banned,
-}
-
-impl Serialize for ReputationStatus {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            ReputationStatus::Ok => serializer.serialize_str("ok"),
-            ReputationStatus::Throttled => serializer.serialize_str("throttled"),
-            ReputationStatus::Banned => serializer.serialize_str("banned"),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ReputationStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "ok" => Ok(ReputationStatus::Ok),
-            "throttled" => Ok(ReputationStatus::Throttled),
-            "banned" => Ok(ReputationStatus::Banned),
-            _ => Err(de::Error::custom(format!("Invalid reputation status {s}"))),
-        }
-    }
+    Banned = 2,
 }
 
 /// Stake status structure
@@ -141,6 +141,15 @@ pub struct PoolOperation {
     pub filter_id: Option<String>,
     /// Permissions for this operation
     pub perms: UserOperationPermissions,
+    /// Whether the sender is a 7702 delegation
+    pub sender_is_7702: bool,
+}
+
+/// The preconfirmed information for an user operation
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PreconfInfo {
+    /// The hash of the preconfirmed transaction
+    pub tx_hash: B256,
 }
 
 impl PoolOperation {

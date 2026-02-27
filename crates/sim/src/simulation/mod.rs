@@ -13,15 +13,15 @@
 
 use std::collections::HashSet;
 
-#[cfg(feature = "test-utils")]
+#[cfg(any(test, feature = "test-utils"))]
 use alloy_primitives::uint;
 use alloy_primitives::{Address, B256, U256};
 #[cfg(feature = "test-utils")]
 use mockall::automock;
 use rundler_provider::ProviderError;
 use rundler_types::{
-    pool::{MempoolError, SimulationViolation},
     EntityInfos, ExpectedStorage, UserOperation, ValidTimeRange,
+    pool::{MempoolError, SimulationViolation},
 };
 
 mod context;
@@ -31,7 +31,7 @@ mod mempool;
 pub use mempool::{MempoolConfig, MempoolConfigs};
 
 mod simulator;
-pub use simulator::{new_v0_6_simulator, new_v0_7_simulator, SimulatorImpl};
+pub use simulator::{SimulatorImpl, new_v0_6_simulator, new_v0_7_simulator};
 
 mod unsafe_sim;
 pub use unsafe_sim::UnsafeSimulator;
@@ -167,7 +167,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             // one day in seconds: defined in the ERC-4337 spec
-            min_unstake_delay: 84600,
+            min_unstake_delay: 86400,
             // 10^18 wei = 1 eth
             min_stake_value: uint!(1_000_000_000_000_000_000_U256),
             tracer_timeout: "10s".to_string(),

@@ -11,12 +11,13 @@
 // You should have received a copy of the GNU General Public License along with Rundler.
 // If not, see https://www.gnu.org/licenses/.
 
-use alloy_primitives::{U256, U64};
+use alloy_primitives::{U64, U256};
 use rundler_types::{
-    chain::{ChainSpec, FromWithSpec, IntoWithSpec},
-    BundlerSponsorship, UserOperationPermissions,
+    BundlerSponsorship, EntryPointVersion, UserOperationPermissions, chain::ChainSpec,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::utils::{FromRpcType, IntoRundlerType};
 
 /// User operation permissions
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -37,6 +38,9 @@ pub(crate) struct RpcUserOperationPermissions {
     /// Bundler sponsorship settings
     #[serde(default)]
     pub(crate) bundler_sponsorship: Option<RpcBundlerSponsorship>,
+    /// Disable EIP-7702
+    #[serde(default)]
+    pub(crate) eip7702_disabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -48,8 +52,12 @@ pub(crate) struct RpcBundlerSponsorship {
     pub(crate) valid_until: U64,
 }
 
-impl FromWithSpec<RpcUserOperationPermissions> for UserOperationPermissions {
-    fn from_with_spec(rpc: RpcUserOperationPermissions, chain_spec: &ChainSpec) -> Self {
+impl FromRpcType<RpcUserOperationPermissions> for UserOperationPermissions {
+    fn from_rpc_type(
+        rpc: RpcUserOperationPermissions,
+        chain_spec: &ChainSpec,
+        ep_version: EntryPointVersion,
+    ) -> Self {
         UserOperationPermissions {
             trusted: rpc.trusted,
             max_allowed_in_pool_for_sender: rpc.max_allowed_in_pool_for_sender.map(|c| c.to()),
@@ -57,13 +65,18 @@ impl FromWithSpec<RpcUserOperationPermissions> for UserOperationPermissions {
             underpriced_bundle_pct: rpc.underpriced_bundle_pct.map(|c| c.to()),
             bundler_sponsorship: rpc
                 .bundler_sponsorship
-                .map(|c| c.into_with_spec(chain_spec)),
+                .map(|c| c.into_rundler_type(chain_spec, ep_version)),
+            eip7702_disabled: rpc.eip7702_disabled.unwrap_or(false),
         }
     }
 }
 
-impl FromWithSpec<RpcBundlerSponsorship> for BundlerSponsorship {
-    fn from_with_spec(rpc: RpcBundlerSponsorship, _chain_spec: &ChainSpec) -> Self {
+impl FromRpcType<RpcBundlerSponsorship> for BundlerSponsorship {
+    fn from_rpc_type(
+        rpc: RpcBundlerSponsorship,
+        _chain_spec: &ChainSpec,
+        _ep_version: EntryPointVersion,
+    ) -> Self {
         BundlerSponsorship {
             max_cost: rpc.max_cost,
             valid_until: rpc.valid_until.to(),

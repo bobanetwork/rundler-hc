@@ -15,22 +15,21 @@ use std::{net::SocketAddr, time::Duration};
 
 use anyhow::Context;
 use futures_util::FutureExt;
-//use anyhow::bail;
-//use async_trait::async_trait;
-use http::header;
-use http::{header::CONTENT_TYPE, HeaderValue, Method};
+use http::{HeaderValue, Method, header, header::CONTENT_TYPE};
 use jsonrpsee::{
-    server::{middleware::http::ProxyGetRequestLayer, RpcServiceBuilder, ServerBuilder},
     RpcModule,
+    server::{RpcServiceBuilder, ServerBuilder, middleware::http::ProxyGetRequestLayer},
 };
 use rundler_provider::{FeeEstimator, Providers as ProvidersT};
-use rundler_sim::{EstimationSettings, GasEstimatorV0_6, GasEstimatorV0_7, PrecheckSettings};
+use rundler_sim::{EstimationSettings, GasEstimatorV0_6, GasEstimatorV0_7};
 use rundler_task::{
-    server::{format_socket_addr, HealthCheck},
     TaskSpawnerExt,
+    server::{HealthCheck, format_socket_addr},
 };
-use rundler_types::{builder::Builder as BuilderT, chain::ChainSpec, pool::Pool as PoolT};
-//use tokio_util::sync::CancellationToken;
+use rundler_types::{
+    EntryPointAbiVersion, EntryPointVersion, builder::Builder as BuilderT, chain::ChainSpec,
+    pool::Pool as PoolT,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -43,7 +42,7 @@ use crate::{
     },
     health::{HealthChecker, SystemApiServer},
     rpc_metrics::{HttpMetricMiddlewareLayer, RpcMetricsMiddlewareLayer},
-    rundler::{RundlerApi, RundlerApiServer},
+    rundler::{RundlerApi, RundlerApiServer, RundlerApiSettings},
     types::ApiNamespace,
 };
 
@@ -62,20 +61,18 @@ pub struct Args {
     pub api_namespaces: Vec<ApiNamespace>,
     /// Full node RPC URL to use.
     pub rpc_url: String,
-    /// Precheck settings.
-    pub precheck_settings: PrecheckSettings,
     /// eth_ API settings.
     pub eth_api_settings: EthApiSettings,
+    /// rundler_ API settings.
+    pub rundler_api_settings: RundlerApiSettings,
     /// Estimation settings.
     pub estimation_settings: EstimationSettings,
     /// RPC timeout.
     pub rpc_timeout: Duration,
     /// Max number of connections.
     pub max_connections: u32,
-    /// Whether to enable entry point v0.6.
-    pub entry_point_v0_6_enabled: bool,
-    /// Whether to enable entry point v0.7.
-    pub entry_point_v0_7_enabled: bool,
+    /// Enabled entry point versions
+    pub enabled_entry_points: Vec<EntryPointVersion>,
     /// What domains to use in the corsdomain
     pub corsdomain: Option<Vec<HeaderValue>>,
 }
@@ -117,62 +114,70 @@ where
 
         let mut router_builder = EntryPointRouterBuilder::default();
 
-        if self.args.entry_point_v0_6_enabled {
-            let ep = self
-                .providers
-                .ep_v0_6()
-                .clone()
-                .context("entry point v0.6 not supplied")?;
+        for ep_version in &self.args.enabled_entry_points {
+            match ep_version.abi_version() {
+                EntryPointAbiVersion::V0_6 => {
+                    let ep = self
+                        .providers
+                        .ep_v0_6()
+                        .clone()
+                        .context("entry point v0.6 not supplied")?;
 
-            router_builder = router_builder.v0_6(EntryPointRouteImpl::new(
-                ep.clone(),
-                GasEstimatorV0_6::new(
-                    self.args.chain_spec.clone(),
-                    self.providers.evm().clone(),
-                    ep.clone(),
-                    self.args.estimation_settings,
-                    self.providers.fee_estimator().clone(),
-                ),
-                UserOperationEventProviderV0_6::new(
-                    self.args.chain_spec.clone(),
-                    self.providers.evm().clone(),
-                    self.args
-                        .eth_api_settings
-                        .user_operation_event_block_distance,
-                    self.args
-                        .eth_api_settings
-                        .user_operation_event_block_distance_fallback,
-                ),
-            ));
-        }
+                    router_builder = router_builder.add_route(EntryPointRouteImpl::new(
+                        ep.clone(),
+                        GasEstimatorV0_6::new(
+                            self.args.chain_spec.clone(),
+                            self.providers.evm().clone(),
+                            ep.clone(),
+                            self.args.estimation_settings,
+                            self.providers.fee_estimator().clone(),
+                        ),
+                        UserOperationEventProviderV0_6::new(
+                            self.args.chain_spec.clone(),
+                            self.args.chain_spec.entry_point_address_v0_6,
+                            self.providers.evm().clone(),
+                            self.args
+                                .eth_api_settings
+                                .user_operation_event_block_distance,
+                            self.args
+                                .eth_api_settings
+                                .user_operation_event_block_distance_fallback,
+                        ),
+                    ));
+                }
+                EntryPointAbiVersion::V0_7 => {
+                    let ep = self
+                        .providers
+                        .ep_v0_7(*ep_version)
+                        .clone()
+                        .context(format!(
+                        "entry point abi v0.7 provider not supplied for entry point version: {:?}",
+                        ep_version
+                    ))?;
 
-        if self.args.entry_point_v0_7_enabled {
-            let ep = self
-                .providers
-                .ep_v0_7()
-                .clone()
-                .context("entry point v0.7 not supplied")?;
-
-            router_builder = router_builder.v0_7(EntryPointRouteImpl::new(
-                ep.clone(),
-                GasEstimatorV0_7::new(
-                    self.args.chain_spec.clone(),
-                    self.providers.evm().clone(),
-                    ep.clone(),
-                    self.args.estimation_settings,
-                    self.providers.fee_estimator().clone(),
-                ),
-                UserOperationEventProviderV0_7::new(
-                    self.args.chain_spec.clone(),
-                    self.providers.evm().clone(),
-                    self.args
-                        .eth_api_settings
-                        .user_operation_event_block_distance,
-                    self.args
-                        .eth_api_settings
-                        .user_operation_event_block_distance_fallback,
-                ),
-            ));
+                    router_builder = router_builder.add_route(EntryPointRouteImpl::new(
+                        ep.clone(),
+                        GasEstimatorV0_7::new(
+                            self.args.chain_spec.clone(),
+                            self.providers.evm().clone(),
+                            ep.clone(),
+                            self.args.estimation_settings,
+                            self.providers.fee_estimator().clone(),
+                        ),
+                        UserOperationEventProviderV0_7::new(
+                            self.args.chain_spec.clone(),
+                            self.args.chain_spec.entry_point_address(*ep_version),
+                            self.providers.evm().clone(),
+                            self.args
+                                .eth_api_settings
+                                .user_operation_event_block_distance,
+                            self.args
+                                .eth_api_settings
+                                .user_operation_event_block_distance_fallback,
+                        ),
+                    ));
+                }
+            }
         }
 
         // create the entry point router
@@ -302,6 +307,7 @@ where
                     self.pool.clone(),
                     fee_estimator,
                     self.providers.evm().clone(),
+                    self.args.rundler_api_settings,
                 )
                 .into_rpc(),
             )?;

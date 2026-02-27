@@ -27,22 +27,23 @@ use futures_util::Stream;
 use metrics::Histogram;
 use metrics_derive::Metrics;
 use rundler_task::{
-    server::{HealthCheck, ServerStatus},
     GracefulShutdown, TaskSpawner,
+    server::{HealthCheck, ServerStatus},
 };
 use rundler_types::{
+    EntityUpdate, EntryPointAbiVersion, UserOperation, UserOperationId, UserOperationPermissions,
+    UserOperationVariant,
     pool::{
         MempoolError, NewHead, PaymasterMetadata, Pool, PoolError, PoolOperation,
-        PoolOperationSummary, PoolResult, Reputation, ReputationStatus, StakeStatus,
+        PoolOperationStatus, PoolOperationSummary, PoolResult, Reputation, ReputationStatus,
+        StakeStatus,
     },
-    EntityUpdate, EntryPointVersion, UserOperation, UserOperationId, UserOperationPermissions,
-    UserOperationVariant,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{error, info};
 
 use crate::{
-    chain::ChainSubscriber,
+    chain::{ChainSubscriber, UpdateType},
     mempool::{Mempool, OperationOrigin},
 };
 
@@ -425,6 +426,37 @@ impl Pool for LocalPoolHandle {
             _ => Err(PoolError::UnexpectedResponse),
         }
     }
+
+    async fn notify_pending_bundle(
+        &self,
+        entry_point: Address,
+        tx_hash: B256,
+        sent_at_block: u64,
+        builder_address: Address,
+        uo_hashes: Vec<B256>,
+    ) -> PoolResult<()> {
+        let req = ServerRequestKind::NotifyPendingBundle {
+            entry_point,
+            tx_hash,
+            sent_at_block,
+            builder_address,
+            uo_hashes,
+        };
+        let resp = self.send(req).await?;
+        match resp {
+            ServerResponse::NotifyPendingBundle => Ok(()),
+            _ => Err(PoolError::UnexpectedResponse),
+        }
+    }
+
+    async fn get_op_status(&self, hash: B256) -> PoolResult<Option<PoolOperationStatus>> {
+        let req = ServerRequestKind::GetOpStatus { hash };
+        let resp = self.send(req).await?;
+        match resp {
+            ServerResponse::GetOpStatus { status } => Ok(status),
+            _ => Err(PoolError::UnexpectedResponse),
+        }
+    }
 }
 
 #[async_trait]
@@ -586,11 +618,13 @@ impl LocalPoolServerRunner {
 
     fn debug_dump_mempool(&self, entry_point: Address) -> PoolResult<Vec<PoolOperation>> {
         let mempool = self.get_pool(entry_point)?;
-        Ok(mempool
+        let mut ops = mempool
             .all_operations(usize::MAX)
             .iter()
             .map(|op| (**op).clone())
-            .collect())
+            .collect::<Vec<_>>();
+        ops.sort_by(|a, b| a.uo.id().cmp(&b.uo.id()));
+        Ok(ops)
     }
 
     fn debug_set_reputations<'a>(
@@ -625,6 +659,28 @@ impl LocalPoolServerRunner {
     ) -> PoolResult<ReputationStatus> {
         let mempool = self.get_pool(entry_point)?;
         Ok(mempool.get_reputation_status(address))
+    }
+
+    fn notify_pending_bundle(
+        &self,
+        entry_point: Address,
+        tx_hash: B256,
+        sent_at_block: u64,
+        builder_address: Address,
+        uo_hashes: Vec<B256>,
+    ) -> PoolResult<()> {
+        let mempool = self.get_pool(entry_point)?;
+        mempool.set_pending_bundle(tx_hash, sent_at_block, builder_address, uo_hashes);
+        Ok(())
+    }
+
+    fn get_op_status(&self, hash: B256) -> PoolResult<Option<PoolOperationStatus>> {
+        for mempool in self.mempools.values() {
+            if let Some(status) = mempool.get_operation_status(hash) {
+                return Ok(Some(status));
+            }
+        }
+        Ok(None)
     }
 
     fn get_pool_and_spawn<F, Fut>(
@@ -673,11 +729,14 @@ impl LocalPoolServerRunner {
                         }).collect();
                         self.task_spawner.spawn(Box::pin(async move {
                             future::join_all(update_futures).await;
-                            let _ = block_sender.send(NewHead {
-                                block_hash: chain_update.latest_block_hash,
-                                block_number: chain_update.latest_block_number,
-                                address_updates: chain_update.address_updates.clone(),
-                            });
+
+                            if chain_update.update_type == UpdateType::Confirmed {
+                                let _ = block_sender.send(NewHead {
+                                    block_hash: chain_update.latest_block_hash,
+                                    block_number: chain_update.latest_block_number,
+                                    address_updates: chain_update.address_updates.clone(),
+                                });
+                            }
                         }));
                     }
                 }
@@ -688,19 +747,16 @@ impl LocalPoolServerRunner {
                         ServerRequestKind::AddOp { entry_point, op, perms, origin } => {
                             let fut = |mempool: Arc<dyn Mempool>, response: oneshot::Sender<Result<ServerResponse, PoolError>>| async move {
                                 let resp = 'resp: {
-                                    match mempool.entry_point_version() {
-                                        EntryPointVersion::V0_6 => {
+                                    match mempool.entry_point_version().abi_version() {
+                                        EntryPointAbiVersion::V0_6 => {
                                             if !matches!(&op, UserOperationVariant::V0_6(_)){
                                                  break 'resp Err(anyhow::anyhow!("Invalid user operation version for mempool v0.6 {:?}", op.uo_type()).into());
                                             }
                                         }
-                                        EntryPointVersion::V0_7 => {
+                                        EntryPointAbiVersion::V0_7 => {
                                             if !matches!(&op, UserOperationVariant::V0_7(_)){
                                                 break 'resp Err(anyhow::anyhow!("Invalid user operation version for mempool v0.7 {:?}", op.uo_type()).into());
                                             }
-                                        }
-                                        EntryPointVersion::Unspecified => {
-                                            panic!("Found mempool with unspecified entry point version")
                                         }
                                     }
 
@@ -832,6 +888,18 @@ impl LocalPoolServerRunner {
                         ServerRequestKind::SubscribeNewHeads { to_track } => {
                             self.chain_subscriber.track_addresses(to_track);
                             Ok(ServerResponse::SubscribeNewHeads { new_heads: self.block_sender.subscribe() } )
+                        },
+                        ServerRequestKind::NotifyPendingBundle { entry_point, tx_hash, sent_at_block, builder_address, uo_hashes } => {
+                            match self.notify_pending_bundle(entry_point, tx_hash, sent_at_block, builder_address, uo_hashes) {
+                                Ok(_) => Ok(ServerResponse::NotifyPendingBundle),
+                                Err(e) => Err(e),
+                            }
+                        },
+                        ServerRequestKind::GetOpStatus { hash } => {
+                            match self.get_op_status(hash) {
+                                Ok(status) => Ok(ServerResponse::GetOpStatus { status }),
+                                Err(e) => Err(e),
+                            }
                         }
                     };
                     if let Err(e) = req.response.send(resp) {
@@ -925,6 +993,16 @@ enum ServerRequestKind {
     SubscribeNewHeads {
         to_track: Vec<Address>,
     },
+    NotifyPendingBundle {
+        entry_point: Address,
+        tx_hash: B256,
+        sent_at_block: u64,
+        builder_address: Address,
+        uo_hashes: Vec<B256>,
+    },
+    GetOpStatus {
+        hash: B256,
+    },
 }
 
 #[derive(Debug)]
@@ -977,6 +1055,10 @@ enum ServerResponse {
     SubscribeNewHeads {
         new_heads: broadcast::Receiver<NewHead>,
     },
+    NotifyPendingBundle,
+    GetOpStatus {
+        status: Option<PoolOperationStatus>,
+    },
 }
 
 #[cfg(test)]
@@ -987,7 +1069,7 @@ mod tests {
     use parking_lot::RwLock;
     use reth_tasks::TaskManager;
     use rundler_types::{
-        chain::ChainSpec, v0_6::UserOperation as UserOperationV0_6,
+        EntryPointVersion, chain::ChainSpec, v0_6::UserOperation as UserOperationV0_6,
         v0_7::UserOperation as UserOperationV0_7,
     };
 
