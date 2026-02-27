@@ -65,7 +65,7 @@ jobs:
         if: contains( ${{ matrix.target }}, 'apple')
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.5.0
+          version: v1.5.1
 
       - name: Install protobuf
         if: contains( ${{ matrix.target }}, 'apple')
