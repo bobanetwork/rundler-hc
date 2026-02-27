@@ -11,6 +11,10 @@ will be added to https://github.com/bobanetwork/aa-hc-sdk
 
 # Changelog
 
+* hc0.5.0
+
+Merges upstream 0.11.0. Code refactoring, and removal of 0.6 entrypoint leftovers.
+
 * hc0.4.0
 
 Merges upstream 0.9.0. Code refactoring. Switches HC to use v0.7 entrypoint.
