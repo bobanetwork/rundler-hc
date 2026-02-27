@@ -13,7 +13,7 @@ name: unit
 jobs:
   test:
     name: unit-tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Checkout sources
@@ -29,7 +29,7 @@ jobs:
           toolchain: 1.79.0
 
       - name: Install protobuf
-        run: sudo apt-get install -y protobuf-compiler
+        run: sudo apt update && sudo apt-get install -y protobuf-compiler
 
       - uses: Swatinem/rust-cache@v2
         with:
